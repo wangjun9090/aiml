@@ -1,40 +1,43 @@
 import pandas as pd
 
 # Define file paths
-drug_search_file = '/Workspace/Users/jwang77@optumcloud.com/data/s-learning-data/drug_search.csv'
-output_drug_behavior_file = '/Workspace/Users/jwang77@optumcloud.com/data/s-learning-data/drug_behavior.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/data/s-learning-data/behavioral_features_0901_2024_0228_2025.csv'
+drug_behavior_file = '/Workspace/Users/jwang77@optumcloud.com/data/s-learning-data/drug_behavior.csv'
+output_behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/data/s-learning-data/updated_behavioral_features_0901_2024_0228_2025.csv'
 
-# Load raw drug search data
-print(f"Loading drug search file: {drug_search_file}")
-drug_search_df = pd.read_csv(drug_search_file)
+# Step 1: Load the datasets
+print(f"Loading original behavioral features file: {behavioral_file}")
+behavioral_df = pd.read_csv(behavioral_file)
 
-# Rename columns for clarity and consistency
-drug_search_df = drug_search_df.rename(columns={
-    'Time (event_timestamp)': 'time',
-    'RxVisitor (internalUserId)': 'userId',
-    'Event Name (name)': 'eventName'
+print(f"Loading normalized drug behavior file: {drug_behavior_file}")
+drug_behavior_df = pd.read_csv(drug_behavior_file)
+
+# Step 2: Join Drug Behavior with Behavioral Data
+print("Joining drug behavior data with behavioral data...")
+# Aggregate drug behavior by userId, summing clicks across all dates
+drug_behavior_agg = drug_behavior_df.groupby('userId')[['drug_search_click', 'drug_list_build_click']].sum().reset_index()
+
+# Rename columns to match requested field names
+drug_behavior_agg = drug_behavior_agg.rename(columns={
+    'drug_search_click': 'drug_search',
+    'drug_list_build_click': 'drug_build'
 })
 
-# Transform Drug Search Data
-print("Transforming drug search data...")
-# Convert 'time' to date
-drug_search_df['date'] = pd.to_datetime(drug_search_df['time']).dt.date
+# Merge with behavioral_df
+behavioral_df = behavioral_df.merge(
+    drug_behavior_agg[['userId', 'drug_search', 'drug_build']],
+    on='userId',
+    how='left'
+)
 
-# Count events based on string contains
-drug_search_df['drug_search_click'] = drug_search_df['eventName'].str.contains('Search Drug', case=False, na=False).astype(int)
-drug_search_df['drug_list_build_click'] = drug_search_df['eventName'].str.contains('Add to Drug List|Build Your Druglist Page', case=False, na=False).astype(int)
+# Fill NaN with 0 for new columns (no drug activity = 0)
+behavioral_df['drug_search'] = behavioral_df['drug_search'].fillna(0).astype(int)
+behavioral_df['drug_build'] = behavioral_df['drug_build'].fillna(0).astype(int)
 
-# Group by date and userId, summing the counts
-drug_behavior_df = drug_search_df.groupby(['date', 'userId'])[['drug_search_click', 'drug_list_build_click']].sum().reset_index()
+# Step 3: Save the updated behavioral dataset
+print(f"Saving updated behavioral data to: {output_behavioral_file}")
+behavioral_df.to_csv(output_behavioral_file, index=False)
 
-# Ensure integer type for counts
-drug_behavior_df['drug_search_click'] = drug_behavior_df['drug_search_click'].astype(int)
-drug_behavior_df['drug_list_build_click'] = drug_behavior_df['drug_list_build_click'].astype(int)
-
-# Save the normalized drug behavior data
-print(f"Saving normalized drug behavior data to: {output_drug_behavior_file}")
-drug_behavior_df.to_csv(output_drug_behavior_file, index=False)
-
-print("Drug behavior data sample:")
-print(drug_behavior_df.head())
-print(f"Normalization complete. Rows processed: {len(drug_behavior_df)}")
+print("Updated behavioral data sample with drug features:")
+print(behavioral_df[['userId', 'drug_search', 'drug_build']].head())
+print(f"Behavioral data generation complete. Rows processed: {len(behavioral_df)}")

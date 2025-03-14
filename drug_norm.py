@@ -8,18 +8,24 @@ output_drug_behavior_file = '/Workspace/Users/jwang77@optumcloud.com/data/s-lear
 print(f"Loading drug search file: {drug_search_file}")
 drug_search_df = pd.read_csv(drug_search_file)
 
+# Rename columns for clarity and consistency
+drug_search_df = drug_search_df.rename(columns={
+    'Time (event_timestamp)': 'time',
+    'RxVisitor (internalUserId)': 'userId',
+    'Event Name (name)': 'eventName'
+})
+
 # Transform Drug Search Data
 print("Transforming drug search data...")
 # Convert 'time' to date
 drug_search_df['date'] = pd.to_datetime(drug_search_df['time']).dt.date
 
-# Count occurrences of each event type directly (no binary conversion)
-drug_search_df['drug_search_click'] = (drug_search_df['eventName'] == 'drug_search_click').astype(int)
-drug_search_df['drug_list_build_click'] = (drug_search_df['eventName'] == 'drug_list_build_click').astype(int)
+# Count events based on string contains
+drug_search_df['drug_search_click'] = drug_search_df['eventName'].str.contains('Search Drug', case=False, na=False).astype(int)
+drug_search_df['drug_list_build_click'] = drug_search_df['eventName'].str.contains('Add to Drug List|Build Your Druglist Page', case=False, na=False).astype(int)
 
-# Group by date and rxVisitor, summing the counts
-drug_behavior_df = drug_search_df.groupby(['date', 'rxVisitor'])[['drug_search_click', 'drug_list_build_click']].sum().reset_index()
-drug_behavior_df = drug_behavior_df.rename(columns={'rxVisitor': 'userId'})  # Map rxVisitor to userId
+# Group by date and userId, summing the counts
+drug_behavior_df = drug_search_df.groupby(['date', 'userId'])[['drug_search_click', 'drug_list_build_click']].sum().reset_index()
 
 # Ensure integer type for counts
 drug_behavior_df['drug_search_click'] = drug_behavior_df['drug_search_click'].astype(int)

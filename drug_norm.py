@@ -13,13 +13,17 @@ print("Transforming drug search data...")
 # Convert 'time' to date
 drug_search_df['date'] = pd.to_datetime(drug_search_df['time']).dt.date
 
-# Create binary flags for events
+# Count occurrences of each event type directly (no binary conversion)
 drug_search_df['drug_search_click'] = (drug_search_df['eventName'] == 'drug_search_click').astype(int)
 drug_search_df['drug_list_build_click'] = (drug_search_df['eventName'] == 'drug_list_build_click').astype(int)
 
-# Group by date and rxVisitor, summing the clicks
+# Group by date and rxVisitor, summing the counts
 drug_behavior_df = drug_search_df.groupby(['date', 'rxVisitor'])[['drug_search_click', 'drug_list_build_click']].sum().reset_index()
 drug_behavior_df = drug_behavior_df.rename(columns={'rxVisitor': 'userId'})  # Map rxVisitor to userId
+
+# Ensure integer type for counts
+drug_behavior_df['drug_search_click'] = drug_behavior_df['drug_search_click'].astype(int)
+drug_behavior_df['drug_list_build_click'] = drug_behavior_df['drug_list_build_click'].astype(int)
 
 # Save the normalized drug behavior data
 print(f"Saving normalized drug behavior data to: {output_drug_behavior_file}")

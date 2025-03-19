@@ -95,46 +95,36 @@
 - **Weight Design**: Balances plan strength (`ma_X`) with behavior, prioritizes `target_persona`
 - **Outcome**: 66-column dataset for persona prediction model
 - 
-Collect Raw Plan Data
-Source File: raw_plan_data.csv
+# Slide: Plan Derivation Process - Single Slide Overview
 
-Output File: raw_plan_data_with_zip.csv
+- Block 1: Collect Raw Plan Data
+  - Source: `raw_plan_data.csv`
+  - Output: `raw_plan_data_with_zip.csv`
+  - Gather plan details by ZIP and ID
 
-Gathers plan details by ZIP and ID.
+- Block 2: Define Personas
+  - Source: `raw_plan_data_with_zip.csv`, `persona_mapping.csv`
+  - Output: None (logical mapping)
+  - Map attributes to 8 personas
 
-Define Personas
-Source File: raw_plan_data_with_zip.csv, persona_mapping.csv
+- Block 3: Calculate Weights
+  - Source: `raw_plan_data_with_zip.csv`
+  - Output: `plan_weights_temp.csv`
+  - Score plans for each persona (0-1)
 
-Output File: None (logical mapping)
+- Block 4: Aggregate by ZIP and Plan ID
+  - Source: `plan_weights_temp.csv`
+  - Output: `plan_derivation_by_zip.csv`
+  - Create unique ZIP-plan weights
 
-Maps attributes to 8 personas.
+- Block 5: Integrate with Behavioral Data
+  - Source: `plan_derivation_by_zip.csv`, `updated_behavioral_features_0901_2024_0228_2025.csv`
+  - Output: `training_df.csv`
+  - Merge plan weights with behavior
 
-Calculate Weights
-Source File: raw_plan_data_with_zip.csv
-
-Output File: plan_weights_temp.csv
-
-Scores plans for each persona (0-1).
-
-Aggregate by ZIP and Plan ID
-Source File: plan_weights_temp.csv
-
-Output File: plan_derivation_by_zip.csv
-
-Creates unique ZIP-plan weights.
-
-Integrate with Behavioral Data
-Source File: plan_derivation_by_zip.csv, updated_behavioral_features_0901_2024_0228_2025.csv
-
-Output File: training_df.csv
-
-Merges plan weights with behavior.
-
-Apply in Weight Calculation
-Source File: training_df.csv
-
-Output File: final_training_dataset.csv
-
-Uses ma_X in persona weights.
+- Block 6: Apply in Weight Calculation
+  - Source: `training_df.csv`
+  - Output: `final_training_dataset.csv`
+  - Use `ma_X` in persona weights
 
 

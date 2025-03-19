@@ -94,3 +94,47 @@
 - **Data Integration**: Merges behavioral and plan data for a unified view
 - **Weight Design**: Balances plan strength (`ma_X`) with behavior, prioritizes `target_persona`
 - **Outcome**: 66-column dataset for persona prediction model
+- 
+Collect Raw Plan Data
+Source File: raw_plan_data.csv
+
+Output File: raw_plan_data_with_zip.csv
+
+Gathers plan details by ZIP and ID.
+
+Define Personas
+Source File: raw_plan_data_with_zip.csv, persona_mapping.csv
+
+Output File: None (logical mapping)
+
+Maps attributes to 8 personas.
+
+Calculate Weights
+Source File: raw_plan_data_with_zip.csv
+
+Output File: plan_weights_temp.csv
+
+Scores plans for each persona (0-1).
+
+Aggregate by ZIP and Plan ID
+Source File: plan_weights_temp.csv
+
+Output File: plan_derivation_by_zip.csv
+
+Creates unique ZIP-plan weights.
+
+Integrate with Behavioral Data
+Source File: plan_derivation_by_zip.csv, updated_behavioral_features_0901_2024_0228_2025.csv
+
+Output File: training_df.csv
+
+Merges plan weights with behavior.
+
+Apply in Weight Calculation
+Source File: training_df.csv
+
+Output File: final_training_dataset.csv
+
+Uses ma_X in persona weights.
+
+

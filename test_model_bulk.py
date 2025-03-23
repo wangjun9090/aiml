@@ -158,7 +158,7 @@ def prepare_features(behavioral_df, plan_df):
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
     weight_sum = data[weighted_features].sum(axis=1)
     for wf in weighted_features:
-        data[wf] = data[wf] / weight_sum.replace(0, 1)  # Avoid division by zero
+        data[wf] = data[wf] / weight_sum.replace(0, 1)
 
     # Final feature set
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
@@ -169,36 +169,49 @@ def prepare_features(behavioral_df, plan_df):
     # Get actual personas for comparison
     y_true = data['persona'] if 'persona' in data.columns else None
     
-    return X, y_true
+    return X, y_true, data
 
-def evaluate_batch_predictions(model, X, y_true):
-    """Evaluate batch predictions and report accuracy."""
+def evaluate_group_predictions(model, X, y_true, group_name, data_subset):
+    """Evaluate predictions for a specific data group."""
     if y_true is None:
-        print("No ground truth 'persona' column found in behavioral data. Cannot compute accuracy.")
+        print(f"No ground truth 'persona' column found for {group_name}. Skipping accuracy computation.")
         return
     
-    y_pred = model.predict(X)
-    accuracy = accuracy_score(y_true, y_pred)
-    print(f"\nOverall Prediction Accuracy: {accuracy * 100:.2f}%")
-    print(f"Total rows evaluated: {len(y_true)}")
-    print(f"Correct predictions: {sum(y_pred == y_true)}")
-    
-    print("\nDetailed Classification Report:")
-    report = classification_report(y_true, y_pred, output_dict=False)
-    print(report)
+    y_true_subset = y_true.loc[data_subset.index]
+    y_pred = model.predict(X.loc[data_subset.index])
+    accuracy = accuracy_score(y_true_subset, y_pred)
+    print(f"\n--- {group_name} ---")
+    print(f"Accuracy: {accuracy * 100:.2f}%")
+    print(f"Rows evaluated: {len(y_true_subset)}")
+    print(f"Correct predictions: {sum(y_pred == y_true_subset)}")
+    print("Classification Report:")
+    print(classification_report(y_true_subset, y_pred))
 
 def main():
-    print("Running batch prediction test on behavioral data...")
+    print("Running batch prediction test with group breakdowns...")
 
     # Load model and data
     rf_model = load_model(model_file)
     behavioral_df, plan_df = load_data(behavioral_file, plan_file)
 
     # Prepare features for all users
-    X, y_true = prepare_features(behavioral_df, plan_df)
+    X, y_true, data = prepare_features(behavioral_df, plan_df)
 
-    # Evaluate predictions
-    evaluate_batch_predictions(rf_model, X, y_true)
+    # Define groups
+    groups = {
+        "With plan_id": data['plan_id'].notna(),
+        "Without plan_id": data['plan_id'].isna(),
+        "With compared_plan_ids": data['compared_plan_ids'].notna() & (data['compared_plan_ids'] != ""),
+        "Without compared_plan_ids": data['compared_plan_ids'].isna() | (data['compared_plan_ids'] == ""),
+        "With filters": data[[f'filter_{p}' for p in persona_weights.keys()]].sum(axis=1) > 0,
+        "Without filters": data[[f'filter_{p}' for p in persona_weights.keys()]].sum(axis=1) == 0,
+        "With drug_click": data['dce_click_count'] > 0,
+        "Without drug_click": data['dce_click_count'] == 0
+    }
+
+    # Evaluate each group
+    for group_name, condition in groups.items():
+        evaluate_group_predictions(rf_model, X, y_true, group_name, data[condition])
 
 if __name__ == "__main__":
     main()

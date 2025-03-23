@@ -33,7 +33,7 @@ def load_data(behavioral_path, plan_path):
         raise
 
 def prepare_features(behavioral_df, plan_df, userid):
-    """Prepare features for a given userid in the same format as training data."""
+    """Prepare features for a given userid matching the training dataset."""
     # Filter for the specific user
     user_data = behavioral_df[behavioral_df['userid'] == userid].copy()
     if user_data.empty:
@@ -72,14 +72,14 @@ def prepare_features(behavioral_df, plan_df, userid):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # Add CSNP-specific features (consistent with training before csnp_exclusive was added)
+    # Add CSNP-specific features
     user_data['csnp_interaction'] = user_data['csnp'] * (user_data['query_csnp'] + user_data['filter_csnp'] + user_data['time_csnp_pages'])
     user_data['csnp_type_flag'] = (user_data['csnp_type'] == 'Y').astype(int)
     user_data['csnp_signal_strength'] = (user_data['query_csnp'] + user_data['filter_csnp'] + user_data['accordion_csnp'] + user_data['time_csnp_pages']).clip(upper=3)
 
     additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
 
-    # Persona weights (consistent with training)
+    # Persona weights
     persona_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
@@ -148,9 +148,9 @@ def prepare_features(behavioral_df, plan_df, userid):
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 2: behavioral_score += 0.5
             elif signal_count >= 1: behavioral_score += 0.3
-            if row['csnp_interaction'] > 0: behavioral_score += 0.3
-            if row['csnp_type_flag'] == 1: behavioral_score += 0.2
-            if row['csnp_signal_strength'] > 1: behavioral_score += 0.2
+            if row['csnp_interaction'] > 0: behavioral_score += 0.2
+            if row['csnp_type_flag'] == 1: behavioral_score += 0.15
+            if row['csnp_signal_strength'] > 1: behavioral_score += 0.15
         elif persona in ['fitness', 'hearing']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.3
@@ -173,7 +173,7 @@ def prepare_features(behavioral_df, plan_df, userid):
     # Select features and handle missing values
     X = user_data[feature_columns].fillna(0)
     
-    # Debugging: Print weight values
+    # Debugging: Print persona weights
     print("\nPersona Weights for User:")
     for persona in persona_weights.keys():
         print(f"{persona}: {user_data[f'w_{persona}'].iloc[0]:.4f}")

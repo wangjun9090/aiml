@@ -121,4 +121,103 @@ def prepare_features(behavioral_df, plan_df, userid):
         
         pages_viewed = min(row['num_pages_viewed'], 3) if pd.notna(row['num_pages_viewed']) else 0
         query_value = row[query_col] if pd.notna(row[query_col]) else 0
-        filter_value = row[filter_col] if pd.notna(row[filter_col]) else
+        filter_value = row[filter_col] if pd.notna(row[filter_col]) else 0
+        click_value = row[click_col] if click_col and pd.notna(row[click_col]) else 0
+        
+        query_coeff = k9 if persona == 'csnp' else k3
+        filter_coeff = k10 if persona == 'csnp' else k4
+        click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
+        
+        behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
+        
+        if persona == 'doctor':
+            if click_value >= 1.5: behavioral_score += 0.4
+            elif click_value >= 0.5: behavioral_score += 0.2
+        elif persona == 'drug':
+            if click_value >= 5: behavioral_score += 0.4
+            elif click_value >= 2: behavioral_score += 0.2
+        elif persona == 'dental':
+            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
+            if signal_count >= 2: behavioral_score += 0.3
+            elif signal_count >= 1: behavioral_score += 0.15
+        elif persona == 'vision':
+            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
+            if signal_count >= 2: behavioral_score += 0.45
+            elif signal_count >= 1: behavioral_score += 0.25
+        elif persona == 'csnp':
+            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
+            if signal_count >= 2: behavioral_score += 0.5
+            elif signal_count >= 1: behavioral_score += 0.3
+            if row['csnp_interaction'] > 0: behavioral_score += 0.2
+            if row['csnp_type_flag'] == 1: behavioral_score += 0.15
+            if row['csnp_signal_strength'] > 1: behavioral_score += 0.15
+        elif persona in ['fitness', 'hearing']:
+            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
+            if signal_count >= 1: behavioral_score += 0.3
+        
+        return min(base_weight + behavioral_score, 1.5 if persona == 'csnp' else 1.0)
+
+    # Calculate weights for each persona
+    for persona, info in persona_weights.items():
+        user_data[f'w_{persona}'] = user_data.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
+
+    # Normalize weights for all except csnp
+    weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
+    weight_sum = user_data[weighted_features].sum(axis=1)
+    for wf in weighted_features:
+        user_data[wf] = user_data[wf] / weight_sum.replace(0, 1)  # Avoid division by zero
+
+    # Final feature set
+    feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
+    
+    # Select features and handle missing values
+    X = user_data[feature_columns].fillna(0)
+    
+    # Get actual persona for comparison (if available)
+    actual_persona = user_data['persona'].iloc[0] if 'persona' in user_data.columns else "Unknown"
+
+    # Debugging: Print persona weights and raw data insights
+    print("\nPersona Weights for User:")
+    for persona in persona_weights.keys():
+        print(f"{persona}: {user_data[f'w_{persona}'].iloc[0]:.4f}")
+    print(f"\nActual Persona (if available): {actual_persona}")
+    print("Sample Behavioral Signals:")
+    print(f"query_dental: {user_data['query_dental'].iloc[0]}, filter_dental: {user_data['filter_dental'].iloc[0]}")
+    print(f"query_csnp: {user_data['query_csnp'].iloc[0]}, csnp_interaction: {user_data['csnp_interaction'].iloc[0]}")
+    
+    return X, actual_persona
+
+def predict_persona(model, X, actual_persona):
+    """Predict the persona using the loaded model."""
+    prediction = model.predict(X)
+    probabilities = model.predict_proba(X)[0]
+    class_names = model.classes_
+    print("\nPrediction Probabilities:")
+    for cls, prob in zip(class_names, probabilities):
+        print(f"{cls}: {prob:.4f}")
+    predicted_persona = prediction[0]
+    print(f"\nPredicted Persona: {predicted_persona}")
+    if actual_persona != "Unknown":
+        print(f"Actual Persona: {actual_persona}")
+        print(f"Correct Prediction: {predicted_persona == actual_persona}")
+    return predicted_persona
+
+def main():
+    print(f"Predicting persona for hardcoded userid: {USERID}")
+
+    # Load model and data
+    rf_model = load_model(model_file)
+    behavioral_df, plan_df = load_data(behavioral_file, plan_file)
+
+    # Prepare features
+    try:
+        X, actual_persona = prepare_features(behavioral_df, plan_df, USERID)
+    except ValueError as e:
+        print(e)
+        return
+
+    # Make prediction
+    predict_persona(rf_model, X, actual_persona)
+
+if __name__ == "__main__":
+    main()

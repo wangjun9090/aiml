@@ -67,6 +67,12 @@ raw_plan_features = [
     'ma_provider_network', 'ma_drug_coverage'
 ]
 
+# Add interaction features for csnp and vision
+training_df['csnp_interaction'] = training_df['csnp'] * (training_df['query_csnp'] + training_df['filter_csnp'] + training_df['time_csnp_pages'])
+training_df['vision_interaction'] = training_df['ma_vision'] * (training_df['query_vision'] + training_df['filter_vision'] + training_df['time_vision_pages'])
+
+additional_features = ['csnp_interaction', 'vision_interaction']
+
 # Step 7: Revised persona weight calculation with enhanced boosts
 persona_weights = {
     'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
@@ -82,17 +88,17 @@ persona_weights = {
 }
 
 k1 = 0.1   # Pages (capped at 3)
-k3 = 0.5   # Query (base value)
-k4 = 0.4   # Filter (base value)
+k3 = 0.5   # Query
+k4 = 0.4   # Filter
 k7 = 0.15  # Drug click count
 k8 = 0.25  # Provider click count
-k9 = 0.6   # NEW: Query coefficient for csnp and vision
-k10 = 0.5  # NEW: Filter coefficient for csnp and vision
+k9 = 0.6   # Query for csnp and vision
+k10 = 0.5  # Filter for csnp and vision
 
-W_CSNP_BASE = 1.0    # Base weight for csnp
-W_CSNP_HIGH = 2.0    # Increased from 1.5 when csnp_type is 'Y'
-W_DSNP_BASE = 1.0    # Base weight for dsnp
-W_DSNP_HIGH = 1.5    # Higher weight when dsnp_type is 'Y'
+W_CSNP_BASE = 1.0
+W_CSNP_HIGH = 2.0
+W_DSNP_BASE = 1.0
+W_DSNP_HIGH = 1.5
 
 def calculate_persona_weight(row, persona_info, persona):
     plan_col = persona_info['plan_col']
@@ -100,7 +106,6 @@ def calculate_persona_weight(row, persona_info, persona):
     filter_col = persona_info['filter_col']
     click_col = persona_info.get('click_col', None)
     
-    # Adjust base weight cap for csnp and vision
     weight_cap = 0.6 if persona in ['csnp', 'vision'] else 0.5
     
     if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
@@ -134,14 +139,12 @@ def calculate_persona_weight(row, persona_info, persona):
     filter_value = row[filter_col] if pd.notna(row[filter_col]) else 0
     click_value = row[click_col] if click_col and pd.notna(row[click_col]) else 0
     
-    # Use higher coefficients for csnp and vision
     query_coeff = k9 if persona in ['csnp', 'vision'] else k3
     filter_coeff = k10 if persona in ['csnp', 'vision'] else k4
     click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
     
     behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
     
-    # Enhanced non-linear boosts
     if persona == 'doctor':
         if click_value >= 1.5:
             behavioral_score += 0.4
@@ -164,11 +167,17 @@ def calculate_persona_weight(row, persona_info, persona):
             behavioral_score += 0.45
         elif signal_count >= 1:
             behavioral_score += 0.25
+        # Add boost from interaction feature
+        if 'vision_interaction' in row and row['vision_interaction'] > 0:
+            behavioral_score += 0.2
     elif persona == 'csnp':
         signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
         if signal_count >= 2:
             behavioral_score += 0.4
         elif signal_count >= 1:
+            behavioral_score += 0.2
+        # Add boost from interaction feature
+        if 'csnp_interaction' in row and row['csnp_interaction'] > 0:
             behavioral_score += 0.2
     elif persona in ['fitness', 'hearing']:
         signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
@@ -199,32 +208,34 @@ def calculate_persona_weight(row, persona_info, persona):
                  0.15 if p == 'dental' and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 1 else 
                  0.45 if p == 'vision' and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 2 else 
                  0.25 if p == 'vision' and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 1 else 
+                 0.2 if p == 'vision' and 'vision_interaction' in row and row['vision_interaction'] > 0 else
                  0.4 if p == 'csnp' and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 2 else 
                  0.2 if p == 'csnp' and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 1 else 
+                 0.2 if p == 'csnp' and 'csnp_interaction' in row and row['csnp_interaction'] > 0 else
                  0.3 if p in ['fitness', 'hearing'] and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 1 else 0)
             )
             for p, info in persona_weights.items()
             if p != row['target_persona'] and pd.notna(row[info['plan_col']])
         ]
         max_non_target = max(non_target_weights, default=0)
-        # Increase minimum weight for csnp and vision when target persona
         adjusted_weight = max(adjusted_weight, max_non_target + (0.2 if persona in ['csnp', 'vision'] else 0.15))
     
     return min(adjusted_weight, 1.0)
 
-# Calculate weights and normalize
+# Calculate weights
 for persona, info in persona_weights.items():
     training_df[f'w_{persona}'] = training_df.apply(
         lambda row: calculate_persona_weight(row, info, persona), axis=1
     )
 
-# Normalize weights to balance dominance
-weighted_features = [f'w_{persona}' for persona in persona_weights.keys()]
+# Normalize weights for all except csnp and vision
+weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona not in ['csnp', 'vision']]
 weight_sum = training_df[weighted_features].sum(axis=1)
 for wf in weighted_features:
     training_df[wf] = training_df[wf] / weight_sum.where(weight_sum > 0, 1)
 
-feature_columns = all_behavioral_features + raw_plan_features + weighted_features
+# Combine all features
+feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
 
 # Step 8: Create the final training dataset
 final_columns = ['userid', 'zip', 'plan_id', 'dsnp_type', 'csnp_type', 'state'] + feature_columns + ['target_persona']

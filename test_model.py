@@ -1,11 +1,13 @@
 import pandas as pd
 import pickle
-from sklearn.metrics import accuracy_score, classification_report
 
 # File paths
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_csnp_focus.pkl'
+
+# Hardcoded userid (replace with a test ID from your data)
+USERID = '16052055999993VDN490U04DLREL3E69SDG5HVPVUKQJC'
 
 def load_model(model_path):
     """Load the trained Random Forest model from a pickle file."""
@@ -30,22 +32,27 @@ def load_data(behavioral_path, plan_path):
         print(f"Error loading data: {e}")
         raise
 
-def prepare_features(behavioral_df, plan_df):
-    """Prepare features matching the training dataset."""
+def prepare_features(behavioral_df, plan_df, userid):
+    """Prepare features for a given userid matching the training dataset."""
+    # Filter for the specific user
+    user_data = behavioral_df[behavioral_df['userid'] == userid].copy()
+    if user_data.empty:
+        raise ValueError(f"No data found for userid: {userid}")
+
     # Merge with plan data
-    training_df = behavioral_df.merge(
+    user_data = user_data.merge(
         plan_df,
         how='left',
         on=['zip', 'plan_id'],
         suffixes=('_beh', '_plan')
     )
 
-    # Resolve state column conflict
-    if 'state_beh' in training_df.columns and 'state_plan' in training_df.columns:
-        training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
-        training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore')
+    # Resolve state column conflict if columns exist
+    if 'state_beh' in user_data.columns and 'state_plan' in user_data.columns:
+        user_data['state'] = user_data['state_beh'].fillna(user_data['state_plan'])
+        user_data = user_data.drop(columns=['state_beh', 'state_plan'], errors='ignore')
 
-    # Define feature columns (same as training)
+    # Define feature columns (same as in training)
     all_behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
         'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
@@ -66,9 +73,9 @@ def prepare_features(behavioral_df, plan_df):
     ]
 
     # Add CSNP-specific features
-    training_df['csnp_interaction'] = training_df['csnp'] * (training_df['query_csnp'] + training_df['filter_csnp'] + training_df['time_csnp_pages'])
-    training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
-    training_df['csnp_signal_strength'] = (training_df['query_csnp'] + training_df['filter_csnp'] + training_df['accordion_csnp'] + training_df['time_csnp_pages']).clip(upper=3)
+    user_data['csnp_interaction'] = user_data['csnp'] * (user_data['query_csnp'] + user_data['filter_csnp'] + user_data['time_csnp_pages'])
+    user_data['csnp_type_flag'] = (user_data['csnp_type'] == 'Y').astype(int)
+    user_data['csnp_signal_strength'] = (user_data['query_csnp'] + user_data['filter_csnp'] + user_data['accordion_csnp'] + user_data['time_csnp_pages']).clip(upper=3)
 
     additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
 
@@ -114,84 +121,4 @@ def prepare_features(behavioral_df, plan_df):
         
         pages_viewed = min(row['num_pages_viewed'], 3) if pd.notna(row['num_pages_viewed']) else 0
         query_value = row[query_col] if pd.notna(row[query_col]) else 0
-        filter_value = row[filter_col] if pd.notna(row[filter_col]) else 0
-        click_value = row[click_col] if click_col and pd.notna(row[click_col]) else 0
-        
-        query_coeff = k9 if persona == 'csnp' else k3
-        filter_coeff = k10 if persona == 'csnp' else k4
-        click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
-        
-        behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
-        
-        if persona == 'doctor':
-            if click_value >= 1.5: behavioral_score += 0.4
-            elif click_value >= 0.5: behavioral_score += 0.2
-        elif persona == 'drug':
-            if click_value >= 5: behavioral_score += 0.4
-            elif click_value >= 2: behavioral_score += 0.2
-        elif persona == 'dental':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.3
-            elif signal_count >= 1: behavioral_score += 0.15
-        elif persona == 'vision':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.45
-            elif signal_count >= 1: behavioral_score += 0.25
-        elif persona == 'csnp':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.5
-            elif signal_count >= 1: behavioral_score += 0.3
-            if row['csnp_interaction'] > 0: behavioral_score += 0.3
-            if row['csnp_type_flag'] == 1: behavioral_score += 0.2
-            if row['csnp_signal_strength'] > 1: behavioral_score += 0.2
-        elif persona in ['fitness', 'hearing']:
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 1: behavioral_score += 0.3
-        
-        return min(base_weight + behavioral_score, 1.5 if persona == 'csnp' else 1.0)
-
-    # Calculate weights
-    for persona, info in persona_weights.items():
-        training_df[f'w_{persona}'] = training_df.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
-
-    # Normalize weights for all except csnp
-    weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
-    weight_sum = training_df[weighted_features].sum(axis=1)
-    for wf in weighted_features:
-        training_df[wf] = training_df[wf] / weight_sum.where(weight_sum > 0, 1)
-
-    # Final feature set
-    feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
-    
-    # Select features and target
-    X = training_df[feature_columns].fillna(0)
-    y = training_df['persona']  # Ground truth
-
-    return X, y
-
-def evaluate_model(model, X, y):
-    """Evaluate model performance."""
-    y_pred = model.predict(X)
-    accuracy = accuracy_score(y, y_pred)
-    print(f"\nOverall Accuracy: {accuracy * 100:.2f}%")
-    print(f"Total rows evaluated: {len(y)}")
-    print(f"Correct predictions: {sum(y_pred == y)}")
-    
-    print("\nDetailed Classification Report:")
-    print(classification_report(y, y_pred))
-
-def main():
-    print("Evaluating Random Forest model performance on full feature set...")
-
-    # Load model and data
-    rf_model = load_model(model_file)
-    behavioral_df, plan_df = load_data(behavioral_file, plan_file)
-
-    # Prepare features and ground truth
-    X, y = prepare_features(behavioral_df, plan_df)
-
-    # Evaluate model
-    evaluate_model(rf_model, X, y)
-
-if __name__ == "__main__":
-    main()
+        filter_value = row[filter_col] if pd.notna(row[filter_col]) else

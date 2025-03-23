@@ -30,8 +30,8 @@ def load_data(behavioral_path, plan_path):
         print(f"Error loading data: {e}")
         raise
 
-def prepare_features(behavioral_df, plan_df):
-    """Prepare features for all users matching the training dataset."""
+def prepare_features(behavioral_df, plan_df, disable_component=None, persona_to_disable=None):
+    """Prepare features with optional disabling of weight components."""
     # Merge with plan data
     data = behavioral_df.merge(
         plan_df,
@@ -89,7 +89,7 @@ def prepare_features(behavioral_df, plan_df):
     k1, k3, k4, k7, k8, k9, k10 = 0.1, 0.5, 0.4, 0.15, 0.25, 0.8, 0.7
     W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.0, 3.0, 1.0, 1.5
 
-    def calculate_persona_weight(row, persona_info, persona):
+    def calculate_persona_weight(row, persona_info, persona, disable_component=None):
         plan_col = persona_info['plan_col']
         query_col = persona_info['query_col']
         filter_col = persona_info['filter_col']
@@ -97,7 +97,10 @@ def prepare_features(behavioral_df, plan_df):
         
         weight_cap = 0.7 if persona == 'csnp' else 0.5
         
-        if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
+        # Base weight from plan data
+        if disable_component == 'plan_col' and persona == persona_to_disable:
+            base_weight = 0
+        elif pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
             base_weight = min(row[plan_col], weight_cap)
             if persona == 'csnp' and row['csnp_type'] == 'Y':
                 base_weight *= W_CSNP_HIGH
@@ -112,10 +115,11 @@ def prepare_features(behavioral_df, plan_df):
         else:
             base_weight = 0
         
+        # Behavioral components
         pages_viewed = min(row['num_pages_viewed'], 3) if pd.notna(row['num_pages_viewed']) else 0
-        query_value = row[query_col] if pd.notna(row[query_col]) else 0
-        filter_value = row[filter_col] if pd.notna(row[filter_col]) else 0
-        click_value = row[click_col] if click_col and pd.notna(row[click_col]) else 0
+        query_value = 0 if disable_component == 'query_col' and persona == persona_to_disable else row[query_col] if pd.notna(row[query_col]) else 0
+        filter_value = 0 if disable_component == 'filter_col' and persona == persona_to_disable else row[filter_col] if pd.notna(row[filter_col]) else 0
+        click_value = 0 if disable_component == 'click_col' and persona == persona_to_disable and click_col else row[click_col] if click_col and pd.notna(row[click_col]) else 0
         
         query_coeff = k9 if persona == 'csnp' else k3
         filter_coeff = k10 if persona == 'csnp' else k4
@@ -150,9 +154,12 @@ def prepare_features(behavioral_df, plan_df):
         
         return min(base_weight + behavioral_score, 1.5 if persona == 'csnp' else 1.0)
 
-    # Calculate weights for each persona
+    # Calculate weights for each persona with optional disabling
     for persona, info in persona_weights.items():
-        data[f'w_{persona}'] = data.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
+        data[f'w_{persona}'] = data.apply(
+            lambda row: calculate_persona_weight(row, info, persona, disable_component=disable_component if persona_to_disable == persona else None),
+            axis=1
+        )
 
     # Normalize weights for all except csnp
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
@@ -169,49 +176,99 @@ def prepare_features(behavioral_df, plan_df):
     # Get actual personas for comparison
     y_true = data['persona'] if 'persona' in data.columns else None
     
-    return X, y_true, data
+    return X, y_true
 
-def evaluate_group_predictions(model, X, y_true, group_name, data_subset):
-    """Evaluate predictions for a specific data group."""
+def evaluate_predictions(model, X, y_true, test_name):
+    """Evaluate predictions and report accuracy."""
     if y_true is None:
-        print(f"No ground truth 'persona' column found for {group_name}. Skipping accuracy computation.")
-        return
+        print(f"No ground truth 'persona' column found for {test_name}. Skipping accuracy computation.")
+        return None, None, None
     
-    y_true_subset = y_true.loc[data_subset.index]
-    y_pred = model.predict(X.loc[data_subset.index])
-    accuracy = accuracy_score(y_true_subset, y_pred)
-    print(f"\n--- {group_name} ---")
-    print(f"Accuracy: {accuracy * 100:.2f}%")
-    print(f"Rows evaluated: {len(y_true_subset)}")
-    print(f"Correct predictions: {sum(y_pred == y_true_subset)}")
+    y_pred = model.predict(X)
+    accuracy = accuracy_score(y_true, y_pred)
+    report = classification_report(y_true, y_pred, output_dict=True)
+    print(f"\n--- {test_name} ---")
+    print(f"Overall Accuracy: {accuracy * 100:.2f}%")
+    print(f"Rows evaluated: {len(y_true)}")
+    print(f"Correct predictions: {sum(y_pred == y_true)}")
     print("Classification Report:")
-    print(classification_report(y_true_subset, y_pred))
+    print(classification_report(y_true, y_pred))
+    return accuracy, report, y_pred
+
+def analyze_weight_components(model, X_baseline, y_true, persona_weights):
+    """Analyze the impact of each weight component by persona."""
+    # Baseline evaluation (full weights)
+    baseline_accuracy, baseline_report, _ = evaluate_predictions(model, X_baseline, y_true, "Baseline (Full Weights)")
+    
+    if baseline_accuracy is None:
+        return
+
+    # Components to test
+    components = ['plan_col', 'query_col', 'filter_col', 'click_col']
+    
+    # Store results
+    results = {persona: {} for persona in persona_weights.keys()}
+    
+    # Evaluate each persona with each component disabled
+    for persona in persona_weights.keys():
+        print(f"\nAnalyzing Weight Components for Persona: {persona}")
+        for component in components:
+            # Skip click_col for personas without it
+            if component == 'click_col' and 'click_col' not in persona_weights[persona]:
+                continue
+            
+            X, y_true = prepare_features(behavioral_df, plan_df, disable_component=component, persona_to_disable=persona)
+            accuracy, report, _ = evaluate_predictions(model, X, y_true, f"Disabled {component} for {persona}")
+            
+            if accuracy is not None:
+                accuracy_drop = baseline_accuracy - accuracy
+                persona_precision_drop = baseline_report[persona]['precision'] - report[persona]['precision'] if persona in report else 0
+                persona_recall_drop = baseline_report[persona]['recall'] - report[persona]['recall'] if persona in report else 0
+                results[persona][component] = {
+                    'accuracy_drop': accuracy_drop * 100,
+                    'precision_drop': persona_precision_drop,
+                    'recall_drop': persona_recall_drop
+                }
+    
+    # Summarize key factors
+    print("\n--- Summary of Key Weight Components ---")
+    for persona, comp_results in results.items():
+        print(f"\nPersona: {persona}")
+        for comp, metrics in comp_results.items():
+            print(f"  {comp}:")
+            print(f"    Overall Accuracy Drop: {metrics['accuracy_drop']:.2f}%")
+            print(f"    Precision Drop: {metrics['precision_drop']:.2f}")
+            print(f"    Recall Drop: {metrics['recall_drop']:.2f}")
+        # Identify most impactful component
+        if comp_results:
+            key_component = max(comp_results, key=lambda c: comp_results[c]['accuracy_drop'])
+            print(f"  Most Impactful Component: {key_component} (Accuracy Drop: {comp_results[key_component]['accuracy_drop']:.2f}%)")
 
 def main():
-    print("Running batch prediction test with group breakdowns...")
+    global behavioral_df, plan_df  # Make these available globally for prepare_features
+    print("Analyzing weight components impact on accuracy...")
 
     # Load model and data
     rf_model = load_model(model_file)
     behavioral_df, plan_df = load_data(behavioral_file, plan_file)
 
-    # Prepare features for all users
-    X, y_true, data = prepare_features(behavioral_df, plan_df)
+    # Prepare baseline features
+    X_baseline, y_true = prepare_features(behavioral_df, plan_df)
 
-    # Define groups
-    groups = {
-        "With plan_id": data['plan_id'].notna(),
-        "Without plan_id": data['plan_id'].isna(),
-        "With compared_plan_ids": data['compared_plan_ids'].notna() & (data['compared_plan_ids'] != ""),
-        "Without compared_plan_ids": data['compared_plan_ids'].isna() | (data['compared_plan_ids'] == ""),
-        "With filters": data[[f'filter_{p}' for p in persona_weights.keys()]].sum(axis=1) > 0,
-        "Without filters": data[[f'filter_{p}' for p in persona_weights.keys()]].sum(axis=1) == 0,
-        "With drug_click": data['dce_click_count'] > 0,
-        "Without drug_click": data['dce_click_count'] == 0
+    # Analyze weight components
+    persona_weights = {
+        'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
+        'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
+        'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'},
+        'dental': {'plan_col': 'ma_dental_benefit', 'query_col': 'query_dental', 'filter_col': 'filter_dental'},
+        'otc': {'plan_col': 'ma_otc', 'query_col': 'query_otc', 'filter_col': 'filter_otc'},
+        'transportation': {'plan_col': 'ma_transportation', 'query_col': 'query_transportation', 'filter_col': 'filter_transportation'},
+        'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp'},
+        'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp'},
+        'fitness': {'plan_col': 'ma_transportation', 'query_col': 'query_transportation', 'filter_col': 'filter_transportation'},
+        'hearing': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'}
     }
-
-    # Evaluate each group
-    for group_name, condition in groups.items():
-        evaluate_group_predictions(rf_model, X, y_true, group_name, data[condition])
+    analyze_weight_components(rf_model, X_baseline, y_true, persona_weights)
 
 if __name__ == "__main__":
     main()

@@ -4,10 +4,10 @@ import pickle
 # File paths (adjust as needed)
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/models/rf_model_csnp_focus.pkl'
+model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_csnp_focus.pkl'
 
-# Hardcoded userid (replace 'user123' with your desired userid)
-USERID = 'user123'
+# Hardcoded userid
+USERID = '16052055999993VDN490U04DLREL3E69SDG5HVPVUKQJC'
 
 def load_model(model_path):
     """Load the trained Random Forest model from a pickle file."""
@@ -47,9 +47,10 @@ def prepare_features(behavioral_df, plan_df, userid):
         suffixes=('_beh', '_plan')
     )
 
-    # Resolve state column conflict
-    user_data['state'] = user_data['state_beh'].fillna(user_data['state_plan'])
-    user_data = user_data.drop(columns=['state_beh', 'state_plan'], errors='ignore')
+    # Resolve state column conflict if columns exist
+    if 'state_beh' in user_data.columns and 'state_plan' in user_data.columns:
+        user_data['state'] = user_data['state_beh'].fillna(user_data['state_plan'])
+        user_data = user_data.drop(columns=['state_beh', 'state_plan'], errors='ignore')
 
     # Define feature columns (same as in training)
     all_behavioral_features = [
@@ -71,13 +72,12 @@ def prepare_features(behavioral_df, plan_df, userid):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # Add CSNP-specific features (consistent with training)
+    # Add CSNP-specific features (consistent with training before csnp_exclusive was added)
     user_data['csnp_interaction'] = user_data['csnp'] * (user_data['query_csnp'] + user_data['filter_csnp'] + user_data['time_csnp_pages'])
     user_data['csnp_type_flag'] = (user_data['csnp_type'] == 'Y').astype(int)
     user_data['csnp_signal_strength'] = (user_data['query_csnp'] + user_data['filter_csnp'] + user_data['accordion_csnp'] + user_data['time_csnp_pages']).clip(upper=3)
-    user_data['csnp_exclusive'] = ((user_data['csnp_type'] == 'Y') & (user_data['dsnp_type'] != 'Y')).astype(int)
 
-    additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength', 'csnp_exclusive']
+    additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
 
     # Persona weights (consistent with training)
     persona_weights = {
@@ -151,7 +151,6 @@ def prepare_features(behavioral_df, plan_df, userid):
             if row['csnp_interaction'] > 0: behavioral_score += 0.3
             if row['csnp_type_flag'] == 1: behavioral_score += 0.2
             if row['csnp_signal_strength'] > 1: behavioral_score += 0.2
-            if row['csnp_exclusive'] == 1: behavioral_score += 0.25
         elif persona in ['fitness', 'hearing']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.3
@@ -174,11 +173,21 @@ def prepare_features(behavioral_df, plan_df, userid):
     # Select features and handle missing values
     X = user_data[feature_columns].fillna(0)
     
+    # Debugging: Print weight values
+    print("\nPersona Weights for User:")
+    for persona in persona_weights.keys():
+        print(f"{persona}: {user_data[f'w_{persona}'].iloc[0]:.4f}")
+    
     return X
 
 def predict_persona(model, X):
     """Predict the persona using the loaded model."""
     prediction = model.predict(X)
+    probabilities = model.predict_proba(X)[0]
+    class_names = model.classes_
+    print("\nPrediction Probabilities:")
+    for cls, prob in zip(class_names, probabilities):
+        print(f"{cls}: {prob:.4f}")
     return prediction[0]
 
 def main():

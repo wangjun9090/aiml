@@ -1,11 +1,13 @@
 import pandas as pd
 import pickle
-import sys
 
 # File paths (adjust as needed)
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/models/rf_model_csnp_focus.pkl'
+
+# Hardcoded userid (replace 'user123' with your desired userid)
+USERID = 'user123'
 
 def load_model(model_path):
     """Load the trained Random Forest model from a pickle file."""
@@ -115,7 +117,7 @@ def prepare_features(behavioral_df, plan_df, userid):
                 if row['csnp_signal_strength'] > 1:
                     base_weight *= 0.8
         else:
-            base_weight = 0  # Simplified for scoring (no compared_plan_ids handling)
+            base_weight = 0
         
         pages_viewed = min(row['num_pages_viewed'], 3) if pd.notna(row['num_pages_viewed']) else 0
         query_value = row[query_col] if pd.notna(row[query_col]) else 0
@@ -160,7 +162,7 @@ def prepare_features(behavioral_df, plan_df, userid):
     for persona, info in persona_weights.items():
         user_data[f'w_{persona}'] = user_data.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
 
-    # Normalize weights for all except csnp (consistent with training)
+    # Normalize weights for all except csnp
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
     weight_sum = user_data[weighted_features].sum(axis=1)
     for wf in weighted_features:
@@ -177,16 +179,10 @@ def prepare_features(behavioral_df, plan_df, userid):
 def predict_persona(model, X):
     """Predict the persona using the loaded model."""
     prediction = model.predict(X)
-    return prediction[0]  # Return the first (and only) prediction
+    return prediction[0]
 
 def main():
-    # Check if userid is provided as command-line argument
-    if len(sys.argv) != 2:
-        print("Usage: python score.py <userid>")
-        sys.exit(1)
-    
-    userid = sys.argv[1]
-    print(f"Predicting persona for userid: {userid}")
+    print(f"Predicting persona for hardcoded userid: {USERID}")
 
     # Load model and data
     rf_model = load_model(model_file)
@@ -194,10 +190,10 @@ def main():
 
     # Prepare features
     try:
-        X = prepare_features(behavioral_df, plan_df, userid)
+        X = prepare_features(behavioral_df, plan_df, USERID)
     except ValueError as e:
         print(e)
-        sys.exit(1)
+        return
 
     # Make prediction
     predicted_persona = predict_persona(rf_model, X)

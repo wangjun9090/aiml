@@ -1,16 +1,18 @@
 import pandas as pd
+import numpy as np
 import pickle
 
-# File paths (adjust as needed)
+# File paths (update these for your environment)
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_csnp_focus.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/output/scored_results.csv'
 
-# Hardcoded userid
-USERID = '16052055999993VDN490U04DLREL3E69SDG5HVPVUKQJC'
+# Hardcode userid for testing (replace with your test userid, e.g., '12345')
+TEST_USERID = '12345'  # Change this to your desired userid for testing; set to None for full dataset
 
 def load_model(model_path):
-    """Load the trained Random Forest model from a pickle file."""
+    """Load the trained model from a pickle file."""
     try:
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
@@ -20,39 +22,40 @@ def load_model(model_path):
         print(f"Error loading model: {e}")
         raise
 
-def load_data(behavioral_path, plan_path):
-    """Load behavioral and plan data."""
+def load_data(behavioral_path, plan_path, test_userid=None):
+    """Load behavioral and plan data, optionally filter by test_userid."""
     try:
         behavioral_df = pd.read_csv(behavioral_path)
         plan_df = pd.read_csv(plan_path)
-        print(f"Behavioral data loaded: {len(behavioral_df)} rows")
+        
+        if test_userid is not None:
+            behavioral_df = behavioral_df[behavioral_df['userid'] == test_userid]
+            print(f"Filtered behavioral data to test_userid '{test_userid}': {len(behavioral_df)} rows")
+        else:
+            print(f"Behavioral data loaded (full dataset): {len(behavioral_df)} rows")
+        
         print(f"Plan data loaded: {len(plan_df)} rows")
         return behavioral_df, plan_df
     except Exception as e:
         print(f"Error loading data: {e}")
         raise
 
-def prepare_features(behavioral_df, plan_df, userid):
-    """Prepare features for a given userid matching the training dataset."""
-    # Filter for the specific user
-    user_data = behavioral_df[behavioral_df['userid'] == userid].copy()
-    if user_data.empty:
-        raise ValueError(f"No data found for userid: {userid}")
-
-    # Merge with plan data
-    user_data = user_data.merge(
-        plan_df,
+def prepare_features(behavioral_df, plan_df):
+    """Prepare features and assign quality levels."""
+    # Merge data
+    df = behavioral_df.merge(
+        plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
         on=['zip', 'plan_id'],
         suffixes=('_beh', '_plan')
     )
+    print(f"Rows after merge: {len(df)}")
 
-    # Resolve state column conflict if columns exist
-    if 'state_beh' in user_data.columns and 'state_plan' in user_data.columns:
-        user_data['state'] = user_data['state_beh'].fillna(user_data['state_plan'])
-        user_data = user_data.drop(columns=['state_beh', 'state_plan'], errors='ignore')
+    # Resolve state column conflict
+    df['state'] = df['state_beh'].fillna(df['state_plan'])
+    df = df.drop(columns=['state_beh', 'state_plan'], errors='ignore')
 
-    # Define feature columns (same as in training)
+    # Define feature sets
     all_behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
         'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
@@ -72,14 +75,20 @@ def prepare_features(behavioral_df, plan_df, userid):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # Add CSNP-specific features
-    user_data['csnp_interaction'] = user_data['csnp'] * (user_data['query_csnp'] + user_data['filter_csnp'] + user_data['time_csnp_pages'])
-    user_data['csnp_type_flag'] = (user_data['csnp_type'] == 'Y').astype(int)
-    user_data['csnp_signal_strength'] = (user_data['query_csnp'] + user_data['filter_csnp'] + user_data['accordion_csnp'] + user_data['time_csnp_pages']).clip(upper=3)
+    # CSNP-specific features
+    df['csnp_interaction'] = df['csnp'].fillna(0) * (
+        df['query_csnp'].fillna(0) + df['filter_csnp'].fillna(0) + 
+        df['time_csnp_pages'].fillna(0) + df['accordion_csnp'].fillna(0)
+    ) * 2
+    df['csnp_type_flag'] = (df['csnp_type'] == 'Y').astype(int)
+    df['csnp_signal_strength'] = (
+        df['query_csnp'].fillna(0) + df['filter_csnp'].fillna(0) + 
+        df['accordion_csnp'].fillna(0) + df['time_csnp_pages'].fillna(0)
+    ).clip(upper=5) * 1.5
 
     additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
 
-    # Persona weights
+    # Persona weights setup
     persona_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
@@ -93,7 +102,8 @@ def prepare_features(behavioral_df, plan_df, userid):
         'hearing': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'}
     }
 
-    k1, k3, k4, k7, k8, k9, k10 = 0.1, 0.5, 0.4, 0.15, 0.25, 0.8, 0.7
+    k1, k3, k4, k7, k8 = 0.1, 0.5, 0.4, 0.15, 0.25
+    k9, k10 = 1.0, 0.9
     W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.0, 3.0, 1.0, 1.5
 
     def calculate_persona_weight(row, persona_info, persona):
@@ -102,20 +112,29 @@ def prepare_features(behavioral_df, plan_df, userid):
         filter_col = persona_info['filter_col']
         click_col = persona_info.get('click_col', None)
         
-        weight_cap = 0.7 if persona == 'csnp' else 0.5
-        
         if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
-            base_weight = min(row[plan_col], weight_cap)
-            if persona == 'csnp' and row['csnp_type'] == 'Y':
+            base_weight = min(row[plan_col], 0.7 if persona == 'csnp' else 0.5)
+            if persona == 'csnp' and 'csnp_type' in row and row['csnp_type'] == 'Y':
                 base_weight *= W_CSNP_HIGH
             elif persona == 'csnp':
                 base_weight *= W_CSNP_BASE
-            elif persona == 'dsnp' and row['dsnp_type'] == 'Y':
+            elif persona == 'dsnp' and 'dsnp_type' in row and row['dsnp_type'] == 'Y':
                 base_weight *= W_DSNP_HIGH
             elif persona == 'dsnp':
                 base_weight *= W_DSNP_BASE
-                if row['csnp_signal_strength'] > 1:
-                    base_weight *= 0.8
+        elif pd.isna(row['plan_id']) and pd.notna(row['compared_plan_ids']) and isinstance(row['compared_plan_ids'], str) and row['num_plans_compared'] > 0:
+            compared_ids = row['compared_plan_ids'].split(',')
+            compared_plans = plan_df[plan_df['plan_id'].isin(compared_ids) & (plan_df['zip'] == row['zip'])]
+            if not compared_plans.empty:
+                base_weight = min(compared_plans[plan_col].mean(), 0.7 if persona == 'csnp' else 0.5)
+                if persona == 'csnp':
+                    csnp_type_y_ratio = (compared_plans['csnp_type'] == 'Y').mean()
+                    base_weight *= (W_CSNP_BASE + (W_CSNP_HIGH - W_CSNP_BASE) * csnp_type_y_ratio)
+                elif persona == 'dsnp':
+                    dsnp_type_y_ratio = (compared_plans['dsnp_type'] == 'Y').mean()
+                    base_weight *= (W_DSNP_BASE + (W_DSNP_HIGH - W_DSNP_BASE) * dsnp_type_y_ratio)
+            else:
+                base_weight = 0
         else:
             base_weight = 0
         
@@ -142,71 +161,145 @@ def prepare_features(behavioral_df, plan_df, userid):
             elif signal_count >= 1: behavioral_score += 0.15
         elif persona == 'vision':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.45
-            elif signal_count >= 1: behavioral_score += 0.25
+            if signal_count >= 1: behavioral_score += 0.35
         elif persona == 'csnp':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.5
-            elif signal_count >= 1: behavioral_score += 0.3
-            if row['csnp_interaction'] > 0: behavioral_score += 0.2
-            if row['csnp_type_flag'] == 1: behavioral_score += 0.15
-            if row['csnp_signal_strength'] > 1: behavioral_score += 0.15
+            if signal_count >= 2: behavioral_score += 0.6
+            elif signal_count >= 1: behavioral_score += 0.5
+            if row['csnp_interaction'] > 0: behavioral_score += 0.3
+            if row['csnp_type_flag'] == 1: behavioral_score += 0.2
         elif persona in ['fitness', 'hearing']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.3
         
-        return min(base_weight + behavioral_score, 1.5 if persona == 'csnp' else 1.0)
+        adjusted_weight = base_weight + behavioral_score
+        max_non_target = 0
+        if 'persona' in row and persona == row['persona']:
+            non_target_weights = [
+                min(row[info['plan_col']], 0.5) * (
+                    W_CSNP_HIGH if p == 'csnp' and 'csnp_type' in row and row['csnp_type'] == 'Y' else
+                    W_CSNP_BASE if p == 'csnp' else
+                    W_DSNP_HIGH if p == 'dsnp' and 'dsnp_type' in row and row['dsnp_type'] == 'Y' else
+                    W_DSNP_BASE if p == 'dsnp' else 1.0
+                ) + (
+                    k3 * (row[info['query_col']] if pd.notna(row[info['query_col']]) else 0) +
+                    k4 * (row[info['filter_col']] if pd.notna(row[info['filter_col']]) else 0) +
+                    k1 * pages_viewed +
+                    (k8 if p == 'doctor' else k7 if p == 'drug' else 0) * 
+                    (row[info.get('click_col')] if 'click_col' in info and pd.notna(row[info.get('click_col')]) else 0) +
+                    (0.4 if p == 'doctor' and row[info.get('click_col', 'pro_click_count')] >= 1.5 else 
+                     0.2 if p == 'doctor' and row[info.get('click_col', 'pro_click_count')] >= 0.5 else 
+                     0.4 if p == 'drug' and row[info.get('click_col', 'dce_click_count')] >= 5 else 
+                     0.2 if p == 'drug' and row[info.get('click_col', 'dce_click_count')] >= 2 else 
+                     0.3 if p == 'dental' and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 2 else 
+                     0.15 if p == 'dental' and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 1 else 
+                     0.35 if p == 'vision' and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 1 else 
+                     0.3 if p in ['csnp', 'fitness', 'hearing'] and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 1 else 0)
+                )
+                for p, info in persona_weights.items()
+                if p != row['persona'] and pd.notna(row[info['plan_col']])
+            ]
+            max_non_target = max(non_target_weights, default=0)
+            adjusted_weight = max(adjusted_weight, max_non_target + 0.15)
+        
+        return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)
 
-    # Calculate weights for each persona
+    # Calculate weights
     for persona, info in persona_weights.items():
-        user_data[f'w_{persona}'] = user_data.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
+        df[f'w_{persona}'] = df.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
 
-    # Normalize weights for all except csnp
+    # Normalize weights, excluding csnp
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
-    weight_sum = user_data[weighted_features].sum(axis=1)
+    weight_sum = df[weighted_features].sum(axis=1)
     for wf in weighted_features:
-        user_data[wf] = user_data[wf] / weight_sum.where(weight_sum > 0, 1)
+        df[wf] = df[wf] / weight_sum.where(weight_sum > 0, 1)
 
     # Final feature set
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
     
-    # Select features and handle missing values
-    X = user_data[feature_columns].fillna(0)
-    
-    # Debugging: Print persona weights
-    print("\nPersona Weights for User:")
-    for persona in persona_weights.keys():
-        print(f"{persona}: {user_data[f'w_{persona}'].iloc[0]:.4f}")
-    
-    return X
+    # Prepare features and metadata
+    X = df[feature_columns].fillna(0)
+    metadata = df[['userid', 'zip', 'plan_id']]
 
-def predict_persona(model, X):
-    """Predict the persona using the loaded model."""
-    prediction = model.predict(X)
-    probabilities = model.predict_proba(X)[0]
-    class_names = model.classes_
-    print("\nPrediction Probabilities:")
-    for cls, prob in zip(class_names, probabilities):
-        print(f"{cls}: {prob:.4f}")
-    return prediction[0]
+    # Assign quality levels
+    filter_cols = [col for col in df.columns if col.startswith('filter_')]
+    query_cols = [col for col in df.columns if col.startswith('query_')]
+
+    def assign_quality_level(row):
+        has_plan_id = pd.notna(row['plan_id'])
+        has_clicks = (row['dce_click_count'] > 0 and pd.notna(row['dce_click_count'])) or \
+                     (row['pro_click_count'] > 0 and pd.notna(row['pro_click_count']))
+        has_filters = any(row[col] > 0 and pd.notna(row[col]) for col in filter_cols)
+        has_queries = any(row[col] > 0 and pd.notna(row[col]) for col in query_cols)
+        
+        if has_plan_id and (has_clicks or has_filters):
+            return 'High'
+        elif has_plan_id and not has_clicks and not has_filters and has_queries:
+            return 'Medium'
+        elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
+            return 'Low'
+        else:
+            return 'Medium'  # Remaining cases (e.g., no plan_id with signals)
+
+    df['quality_level'] = df.apply(assign_quality_level, axis=1)
+    metadata['quality_level'] = df['quality_level']
+
+    return X, metadata
+
+def score_data(model, X, metadata):
+    """Score the data and output quality level, Medium avg prediction, and persona ranking."""
+    # Predict probabilities and top predictions
+    y_pred_proba = model.predict_proba(X)
+    personas = model.classes_
+    proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
+    y_pred = model.predict(X)
+
+    # Combine predictions with metadata
+    output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
+    output_df['predicted_persona'] = y_pred
+
+    # Add persona ranking with probabilities
+    output_df['persona_ranking'] = output_df.apply(
+        lambda row: '; '.join([f"{p}: {row[f'prob_{p}']:.4f}" for p in sorted(personas, key=lambda x: row[f'prob_{x}'], reverse=True)]),
+        axis=1
+    )
+
+    # Calculate average prediction probability for Medium quality (Level 2)
+    medium_df = output_df[output_df['quality_level'] == 'Medium']
+    if not medium_df.empty:
+        medium_avg_proba = medium_df[[f'prob_{p}' for p in personas]].mean()
+        print("\nAverage Prediction Probabilities for Medium Quality (Level 2):")
+        for persona, avg_prob in medium_avg_proba.items():
+            print(f"{persona.replace('prob_', '')}: {avg_prob:.4f}")
+    else:
+        print("\nNo Medium quality data found for averaging predictions.")
+
+    # Save results
+    output_df.to_csv(output_file, index=False)
+    print(f"\nScored results saved to {output_file}")
+
+    # Summary of quality levels
+    quality_summary = output_df['quality_level'].value_counts().to_dict()
+    print("\nData Quality Level Distribution:")
+    for level, count in quality_summary.items():
+        print(f"{level}: {count} rows ({count / len(output_df) * 100:.2f}%)")
+
+    return output_df
 
 def main():
-    print(f"Predicting persona for hardcoded userid: {USERID}")
-
+    print("Scoring data with quality levels and persona predictions...")
+    
     # Load model and data
     rf_model = load_model(model_file)
-    behavioral_df, plan_df = load_data(behavioral_file, plan_file)
+    
+    # Pass TEST_USERID for testing; set to None for full dataset (deployment)
+    behavioral_df, plan_df = load_data(behavioral_file, plan_file, test_userid=TEST_USERID)
 
     # Prepare features
-    try:
-        X = prepare_features(behavioral_df, plan_df, USERID)
-    except ValueError as e:
-        print(e)
-        return
+    X, metadata = prepare_features(behavioral_df, plan_df)
 
-    # Make prediction
-    predicted_persona = predict_persona(rf_model, X)
-    print(f"Predicted Persona: {predicted_persona}")
+    # Score and output results
+    scored_df = score_data(rf_model, X, metadata)
 
 if __name__ == "__main__":
     main()

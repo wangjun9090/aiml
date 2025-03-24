@@ -6,7 +6,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_csnp_focus.pkl'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/output/test_results_full_6331.csv'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/output/test_results_with_quality_levels.csv'
 
 def load_model(model_path):
     try:
@@ -208,20 +208,32 @@ def prepare_training_features(behavioral_df, plan_df):
     X = training_df[feature_columns].fillna(0)
     y_true = training_df['persona'] if 'persona' in training_df.columns else None
 
-    # Quality check for weight columns
-    weight_columns = [info['query_col'] for info in persona_weights.values()] + \
-                     [info['filter_col'] for info in persona_weights.values()] + \
-                     [info.get('click_col') for info in persona_weights.values() if 'click_col' in info] + \
-                     ['num_pages_viewed', 'plan_id']
-    weight_columns = list(set([col for col in weight_columns if col in training_df.columns]))  # Unique, present columns
+    # Define quality levels
+    filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
+    query_cols = [col for col in training_df.columns if col.startswith('query_')]
 
-    def check_quality(row):
-        missing_cols = [col for col in weight_columns if pd.isna(row[col])]
-        return 'Good' if not missing_cols else f"Bad - Missing: {', '.join(missing_cols)}"
+    def assign_quality_level(row):
+        has_plan_id = pd.notna(row['plan_id'])
+        has_clicks = (row['dce_click_count'] > 0 and pd.notna(row['dce_click_count'])) or \
+                     (row['pro_click_count'] > 0 and pd.notna(row['pro_click_count']))
+        has_filters = any(row[col] > 0 and pd.notna(row[col]) for col in filter_cols)
+        has_queries = any(row[col] > 0 and pd.notna(row[col]) for col in query_cols)
+        
+        if has_plan_id and has_clicks and has_filters and has_queries:
+            return 'High'
+        elif has_plan_id and has_clicks:
+            return 'Medium'
+        elif has_plan_id or (not has_plan_id and (has_clicks or has_filters or has_queries)):
+            return 'Low'
+        else:
+            return 'Low'  # No signals at all still counts as Low
 
-    training_df['data_quality'] = training_df.apply(check_quality, axis=1)
+    training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
 
-    return X, y_true, training_df[['userid', 'zip', 'plan_id', 'persona', 'data_quality'] + feature_columns]
+    # Metadata for output
+    metadata = training_df[['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns]
+
+    return X, y_true, metadata
 
 def evaluate_predictions(model, X, y_true, metadata):
     if y_true is None:
@@ -248,7 +260,7 @@ def evaluate_predictions(model, X, y_true, metadata):
     output_df.to_csv(output_file, index=False)
     print(f"Results saved to {output_file}")
 
-    # Evaluate accuracy if ground truth exists
+    # Evaluate overall accuracy if ground truth exists
     if y_true is not None:
         accuracy = accuracy_score(y_true, y_pred)
         print(f"\nOverall Accuracy: {accuracy * 100:.2f}%")
@@ -257,40 +269,41 @@ def evaluate_predictions(model, X, y_true, metadata):
         print("\nDetailed Classification Report:")
         print(classification_report(y_true, y_pred))
         
-        print("\nIndividual Persona Accuracy Rates:")
+        print("\nIndividual Persona Accuracy Rates (Overall):")
         for persona in set(y_true):
             persona_true = y_true == persona
-            persona_pred = y_pred == persona
             persona_count = sum(persona_true)
             if persona_count > 0:
                 persona_accuracy = accuracy_score(y_true[persona_true], y_pred[persona_true]) * 100
                 print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
+
+        # Analyze by quality level
+        quality_levels = ['High', 'Medium', 'Low']
+        for level in quality_levels:
+            level_df = output_df[output_df['quality_level'] == level]
+            level_true = y_true[output_df['quality_level'] == level]
+            level_pred = y_pred[output_df['quality_level'] == level]
+            print(f"\n{level} Quality Data Results:")
+            print(f"Rows: {len(level_df)}")
+            if len(level_df) > 0:
+                level_accuracy = accuracy_score(level_true, level_pred) * 100
+                print(f"Accuracy: {level_accuracy:.2f}%")
+                print(f"Individual Persona Accuracy Rates ({level}):")
+                for persona in set(level_true):
+                    persona_true = level_true == persona
+                    persona_count = sum(persona_true)
+                    if persona_count > 0:
+                        persona_accuracy = accuracy_score(level_true[persona_true], level_pred[persona_true]) * 100
+                        print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
             else:
-                print(f"Accuracy for '{persona}': N/A (Count: 0 - not present in target_persona)")
-        
-        print("\nConfusion Matrix:")
+                print("No records in this quality level.")
+
+        print("\nConfusion Matrix (Overall):")
         cm = confusion_matrix(y_true, y_pred, labels=list(set(y_true)))
         print(pd.DataFrame(cm, index=list(set(y_true)), columns=list(set(y_true))))
 
-    # Separate good and bad quality results
-    good_quality = output_df[output_df['data_quality'] == 'Good']
-    bad_quality = output_df[output_df['data_quality'] != 'Good']
-    
-    if y_true is not None:
-        print("\nGood Quality Data Results:")
-        good_true = y_true[output_df['data_quality'] == 'Good']
-        good_pred = y_pred[output_df['data_quality'] == 'Good']
-        print(f"Rows: {len(good_true)}")
-        print(f"Accuracy: {accuracy_score(good_true, good_pred) * 100:.2f}%")
-        
-        print("\nBad Quality Data Results:")
-        bad_true = y_true[output_df['data_quality'] != 'Good']
-        bad_pred = y_pred[output_df['data_quality'] != 'Good']
-        print(f"Rows: {len(bad_true)}")
-        print(f"Accuracy: {accuracy_score(bad_true, bad_pred) * 100:.2f}%")
-
 def main():
-    print("Testing all data with quality checks and probability rankings...")
+    print("Testing all data with quality level categorization...")
 
     # Load model and data
     rf_model = load_model(model_file)

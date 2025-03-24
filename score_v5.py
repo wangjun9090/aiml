@@ -2,18 +2,35 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
+import json
+import logging
 
-# File definitions (for local reference; overridden by arguments or env vars in ML deployment)
-BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
-PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-MODEL_FILE = os.path.join(os.getenv('AZUREML_MODEL_DIR', '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models'), 'rf_model_csnp_focus.pkl')
+# Global variable to hold the model
+model = None
+
+# File definitions (relative to AZUREML_MODEL_DIR)
+BEHAVIORAL_FILE = os.path.join(os.getenv('AZUREML_MODEL_DIR'), 'v5/normalized_behavioral_features_0901_2024_0228_2025.csv')
+PLAN_FILE = os.path.join(os.getenv('AZUREML_MODEL_DIR'), 'v5/plan_derivation_by_zip.csv')
+MODEL_FILE = os.path.join(os.getenv('AZUREML_MODEL_DIR'), 'v5/rf_model_persona.pkl')
+
+def init():
+    """Initialize the model and any global resources for Azure ML endpoint."""
+    global model
+    try:
+        model_path = MODEL_FILE
+        with open(model_path, 'rb') as f:
+            model = pickle.load(f)
+        logging.info(f"Model loaded from {model_path}")
+    except Exception as e:
+        logging.error(f"Error loading model: {str(e)}")
+        raise
 
 def load_model(model_path):
-    """Load the trained model from a pickle file."""
+    """Load the trained model from a pickle file (for local testing)."""
     try:
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
-        print(f"Model loaded from {model_path}")  # Replace with logging in production
+        print(f"Model loaded from {model_path}")
         return model
     except Exception as e:
         print(f"Error loading model: {e}")
@@ -21,20 +38,17 @@ def load_model(model_path):
 
 def prepare_features(behavioral_df, plan_df):
     """Prepare features and assign quality levels for scoring, joining with plan_df."""
-    # Merge behavioral and plan data
     df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
         on=['zip', 'plan_id'],
         suffixes=('_beh', '_plan')
     )
-    print(f"Rows after merge with plan data: {len(df)}")
+    logging.info(f"Rows after merge with plan data: {len(df)}")
 
-    # Resolve state column conflict
     df['state'] = df['state_beh'].fillna(df['state_plan'])
     df = df.drop(columns=['state_beh', 'state_plan'], errors='ignore')
 
-    # Define feature sets
     all_behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
         'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
@@ -54,7 +68,6 @@ def prepare_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # CSNP-specific features
     df['csnp_interaction'] = df['csnp'].fillna(0) * (
         df['query_csnp'].fillna(0) + df['filter_csnp'].fillna(0) + 
         df['time_csnp_pages'].fillna(0) + df['accordion_csnp'].fillna(0)
@@ -67,7 +80,6 @@ def prepare_features(behavioral_df, plan_df):
 
     additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
 
-    # Persona weights setup (requires plan_df for plan features)
     persona_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
@@ -151,33 +163,25 @@ def prepare_features(behavioral_df, plan_df):
         adjusted_weight = base_weight + behavioral_score
         return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)
 
-    # Calculate weights
     for persona, info in persona_weights.items():
         df[f'w_{persona}'] = df.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
 
-    # Normalize weights, excluding csnp
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
     weight_sum = df[weighted_features].sum(axis=1)
     for wf in weighted_features:
         df[wf] = df[wf] / weight_sum.where(weight_sum > 0, 1)
 
-    # Final feature set
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
     
-    # Prepare features and metadata
     X = df[feature_columns].fillna(0)
     metadata = df[['userid', 'zip', 'plan_id']]
-
-    # Assign quality levels
-    filter_cols = [col for col in df.columns if col.startswith('filter_')]
-    query_cols = [col for col in df.columns if col.startswith('query_')]
 
     def assign_quality_level(row):
         has_plan_id = pd.notna(row['plan_id'])
         has_clicks = (row['dce_click_count'] > 0 and pd.notna(row['dce_click_count'])) or \
                      (row['pro_click_count'] > 0 and pd.notna(row['pro_click_count']))
-        has_filters = any(row[col] > 0 and pd.notna(row[col]) for col in filter_cols)
-        has_queries = any(row[col] > 0 and pd.notna(row[col]) for col in query_cols)
+        has_filters = any(row[col] > 0 and pd.notna(row[col]) for col in df.columns if col.startswith('filter_'))
+        has_queries = any(row[col] > 0 and pd.notna(row[col]) for col in df.columns if col.startswith('query_'))
         
         if has_plan_id and (has_clicks or has_filters):
             return 'High'
@@ -193,8 +197,8 @@ def prepare_features(behavioral_df, plan_df):
 
     return X, metadata
 
-def score_data(model, X, metadata, output_path=None):
-    """Score the data and return results with quality level, Medium avg prediction, and persona ranking."""
+def score_data(model, X, metadata):
+    """Score the data and return results with quality level, predicted persona, and ranking."""
     y_pred_proba = model.predict_proba(X)
     personas = model.classes_
     proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
@@ -208,67 +212,78 @@ def score_data(model, X, metadata, output_path=None):
         axis=1
     )
 
-    # Medium quality average probabilities
     medium_df = output_df[output_df['quality_level'] == 'Medium']
     medium_avg_proba = {}
     if not medium_df.empty:
         medium_avg_proba = medium_df[[f'prob_{p}' for p in personas]].mean().to_dict()
-        print("\nAverage Prediction Probabilities for Medium Quality (Level 2):")
+        logging.info("\nAverage Prediction Probabilities for Medium Quality (Level 2):")
         for persona, avg_prob in medium_avg_proba.items():
-            print(f"{persona.replace('prob_', '')}: {avg_prob:.4f}")
-
-    if output_path:
-        output_df.to_csv(output_path, index=False)
-        print(f"\nScored results saved to {output_path}")
+            logging.info(f"{persona.replace('prob_', '')}: {avg_prob:.4f}")
 
     quality_summary = output_df['quality_level'].value_counts().to_dict()
-    print("\nData Quality Level Distribution:")
+    logging.info("\nData Quality Level Distribution:")
     for level, count in quality_summary.items():
-        print(f"{level}: {count} rows ({count / len(output_df) * 100:.2f}%)")
+        logging.info(f"{level}: {count} rows ({count / len(output_df) * 100:.2f}%)")
 
     return output_df, medium_avg_proba
 
-def score(behavioral_data, plan_data, model_path=None, output_path=None):
+def run(raw_data):
     """
-    Main scoring function for ML deployment with plan_file.
+    Run inference on input data for Azure ML endpoint.
     
     Args:
-        behavioral_data: DataFrame or path to behavioral data CSV
-        plan_data: DataFrame or path to plan data CSV
-        model_path: Path to the pickle model file (defaults to AZUREML_MODEL_DIR if set)
-        output_path: Path to save the scored results (optional)
+        raw_data: JSON string containing 'behavioral_data' and 'plan_data' as dictionaries
     
     Returns:
-        scored_df: DataFrame with predictions and quality levels
-        medium_avg_proba: Dict of average probabilities for Medium quality
+        JSON string with scored results and medium average probabilities
     """
-    # Load model
-    if not model_path:
-        model_path = os.path.join(os.getenv('AZUREML_MODEL_DIR', '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models'), 'rf_model_csnp_focus.pkl')
-    model = load_model(model_path)
+    try:
+        # Parse input JSON
+        data = json.loads(raw_data)
+        behavioral_data = data.get('behavioral_data', [])
+        plan_data = data.get('plan_data', [])
 
-    # Load data
-    if isinstance(behavioral_data, str):
-        behavioral_df = pd.read_csv(behavioral_data)
-    else:
-        behavioral_df = behavioral_data
-    
-    if isinstance(plan_data, str):
-        plan_df = pd.read_csv(plan_data)
-    else:
-        plan_df = plan_data
+        # Convert to DataFrames
+        behavioral_df = pd.DataFrame(behavioral_data)
+        plan_df = pd.DataFrame(plan_data)
 
-    print(f"Behavioral data rows: {len(behavioral_df)}")
-    print(f"Plan data rows: {len(plan_df)}")
+        if behavioral_df.empty or plan_df.empty:
+            raise ValueError("Input data is empty")
 
-    # Prepare features
-    X, metadata = prepare_features(behavioral_df, plan_df)
+        logging.info(f"Behavioral data rows: {len(behavioral_df)}")
+        logging.info(f"Plan data rows: {len(plan_df)}")
 
-    # Score data
-    scored_df, medium_avg_proba = score_data(model, X, metadata, output_path)
+        # Prepare features
+        X, metadata = prepare_features(behavioral_df, plan_df)
 
-    return scored_df, medium_avg_proba
+        # Score data
+        scored_df, medium_avg_proba = score_data(model, X, metadata)
 
-# Example usage (for local testing; remove or comment out for production)
+        # Convert results to JSON
+        result = {
+            'scored_results': scored_df.to_dict(orient='records'),
+            'medium_avg_proba': medium_avg_proba
+        }
+        return json.dumps(result)
+
+    except Exception as e:
+        error_msg = f"Error during scoring: {str(e)}"
+        logging.error(error_msg)
+        return json.dumps({'error': error_msg})
+
+# For local testing (remove for Azure ML deployment)
 if __name__ == "__main__":
-    scored_df, medium_avg_proba = score(BEHAVIORAL_FILE, PLAN_FILE, MODEL_FILE)
+    # Load model locally
+    local_model = load_model(MODEL_FILE)
+    
+    # Load sample data
+    behavioral_df = pd.read_csv(BEHAVIORAL_FILE)
+    plan_df = pd.read_csv(PLAN_FILE)
+    
+    # Prepare and score
+    X, metadata = prepare_features(behavioral_df, plan_df)
+    scored_df, medium_avg_proba = score_data(local_model, X, metadata)
+    
+    # Print results
+    print(scored_df.head())
+    print("Medium Avg Proba:", medium_avg_proba)

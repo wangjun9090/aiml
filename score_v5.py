@@ -5,8 +5,10 @@ import os
 import json
 import logging
 
-# Global variable to hold the model
+# Global variables
 model = None
+behavioral_df_full = None
+plan_df_full = None
 
 # File definitions (relative to AZUREML_MODEL_DIR)
 BEHAVIORAL_FILE = os.path.join(os.getenv('AZUREML_MODEL_DIR'), 'v5/normalized_behavioral_features_0901_2024_0228_2025.csv')
@@ -14,15 +16,23 @@ PLAN_FILE = os.path.join(os.getenv('AZUREML_MODEL_DIR'), 'v5/plan_derivation_by_
 MODEL_FILE = os.path.join(os.getenv('AZUREML_MODEL_DIR'), 'v5/rf_model_persona.pkl')
 
 def init():
-    """Initialize the model and any global resources for Azure ML endpoint."""
-    global model
+    """Initialize the model and load full datasets for Azure ML endpoint."""
+    global model, behavioral_df_full, plan_df_full
     try:
+        # Load model
         model_path = MODEL_FILE
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
         logging.info(f"Model loaded from {model_path}")
+
+        # Load full behavioral and plan data
+        behavioral_df_full = pd.read_csv(BEHAVIORAL_FILE)
+        plan_df_full = pd.read_csv(PLAN_FILE)
+        logging.info(f"Behavioral data loaded: {len(behavioral_df_full)} rows")
+        logging.info(f"Plan data loaded: {len(plan_df_full)} rows")
+
     except Exception as e:
-        logging.error(f"Error loading model: {str(e)}")
+        logging.error(f"Error in init: {str(e)}")
         raise
 
 def load_model(model_path):
@@ -227,12 +237,17 @@ def score_data(model, X, metadata):
 
     return output_df, medium_avg_proba
 
+# Sample request payload:
+# {
+#   "userid": "user123"
+# }
+
 def run(raw_data):
     """
-    Run inference on input data for Azure ML endpoint.
+    Run inference on input data for Azure ML endpoint using only userid.
     
     Args:
-        raw_data: JSON string containing 'behavioral_data' and 'plan_data' as dictionaries
+        raw_data: JSON string containing 'userid'
     
     Returns:
         JSON string with scored results and medium average probabilities
@@ -240,18 +255,23 @@ def run(raw_data):
     try:
         # Parse input JSON
         data = json.loads(raw_data)
-        behavioral_data = data.get('behavioral_data', [])
-        plan_data = data.get('plan_data', [])
+        userid = data.get('userid')
+        if not userid:
+            raise ValueError("Missing 'userid' in request payload")
 
-        # Convert to DataFrames
-        behavioral_df = pd.DataFrame(behavioral_data)
-        plan_df = pd.DataFrame(plan_data)
+        # Filter datasets by userid
+        behavioral_df = behavioral_df_full[behavioral_df_full['userid'] == userid]
+        if behavioral_df.empty:
+            raise ValueError(f"No behavioral data found for userid: {userid}")
 
-        if behavioral_df.empty or plan_df.empty:
-            raise ValueError("Input data is empty")
+        # Get unique zip and plan_id combinations from behavioral data
+        zip_plan_pairs = behavioral_df[['zip', 'plan_id']].drop_duplicates()
+        plan_df = plan_df_full[plan_df_full.set_index(['zip', 'plan_id']).index.isin(zip_plan_pairs.set_index(['zip', 'plan_id']).index)]
+        if plan_df.empty:
+            raise ValueError(f"No plan data found for userid: {userid}")
 
-        logging.info(f"Behavioral data rows: {len(behavioral_df)}")
-        logging.info(f"Plan data rows: {len(plan_df)}")
+        logging.info(f"Behavioral data rows for {userid}: {len(behavioral_df)}")
+        logging.info(f"Plan data rows for {userid}: {len(plan_df)}")
 
         # Prepare features
         X, metadata = prepare_features(behavioral_df, plan_df)
@@ -277,13 +297,10 @@ if __name__ == "__main__":
     local_model = load_model(MODEL_FILE)
     
     # Load sample data
-    behavioral_df = pd.read_csv(BEHAVIORAL_FILE)
-    plan_df = pd.read_csv(PLAN_FILE)
+    behavioral_df_full = pd.read_csv(BEHAVIORAL_FILE)
+    plan_df_full = pd.read_csv(PLAN_FILE)
     
-    # Prepare and score
-    X, metadata = prepare_features(behavioral_df, plan_df)
-    scored_df, medium_avg_proba = score_data(local_model, X, metadata)
-    
-    # Print results
-    print(scored_df.head())
-    print("Medium Avg Proba:", medium_avg_proba)
+    # Simulate a request
+    sample_request = json.dumps({"userid": "user123"})
+    result = run(sample_request)
+    print(result)

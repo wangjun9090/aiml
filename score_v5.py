@@ -19,31 +19,17 @@ def init():
     """Initialize the model and load full datasets for Azure ML endpoint."""
     global model, behavioral_df_full, plan_df_full
     try:
-        # Load model
         model_path = MODEL_FILE
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
         logging.info(f"Model loaded from {model_path}")
 
-        # Load full behavioral and plan data
         behavioral_df_full = pd.read_csv(BEHAVIORAL_FILE)
         plan_df_full = pd.read_csv(PLAN_FILE)
         logging.info(f"Behavioral data loaded: {len(behavioral_df_full)} rows")
         logging.info(f"Plan data loaded: {len(plan_df_full)} rows")
-
     except Exception as e:
         logging.error(f"Error in init: {str(e)}")
-        raise
-
-def load_model(model_path):
-    """Load the trained model from a pickle file (for local testing)."""
-    try:
-        with open(model_path, 'rb') as f:
-            model = pickle.load(f)
-        print(f"Model loaded from {model_path}")
-        return model
-    except Exception as e:
-        print(f"Error loading model: {e}")
         raise
 
 def prepare_features(behavioral_df, plan_df):
@@ -184,7 +170,7 @@ def prepare_features(behavioral_df, plan_df):
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
     
     X = df[feature_columns].fillna(0)
-    metadata = df[['userid', 'zip', 'plan_id']]
+    metadata = df[['userid']]
 
     def assign_quality_level(row):
         has_plan_id = pd.notna(row['plan_id'])
@@ -193,12 +179,12 @@ def prepare_features(behavioral_df, plan_df):
         has_filters = any(row[col] > 0 and pd.notna(row[col]) for col in df.columns if col.startswith('filter_'))
         has_queries = any(row[col] > 0 and pd.notna(row[col]) for col in df.columns if col.startswith('query_'))
         
-        if has_plan_id and (has_clicks or has_filters):
-            return 'High'
-        elif has_plan_id and not has_clicks and not has_filters and has_queries:
-            return 'Medium'
-        elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
+        if not has_plan_id:
             return 'Low'
+        elif has_plan_id and (has_clicks or has_filters):
+            return 'High'
+        elif has_plan_id and has_queries:
+            return 'Medium'
         else:
             return 'Medium'
 
@@ -208,34 +194,25 @@ def prepare_features(behavioral_df, plan_df):
     return X, metadata
 
 def score_data(model, X, metadata):
-    """Score the data and return results with quality level, predicted persona, and ranking."""
+    """Score the data and return results with quality level and top 3 persona rankings."""
     y_pred_proba = model.predict_proba(X)
     personas = model.classes_
     proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
-    y_pred = model.predict(X)
 
     output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
-    output_df['predicted_persona'] = y_pred
 
-    output_df['persona_ranking'] = output_df.apply(
-        lambda row: '; '.join([f"{p}: {row[f'prob_{p}']:.4f}" for p in sorted(personas, key=lambda x: row[f'prob_{x}'], reverse=True)]),
-        axis=1
-    )
+    # Get top 3 personas by probability
+    def get_top_3_ranking(row):
+        probs = {p: row[f'prob_{p}'] for p in personas}
+        top_3 = sorted(probs.items(), key=lambda x: x[1], reverse=True)[:3]
+        return {persona: round(prob, 4) for persona, prob in top_3}
 
-    medium_df = output_df[output_df['quality_level'] == 'Medium']
-    medium_avg_proba = {}
-    if not medium_df.empty:
-        medium_avg_proba = medium_df[[f'prob_{p}' for p in personas]].mean().to_dict()
-        logging.info("\nAverage Prediction Probabilities for Medium Quality (Level 2):")
-        for persona, avg_prob in medium_avg_proba.items():
-            logging.info(f"{persona.replace('prob_', '')}: {avg_prob:.4f}")
+    output_df['prediction_scores'] = output_df.apply(get_top_3_ranking, axis=1)
 
-    quality_summary = output_df['quality_level'].value_counts().to_dict()
-    logging.info("\nData Quality Level Distribution:")
-    for level, count in quality_summary.items():
-        logging.info(f"{level}: {count} rows ({count / len(output_df) * 100:.2f}%)")
+    # Select only required columns
+    final_df = output_df[['userid', 'quality_level', 'prediction_scores']]
 
-    return output_df, medium_avg_proba
+    return final_df
 
 # Sample request payload:
 # {
@@ -250,7 +227,7 @@ def run(raw_data):
         raw_data: JSON string containing 'userid'
     
     Returns:
-        JSON string with scored results and medium average probabilities
+        JSON object with scored results
     """
     try:
         # Parse input JSON
@@ -264,12 +241,9 @@ def run(raw_data):
         if behavioral_df.empty:
             raise ValueError(f"No behavioral data found for userid: {userid}")
 
-        # Get unique zip and plan_id combinations from behavioral data
         zip_plan_pairs = behavioral_df[['zip', 'plan_id']].drop_duplicates()
         plan_df = plan_df_full[plan_df_full.set_index(['zip', 'plan_id']).index.isin(zip_plan_pairs.set_index(['zip', 'plan_id']).index)]
-        if plan_df.empty:
-            raise ValueError(f"No plan data found for userid: {userid}")
-
+        
         logging.info(f"Behavioral data rows for {userid}: {len(behavioral_df)}")
         logging.info(f"Plan data rows for {userid}: {len(plan_df)}")
 
@@ -277,30 +251,30 @@ def run(raw_data):
         X, metadata = prepare_features(behavioral_df, plan_df)
 
         # Score data
-        scored_df, medium_avg_proba = score_data(model, X, metadata)
+        scored_df = score_data(model, X, metadata)
 
-        # Convert results to JSON
-        result = {
-            'scored_results': scored_df.to_dict(orient='records'),
-            'medium_avg_proba': medium_avg_proba
-        }
-        return json.dumps(result)
+        # Customize output for Low quality
+        result = []
+        for _, row in scored_df.iterrows():
+            output = {
+                'userid': row['userid'],
+                'quality_level': row['quality_level'],
+                'prediction_scores': row['prediction_scores']
+            }
+            if row['quality_level'] == 'Low':
+                output['message'] = 'prediction can be created'
+            result.append(output)
+
+        return {'scored_results': result}
 
     except Exception as e:
         error_msg = f"Error during scoring: {str(e)}"
         logging.error(error_msg)
-        return json.dumps({'error': error_msg})
+        return {'error': error_msg}
 
 # For local testing (remove for Azure ML deployment)
 if __name__ == "__main__":
-    # Load model locally
-    local_model = load_model(MODEL_FILE)
-    
-    # Load sample data
-    behavioral_df_full = pd.read_csv(BEHAVIORAL_FILE)
-    plan_df_full = pd.read_csv(PLAN_FILE)
-    
-    # Simulate a request
+    init()  # Load model and data
     sample_request = json.dumps({"userid": "user123"})
     result = run(sample_request)
-    print(result)
+    print(json.dumps(result, indent=2))

@@ -6,7 +6,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_csnp_focus.pkl'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/output/test_results_with_quality_levels_tweaked.csv'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/output/test_results_with_quality_levels_revised.csv'
 
 def load_model(model_path):
     try:
@@ -221,10 +221,10 @@ def prepare_training_features(behavioral_df, plan_df):
         
         if has_plan_id and (has_clicks or has_filters or has_queries):
             return 'High'
-        elif has_plan_id and not has_clicks and (has_filters or has_queries):
+        elif not has_plan_id and (has_clicks or has_queries):
             return 'Medium'
         else:
-            return 'Low'  # No plan_id or plan_id with no signals
+            return 'Low'  # No signals at all
 
     training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
 
@@ -301,7 +301,7 @@ def evaluate_predictions(model, X, y_true, metadata):
         print(pd.DataFrame(cm, index=list(set(y_true)), columns=list(set(y_true))))
 
 def main():
-    print("Testing all data with tweaked quality level categorization...")
+    print("Testing all data with revised quality level categorization...")
 
     # Load model and data
     rf_model = load_model(model_file)

@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # File paths
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
@@ -29,7 +29,6 @@ def load_data(behavioral_path, plan_path):
         raise
 
 def prepare_training_features(behavioral_df, plan_df):
-    # Merge datasets
     training_df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
@@ -74,10 +73,16 @@ def prepare_training_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # Add CSNP-specific features (to match training)
-    training_df['csnp_interaction'] = training_df['csnp'] * (training_df['query_csnp'] + training_df['filter_csnp'] + training_df['time_csnp_pages'])
+    # Enhanced CSNP-specific features
+    training_df['csnp_interaction'] = training_df['csnp'].fillna(0) * (
+        training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
+        training_df['time_csnp_pages'].fillna(0) + training_df['accordion_csnp'].fillna(0)
+    )  # Broader signal capture
     training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
-    training_df['csnp_signal_strength'] = (training_df['query_csnp'] + training_df['filter_csnp'] + training_df['accordion_csnp'] + training_df['time_csnp_pages']).clip(upper=3)
+    training_df['csnp_signal_strength'] = (
+        training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
+        training_df['accordion_csnp'].fillna(0) + training_df['time_csnp_pages'].fillna(0)
+    ).clip(upper=4)  # Increased cap for stronger signal
 
     additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
 
@@ -96,7 +101,8 @@ def prepare_training_features(behavioral_df, plan_df):
     }
 
     k1, k3, k4, k7, k8 = 0.1, 0.5, 0.4, 0.15, 0.25
-    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.0, 1.5, 1.0, 1.5
+    k9, k10 = 0.8, 0.7  # Boosted coefficients for csnp
+    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.0, 2.0, 1.0, 1.5  # Increased W_CSNP_HIGH
 
     def calculate_persona_weight(row, persona_info, persona):
         plan_col = persona_info['plan_col']
@@ -135,8 +141,12 @@ def prepare_training_features(behavioral_df, plan_df):
         filter_value = row[filter_col] if pd.notna(row[filter_col]) else 0
         click_value = row[click_col] if click_col and pd.notna(row[click_col]) else 0
         
+        # Boost csnp-specific coefficients
+        query_coeff = k9 if persona == 'csnp' else k3
+        filter_coeff = k10 if persona == 'csnp' else k4
         click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
-        behavioral_score = k3 * query_value + k4 * filter_value + k1 * pages_viewed + click_coefficient * click_value
+        
+        behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
         
         if persona == 'doctor':
             if click_value >= 1.5: behavioral_score += 0.4
@@ -153,7 +163,9 @@ def prepare_training_features(behavioral_df, plan_df):
             if signal_count >= 1: behavioral_score += 0.35
         elif persona == 'csnp':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 1: behavioral_score += 0.3
+            if signal_count >= 2: behavioral_score += 0.5  # Increased boost
+            elif signal_count >= 1: behavioral_score += 0.4  # Increased boost
+            if row['csnp_interaction'] > 0: behavioral_score += 0.2  # Additional csnp boost
         elif persona in ['fitness', 'hearing']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.3
@@ -188,7 +200,7 @@ def prepare_training_features(behavioral_df, plan_df):
             max_non_target = max(non_target_weights, default=0)
             adjusted_weight = max(adjusted_weight, max_non_target + 0.15)
         
-        return min(adjusted_weight, 1.0)
+        return min(adjusted_weight, 1.5 if persona == 'csnp' else 1.0)  # Higher cap for csnp
 
     # Calculate weights
     for persona, info in persona_weights.items():
@@ -205,8 +217,6 @@ def prepare_training_features(behavioral_df, plan_df):
     
     # Select features and handle missing values
     X = training_df[feature_columns].fillna(0)
-    
-    # Get actual personas
     y_true = training_df['persona'] if 'persona' in training_df.columns else None
     
     return X, y_true
@@ -234,15 +244,20 @@ def evaluate_predictions(model, X, y_true):
             print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
         else:
             print(f"Accuracy for '{persona}': N/A (Count: 0 - not present in target_persona)")
+    
+    # Confusion matrix to diagnose csnp mispredictions
+    print("\nConfusion Matrix:")
+    cm = confusion_matrix(y_true, y_pred, labels=list(set(y_true)))
+    print(pd.DataFrame(cm, index=list(set(y_true)), columns=list(set(y_true))))
 
 def main():
-    print("Testing with filtered high-quality data...")
+    print("Testing with enhanced csnp features...")
 
     # Load model and data
     rf_model = load_model(model_file)
     behavioral_df, plan_df = load_data(behavioral_file, plan_file)
 
-    # Prepare features with filtering
+    # Prepare features
     X, y_true = prepare_training_features(behavioral_df, plan_df)
 
     # Evaluate predictions

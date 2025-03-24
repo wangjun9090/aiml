@@ -6,6 +6,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_behavioral_features_0901_2024_0228_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_csnp_focus.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/output/test_results_full_6331.csv'
 
 def load_model(model_path):
     try:
@@ -37,18 +38,6 @@ def prepare_training_features(behavioral_df, plan_df):
     )
     print(f"Rows after merge: {len(training_df)}")
 
-    # Filter for high-quality data
-    training_df = training_df[training_df['plan_id'].notna()]
-    behavioral_signals = [
-        col for col in [
-            'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
-            'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
-            'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp', 'dce_click_count', 'pro_click_count'
-        ] if col in training_df.columns
-    ]
-    training_df = training_df[training_df[behavioral_signals].sum(axis=1) > 0]
-    print(f"Rows after filtering: {len(training_df)}")
-
     # Resolve state column conflict
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
     training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore')
@@ -73,16 +62,16 @@ def prepare_training_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # Enhanced CSNP-specific features
+    # CSNP-specific features
     training_df['csnp_interaction'] = training_df['csnp'].fillna(0) * (
         training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
         training_df['time_csnp_pages'].fillna(0) + training_df['accordion_csnp'].fillna(0)
-    ) * 2  # Amplify csnp signal
+    ) * 2
     training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
     training_df['csnp_signal_strength'] = (
         training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
         training_df['accordion_csnp'].fillna(0) + training_df['time_csnp_pages'].fillna(0)
-    ).clip(upper=5) * 1.5  # Higher cap and boost
+    ).clip(upper=5) * 1.5
 
     additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
 
@@ -101,8 +90,8 @@ def prepare_training_features(behavioral_df, plan_df):
     }
 
     k1, k3, k4, k7, k8 = 0.1, 0.5, 0.4, 0.15, 0.25
-    k9, k10 = 1.0, 0.9  # Further boosted for csnp
-    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.0, 3.0, 1.0, 1.5  # Aggressive csnp boost
+    k9, k10 = 1.0, 0.9
+    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.0, 3.0, 1.0, 1.5
 
     def calculate_persona_weight(row, persona_info, persona):
         plan_col = persona_info['plan_col']
@@ -111,7 +100,7 @@ def prepare_training_features(behavioral_df, plan_df):
         click_col = persona_info.get('click_col', None)
         
         if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
-            base_weight = min(row[plan_col], 0.7 if persona == 'csnp' else 0.5)  # Higher cap for csnp
+            base_weight = min(row[plan_col], 0.7 if persona == 'csnp' else 0.5)
             if persona == 'csnp' and 'csnp_type' in row and row['csnp_type'] == 'Y':
                 base_weight *= W_CSNP_HIGH
             elif persona == 'csnp':
@@ -162,10 +151,10 @@ def prepare_training_features(behavioral_df, plan_df):
             if signal_count >= 1: behavioral_score += 0.35
         elif persona == 'csnp':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.6  # Stronger boost
-            elif signal_count >= 1: behavioral_score += 0.5  # Stronger boost
-            if row['csnp_interaction'] > 0: behavioral_score += 0.3  # Stronger boost
-            if row['csnp_type_flag'] == 1: behavioral_score += 0.2  # Add csnp_type boost
+            if signal_count >= 2: behavioral_score += 0.6
+            elif signal_count >= 1: behavioral_score += 0.5
+            if row['csnp_interaction'] > 0: behavioral_score += 0.3
+            if row['csnp_type_flag'] == 1: behavioral_score += 0.2
         elif persona in ['fitness', 'hearing']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.3
@@ -200,13 +189,13 @@ def prepare_training_features(behavioral_df, plan_df):
             max_non_target = max(non_target_weights, default=0)
             adjusted_weight = max(adjusted_weight, max_non_target + 0.15)
         
-        return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)  # Even higher cap for csnp
+        return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)
 
     # Calculate weights
     for persona, info in persona_weights.items():
         training_df[f'w_{persona}'] = training_df.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
 
-    # Normalize weights, excluding csnp to preserve its boost
+    # Normalize weights, excluding csnp
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
     weight_sum = training_df[weighted_features].sum(axis=1)
     for wf in weighted_features:
@@ -219,54 +208,99 @@ def prepare_training_features(behavioral_df, plan_df):
     X = training_df[feature_columns].fillna(0)
     y_true = training_df['persona'] if 'persona' in training_df.columns else None
 
-    # Debug: Check csnp feature stats
-    csnp_rows = training_df[training_df['persona'] == 'csnp']
-    print("\nCSNP Feature Stats:")
-    print(csnp_rows[['csnp', 'query_csnp', 'filter_csnp', 'time_csnp_pages', 'accordion_csnp', 'csnp_interaction', 'csnp_signal_strength', 'w_csnp']].describe())
+    # Quality check for weight columns
+    weight_columns = [info['query_col'] for info in persona_weights.values()] + \
+                     [info['filter_col'] for info in persona_weights.values()] + \
+                     [info.get('click_col') for info in persona_weights.values() if 'click_col' in info] + \
+                     ['num_pages_viewed', 'plan_id']
+    weight_columns = list(set([col for col in weight_columns if col in training_df.columns]))  # Unique, present columns
 
-    return X, y_true
+    def check_quality(row):
+        missing_cols = [col for col in weight_columns if pd.isna(row[col])]
+        return 'Good' if not missing_cols else f"Bad - Missing: {', '.join(missing_cols)}"
 
-def evaluate_predictions(model, X, y_true):
+    training_df['data_quality'] = training_df.apply(check_quality, axis=1)
+
+    return X, y_true, training_df[['userid', 'zip', 'plan_id', 'persona', 'data_quality'] + feature_columns]
+
+def evaluate_predictions(model, X, y_true, metadata):
     if y_true is None:
-        print("No ground truth 'persona' column found in the data. Cannot compute accuracy.")
-        return
+        print("No ground truth 'persona' column found in the data. Predictions will be made without accuracy evaluation.")
     
+    # Predict probabilities and top predictions
+    y_pred_proba = model.predict_proba(X)
+    personas = model.classes_
+    proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
     y_pred = model.predict(X)
-    accuracy = accuracy_score(y_true, y_pred)
-    print(f"\nOverall Accuracy: {accuracy * 100:.2f}%")
-    print(f"Rows evaluated: {len(y_true)}")
-    print(f"Correct predictions: {sum(y_pred == y_true)}")
-    print("\nDetailed Classification Report:")
-    print(classification_report(y_true, y_pred))
     
-    print("\nIndividual Persona Accuracy Rates:")
-    for persona in set(y_true):
-        persona_true = y_true == persona
-        persona_pred = y_pred == persona
-        persona_count = sum(persona_true)
-        if persona_count > 0:
-            persona_accuracy = accuracy_score(y_true[persona_true], y_pred[persona_true]) * 100
-            print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
-        else:
-            print(f"Accuracy for '{persona}': N/A (Count: 0 - not present in target_persona)")
+    # Combine predictions with metadata
+    output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
+    output_df['predicted_persona'] = y_pred
+    output_df['is_correct'] = (output_df['persona'] == output_df['predicted_persona']) if y_true is not None else None
+
+    # Add probability ranking
+    for i in range(len(output_df)):
+        probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
+        ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+        output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
+
+    # Save to CSV
+    output_df.to_csv(output_file, index=False)
+    print(f"Results saved to {output_file}")
+
+    # Evaluate accuracy if ground truth exists
+    if y_true is not None:
+        accuracy = accuracy_score(y_true, y_pred)
+        print(f"\nOverall Accuracy: {accuracy * 100:.2f}%")
+        print(f"Rows evaluated: {len(y_true)}")
+        print(f"Correct predictions: {sum(y_pred == y_true)}")
+        print("\nDetailed Classification Report:")
+        print(classification_report(y_true, y_pred))
+        
+        print("\nIndividual Persona Accuracy Rates:")
+        for persona in set(y_true):
+            persona_true = y_true == persona
+            persona_pred = y_pred == persona
+            persona_count = sum(persona_true)
+            if persona_count > 0:
+                persona_accuracy = accuracy_score(y_true[persona_true], y_pred[persona_true]) * 100
+                print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
+            else:
+                print(f"Accuracy for '{persona}': N/A (Count: 0 - not present in target_persona)")
+        
+        print("\nConfusion Matrix:")
+        cm = confusion_matrix(y_true, y_pred, labels=list(set(y_true)))
+        print(pd.DataFrame(cm, index=list(set(y_true)), columns=list(set(y_true))))
+
+    # Separate good and bad quality results
+    good_quality = output_df[output_df['data_quality'] == 'Good']
+    bad_quality = output_df[output_df['data_quality'] != 'Good']
     
-    # Confusion matrix
-    print("\nConfusion Matrix:")
-    cm = confusion_matrix(y_true, y_pred, labels=list(set(y_true)))
-    print(pd.DataFrame(cm, index=list(set(y_true)), columns=list(set(y_true))))
+    if y_true is not None:
+        print("\nGood Quality Data Results:")
+        good_true = y_true[output_df['data_quality'] == 'Good']
+        good_pred = y_pred[output_df['data_quality'] == 'Good']
+        print(f"Rows: {len(good_true)}")
+        print(f"Accuracy: {accuracy_score(good_true, good_pred) * 100:.2f}%")
+        
+        print("\nBad Quality Data Results:")
+        bad_true = y_true[output_df['data_quality'] != 'Good']
+        bad_pred = y_pred[output_df['data_quality'] != 'Good']
+        print(f"Rows: {len(bad_true)}")
+        print(f"Accuracy: {accuracy_score(bad_true, bad_pred) * 100:.2f}%")
 
 def main():
-    print("Testing with further enhanced csnp features...")
+    print("Testing all data with quality checks and probability rankings...")
 
     # Load model and data
     rf_model = load_model(model_file)
     behavioral_df, plan_df = load_data(behavioral_file, plan_file)
 
     # Prepare features
-    X, y_true = prepare_training_features(behavioral_df, plan_df)
+    X, y_true, metadata = prepare_training_features(behavioral_df, plan_df)
 
-    # Evaluate predictions
-    evaluate_predictions(rf_model, X, y_true)
+    # Evaluate predictions and save
+    evaluate_predictions(rf_model, X, y_true, metadata)
 
 if __name__ == "__main__":
     main()

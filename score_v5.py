@@ -94,4 +94,181 @@ def prepare_features(behavioral_df, plan_df):
         base_weight = 0
         if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
             base_weight = min(row[plan_col], 0.7 if persona == 'csnp' else 0.5)
-            if persona == 'csnp' and 'csnp_type
+            if persona == 'csnp' and 'csnp_type' in row and row['csnp_type'] == 'Y':
+                base_weight *= W_CSNP_HIGH
+            elif persona == 'csnp':
+                base_weight *= W_CSNP_BASE
+            elif persona == 'dsnp' and 'dsnp_type' in row and row['dsnp_type'] == 'Y':
+                base_weight *= W_DSNP_HIGH
+            elif persona == 'dsnp':
+                base_weight *= W_DSNP_BASE
+        elif pd.isna(row['plan_id']) and pd.notna(row['compared_plan_ids']) and isinstance(row['compared_plan_ids'], str) and row['num_plans_compared'] > 0:
+            compared_ids = row['compared_plan_ids'].split(',')
+            compared_plans = plan_df[plan_df['plan_id'].isin(compared_ids) & (plan_df['zip'] == row['zip'])]
+            if not compared_plans.empty:
+                base_weight = min(compared_plans[plan_col].mean(), 0.7 if persona == 'csnp' else 0.5)
+                if persona == 'csnp':
+                    csnp_type_y_ratio = (compared_plans['csnp_type'] == 'Y').mean()
+                    base_weight *= (W_CSNP_BASE + (W_CSNP_HIGH - W_CSNP_BASE) * csnp_type_y_ratio)
+                elif persona == 'dsnp':
+                    dsnp_type_y_ratio = (compared_plans['dsnp_type'] == 'Y').mean()
+                    base_weight *= (W_DSNP_BASE + (W_DSNP_HIGH - W_DSNP_BASE) * dsnp_type_y_ratio)
+        
+        pages_viewed = min(row['num_pages_viewed'], 3) if pd.notna(row['num_pages_viewed']) else 0
+        query_value = row[query_col] if pd.notna(row[query_col]) else 0
+        filter_value = row[filter_col] if pd.notna(row[filter_col]) else 0
+        click_value = row[click_col] if click_col and pd.notna(row[click_col]) else 0
+        
+        query_coeff = k9 if persona == 'csnp' else k3
+        filter_coeff = k10 if persona == 'csnp' else k4
+        click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
+        
+        behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
+        
+        if persona == 'doctor':
+            if click_value >= 1.5: behavioral_score += 0.4
+            elif click_value >= 0.5: behavioral_score += 0.2
+        elif persona == 'drug':
+            if click_value >= 5: behavioral_score += 0.4
+            elif click_value >= 2: behavioral_score += 0.2
+        elif persona == 'dental':
+            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
+            if signal_count >= 2: behavioral_score += 0.3
+            elif signal_count >= 1: behavioral_score += 0.15
+        elif persona == 'vision':
+            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
+            if signal_count >= 1: behavioral_score += 0.35
+        elif persona == 'csnp':
+            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
+            if signal_count >= 2: behavioral_score += 0.6
+            elif signal_count >= 1: behavioral_score += 0.5
+            if row['csnp_interaction'] > 0: behavioral_score += 0.3
+            if row['csnp_type_flag'] == 1: behavioral_score += 0.2
+        elif persona in ['fitness', 'hearing']:
+            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
+            if signal_count >= 1: behavioral_score += 0.3
+        
+        adjusted_weight = base_weight + behavioral_score
+        return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)
+
+    # Calculate weights
+    for persona, info in persona_weights.items():
+        df[f'w_{persona}'] = df.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
+
+    # Normalize weights, excluding csnp
+    weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
+    weight_sum = df[weighted_features].sum(axis=1)
+    for wf in weighted_features:
+        df[wf] = df[wf] / weight_sum.where(weight_sum > 0, 1)
+
+    # Final feature set
+    feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
+    
+    # Prepare features and metadata
+    X = df[feature_columns].fillna(0)
+    metadata = df[['userid', 'zip', 'plan_id']]
+
+    # Assign quality levels
+    filter_cols = [col for col in df.columns if col.startswith('filter_')]
+    query_cols = [col for col in df.columns if col.startswith('query_')]
+
+    def assign_quality_level(row):
+        has_plan_id = pd.notna(row['plan_id'])
+        has_clicks = (row['dce_click_count'] > 0 and pd.notna(row['dce_click_count'])) or \
+                     (row['pro_click_count'] > 0 and pd.notna(row['pro_click_count']))
+        has_filters = any(row[col] > 0 and pd.notna(row[col]) for col in filter_cols)
+        has_queries = any(row[col] > 0 and pd.notna(row[col]) for col in query_cols)
+        
+        if has_plan_id and (has_clicks or has_filters):
+            return 'High'
+        elif has_plan_id and not has_clicks and not has_filters and has_queries:
+            return 'Medium'
+        elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
+            return 'Low'
+        else:
+            return 'Medium'
+
+    df['quality_level'] = df.apply(assign_quality_level, axis=1)
+    metadata['quality_level'] = df['quality_level']
+
+    return X, metadata
+
+def score_data(model, X, metadata, output_path=None):
+    """Score the data and return results with quality level, Medium avg prediction, and persona ranking."""
+    y_pred_proba = model.predict_proba(X)
+    personas = model.classes_
+    proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
+    y_pred = model.predict(X)
+
+    output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
+    output_df['predicted_persona'] = y_pred
+
+    output_df['persona_ranking'] = output_df.apply(
+        lambda row: '; '.join([f"{p}: {row[f'prob_{p}']:.4f}" for p in sorted(personas, key=lambda x: row[f'prob_{x}'], reverse=True)]),
+        axis=1
+    )
+
+    # Medium quality average probabilities
+    medium_df = output_df[output_df['quality_level'] == 'Medium']
+    medium_avg_proba = {}
+    if not medium_df.empty:
+        medium_avg_proba = medium_df[[f'prob_{p}' for p in personas]].mean().to_dict()
+        print("\nAverage Prediction Probabilities for Medium Quality (Level 2):")
+        for persona, avg_prob in medium_avg_proba.items():
+            print(f"{persona.replace('prob_', '')}: {avg_prob:.4f}")
+
+    if output_path:
+        output_df.to_csv(output_path, index=False)
+        print(f"\nScored results saved to {output_path}")
+
+    quality_summary = output_df['quality_level'].value_counts().to_dict()
+    print("\nData Quality Level Distribution:")
+    for level, count in quality_summary.items():
+        print(f"{level}: {count} rows ({count / len(output_df) * 100:.2f}%)")
+
+    return output_df, medium_avg_proba
+
+def score(behavioral_data, plan_data, model_path=None, output_path=None):
+    """
+    Main scoring function for ML deployment with plan_file.
+    
+    Args:
+        behavioral_data: DataFrame or path to behavioral data CSV
+        plan_data: DataFrame or path to plan data CSV
+        model_path: Path to the pickle model file (defaults to AZUREML_MODEL_DIR if set)
+        output_path: Path to save the scored results (optional)
+    
+    Returns:
+        scored_df: DataFrame with predictions and quality levels
+        medium_avg_proba: Dict of average probabilities for Medium quality
+    """
+    # Load model
+    if not model_path:
+        model_path = os.path.join(os.getenv('AZUREML_MODEL_DIR', '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models'), 'rf_model_csnp_focus.pkl')
+    model = load_model(model_path)
+
+    # Load data
+    if isinstance(behavioral_data, str):
+        behavioral_df = pd.read_csv(behavioral_data)
+    else:
+        behavioral_df = behavioral_data
+    
+    if isinstance(plan_data, str):
+        plan_df = pd.read_csv(plan_data)
+    else:
+        plan_df = plan_data
+
+    print(f"Behavioral data rows: {len(behavioral_df)}")
+    print(f"Plan data rows: {len(plan_df)}")
+
+    # Prepare features
+    X, metadata = prepare_features(behavioral_df, plan_df)
+
+    # Score data
+    scored_df, medium_avg_proba = score_data(model, X, metadata, output_path)
+
+    return scored_df, medium_avg_proba
+
+# Example usage (for local testing; remove or comment out for production)
+if __name__ == "__main__":
+    scored_df, medium_avg_proba = score(BEHAVIORAL_FILE, PLAN_FILE, MODEL_FILE)

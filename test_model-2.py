@@ -38,14 +38,16 @@ def prepare_training_features(behavioral_df, plan_df):
     )
     print(f"Rows after merge: {len(training_df)}")
 
-    # Filter for high-quality data (mimicking training subset)
-    training_df = training_df[training_df['plan_id'].notna()]  # Require plan_id
+    # Filter for high-quality data
+    training_df = training_df[training_df['plan_id'].notna()]
     behavioral_signals = [
-        'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
-        'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
-        'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp', 'dce_click_count', 'pro_click_count'
+        col for col in [
+            'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
+            'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
+            'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp', 'dce_click_count', 'pro_click_count'
+        ] if col in training_df.columns
     ]
-    training_df = training_df[training_df[behavioral_signals].sum(axis=1) > 0]  # At least one signal
+    training_df = training_df[training_df[behavioral_signals].sum(axis=1) > 0]
     print(f"Rows after filtering: {len(training_df)}")
 
     # Resolve state column conflict
@@ -71,6 +73,13 @@ def prepare_training_features(behavioral_df, plan_df):
         'ma_otc', 'ma_transportation', 'ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp',
         'ma_provider_network', 'ma_drug_coverage'
     ]
+
+    # Add CSNP-specific features (to match training)
+    training_df['csnp_interaction'] = training_df['csnp'] * (training_df['query_csnp'] + training_df['filter_csnp'] + training_df['time_csnp_pages'])
+    training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
+    training_df['csnp_signal_strength'] = (training_df['query_csnp'] + training_df['filter_csnp'] + training_df['accordion_csnp'] + training_df['time_csnp_pages']).clip(upper=3)
+
+    additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
 
     # Persona weights
     persona_weights = {
@@ -105,7 +114,7 @@ def prepare_training_features(behavioral_df, plan_df):
                 base_weight *= W_DSNP_HIGH
             elif persona == 'dsnp':
                 base_weight *= W_DSNP_BASE
-        elif pd.isna(row['plan_id']) and pd.notna(row['compared_plan_ids']) and row['num_plans_compared'] > 0:
+        elif pd.isna(row['plan_id']) and pd.notna(row['compared_plan_ids']) and isinstance(row['compared_plan_ids'], str) and row['num_plans_compared'] > 0:
             compared_ids = row['compared_plan_ids'].split(',')
             compared_plans = plan_df[plan_df['plan_id'].isin(compared_ids) & (plan_df['zip'] == row['zip'])]
             if not compared_plans.empty:
@@ -151,7 +160,7 @@ def prepare_training_features(behavioral_df, plan_df):
         
         adjusted_weight = base_weight + behavioral_score
         
-        if persona == row['persona']:
+        if 'persona' in row and persona == row['persona']:
             non_target_weights = [
                 min(row[info['plan_col']], 0.5) * (
                     W_CSNP_HIGH if p == 'csnp' and 'csnp_type' in row and row['csnp_type'] == 'Y' else
@@ -192,7 +201,7 @@ def prepare_training_features(behavioral_df, plan_df):
         training_df[wf] = training_df[wf] / weight_sum.where(weight_sum > 0, 1)
 
     # Final feature set
-    feature_columns = all_behavioral_features + raw_plan_features + weighted_features
+    feature_columns = all_behavioral_features + raw_plan_features + additional_features + weighted_features
     
     # Select features and handle missing values
     X = training_df[feature_columns].fillna(0)

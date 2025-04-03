@@ -12,8 +12,9 @@ from fastapi.responses import Response
 from fastapi.testclient import TestClient  # For testing in Databricks
 import uvicorn
 import nest_asyncio
+import asyncio
 
-# Set up logging
+# Set up logging with DEBUG level
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
@@ -35,45 +36,62 @@ class ScoreRequest(BaseModel):
 
 # Function to load data from Cosmos DB into pandas DataFrame
 def load_data_from_cosmos(container):
+    logger.debug("Entering load_data_from_cosmos")
     query = "SELECT * FROM c"
+    logger.debug("Executing Cosmos DB query")
     items = list(container.query_items(query, enable_cross_partition_query=True))
-    return pd.DataFrame(items)
+    logger.debug(f"Retrieved {len(items)} items from Cosmos DB")
+    df = pd.DataFrame(items)
+    logger.debug("Converted items to DataFrame")
+    return df
 
 def init():
     """Initialize the model and load full datasets for the endpoint."""
     global model, behavioral_df_full, plan_df_full, app_ready
+    logger.debug("Entering init function")
     try:
         # Load model
         model_path = MODEL_FILE
+        logger.debug(f"Checking if model file exists at {model_path}")
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found at {model_path}")
+        logger.debug("Opening model file")
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
         logger.info(f"Model loaded from {model_path}")
 
         # Cosmos DB connection
+        logger.debug("Retrieving Cosmos DB environment variables")
         endpoint = os.getenv("COSMOS_ENDPOINT")
         key = os.getenv("COSMOS_KEY")
         database_name = os.getenv("COSMOS_PERSONA_DB")
         behavioral_container_name = os.getenv("COSMOS_PERSONA_CONTAINER_BEHAVIOR")
         plan_container_name = os.getenv("COSMOS_PERSONA_CONTAINER_PLAN")
 
+        logger.debug("Validating Cosmos DB environment variables")
         if not all([endpoint, key, database_name, behavioral_container_name, plan_container_name]):
             raise ValueError("One or more Cosmos DB environment variables are not set")
 
         # Initialize Cosmos DB client
+        logger.debug("Initializing Cosmos DB client")
         client = CosmosClient(endpoint, credential=key)
         logger.info("Successfully connected to Cosmos DB")
         
+        logger.debug("Getting database client")
         database = client.get_database_client(database_name)
+        logger.debug("Getting behavioral container client")
         behavioral_container = database.get_container_client(behavioral_container_name)
+        logger.debug("Getting plan container client")
         plan_container = database.get_container_client(plan_container_name)
 
         # Load data
+        logger.debug("Loading behavioral data")
         behavioral_df_full = load_data_from_cosmos(behavioral_container)
+        logger.debug("Loading plan data")
         plan_df_full = load_data_from_cosmos(plan_container)
 
         # Convert numeric columns to appropriate types
+        logger.debug("Converting numeric columns")
         numeric_columns = [
             'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
             'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
@@ -92,19 +110,23 @@ def init():
         for df in [behavioral_df_full, plan_df_full]:
             for col in numeric_columns:
                 if col in df.columns:
+                    logger.debug(f"Converting column {col} to numeric")
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
         logger.info(f"Behavioral data loaded: {len(behavioral_df_full)} rows")
         logger.info(f"Plan data loaded: {len(plan_df_full)} rows")
         
+        logger.debug("Setting app_ready to True")
         app_ready = True  # Mark app as ready
     except Exception as e:
         logger.error(f"Error in init: {str(e)}")
         raise
+    logger.debug("Exiting init function")
 
 # Feature preparation and scoring functions
 def prepare_features(behavioral_df, plan_df):
     """Prepare features and assign quality levels for scoring, joining with plan_df."""
+    logger.debug("Entering prepare_features")
     df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
@@ -177,7 +199,7 @@ def prepare_features(behavioral_df, plan_df):
                 base_weight *= W_CSNP_HIGH
             elif persona == 'csnp':
                 base_weight *= W_CSNP_BASE
-            elif persona == 'dsnp' and 'dsnp_type' in row and row['dsnp_type'] == 'Y':
+            elif persona == 'dsnp' and 'dsnp_type' in row and row['csnp_type'] == 'Y':
                 base_weight *= W_DSNP_HIGH
             elif persona == 'dsnp':
                 base_weight *= W_DSNP_BASE
@@ -273,11 +295,12 @@ def prepare_features(behavioral_df, plan_df):
 
     df['quality_level'] = df.apply(assign_quality_level, axis=1)
     metadata['quality_level'] = df['quality_level']
-
+    logger.debug("Exiting prepare_features")
     return X, metadata
 
 def score_data(model, X, metadata):
     """Score the data and return results with quality level and top 3 persona rankings."""
+    logger.debug("Entering score_data")
     y_pred_proba = model.predict_proba(X)
     personas = model.classes_
     proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
@@ -292,33 +315,44 @@ def score_data(model, X, metadata):
     output_df['prediction_scores'] = output_df.apply(get_top_3_ranking, axis=1)
 
     final_df = output_df[['userid', 'quality_level', 'prediction_scores']]
-
+    logger.debug("Exiting score_data")
     return final_df
 
 # Define the /score endpoint
 @app.post("/score")
 async def score(request: ScoreRequest):
     """Score endpoint to process user data and return predictions."""
+    logger.debug("Entering /score endpoint")
     if not app_ready:
+        logger.debug("App not ready, returning 503")
         raise HTTPException(status_code=503, detail="Service is still initializing")
     try:
         userid = request.userid
+        logger.debug(f"Processing request for userid: {userid}")
         if not userid:
+            logger.debug("Missing userid, raising 400")
             raise HTTPException(status_code=400, detail="Missing 'userid' in request payload")
 
+        logger.debug("Filtering behavioral data")
         behavioral_df = behavioral_df_full[behavioral_df_full['userid'] == userid]
         if behavioral_df.empty:
+            logger.debug(f"No data found for userid {userid}, raising 404")
             raise HTTPException(status_code=404, detail=f"No behavioral data found for userid: {userid}")
 
+        logger.debug("Preparing zip_plan_pairs")
         zip_plan_pairs = behavioral_df[['zip', 'plan_id']].drop_duplicates()
+        logger.debug("Filtering plan data")
         plan_df = plan_df_full[plan_df_full.set_index(['zip', 'plan_id']).index.isin(zip_plan_pairs.set_index(['zip', 'plan_id']).index)]
         
         logger.info(f"Behavioral data rows for {userid}: {len(behavioral_df)}")
         logger.info(f"Plan data rows for {userid}: {len(plan_df)}")
 
+        logger.debug("Calling prepare_features")
         X, metadata = prepare_features(behavioral_df, plan_df)
+        logger.debug("Calling score_data")
         scored_df = score_data(model, X, metadata)
 
+        logger.debug("Building response")
         result = []
         for _, row in scored_df.iterrows():
             output = {
@@ -330,56 +364,78 @@ async def score(request: ScoreRequest):
                 output['message'] = 'prediction result might not be accurate due to low behavioral data quality'
             result.append(output)
 
+        logger.debug("Returning scored results")
         return {'scored_results': result}
     except Exception as e:
         logger.error(f"Error during scoring: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error during scoring: {str(e)}")
+    finally:
+        logger.debug("Exiting /score endpoint")
 
 # Health check endpoint
 @app.get("/actuator/health")
 async def health_check():
     """Check if the service is up and running."""
+    logger.debug("Entering /actuator/health endpoint")
     if not app_ready:
+        logger.debug("App not ready, returning 503")
         raise HTTPException(status_code=503, detail="Service is still initializing")
+    logger.debug("App is healthy, returning 200")
     return Response(content="Healthy", status_code=200)
 
 # Test function for Databricks
-def test_score_endpoint():
+async def test_score_endpoint():
     """Test the /score endpoint with userid='12345'."""
+    logger.debug("Entering test_score_endpoint")
     client = TestClient(app)
     test_payload = {"userid": "12345"}
     try:
-        import asyncio
-        asyncio.sleep(2)  # Brief delay to ensure app initialization
+        logger.debug("Waiting for app initialization with 2-second delay")
+        await asyncio.sleep(2)  # Brief delay to ensure app initialization
+        logger.debug("Sending test POST request to /score")
         response = client.post("/score", json=test_payload)
         logger.info(f"Test request status code: {response.status_code}")
         logger.info(f"Test request response: {response.json()}")
     except Exception as e:
         logger.error(f"Error during test request: {str(e)}")
+    finally:
+        logger.debug("Exiting test_score_endpoint")
 
 # Initialize on startup
 @app.on_event("startup")
 async def startup_event():
+    logger.debug("Entering startup_event")
     init()
+    logger.debug("Exiting startup_event")
 
 # Driver main method compatible with Databricks and AKS
 def run_app():
     """Run the FastAPI app, handling both Databricks and AKS environments."""
+    logger.debug("Entering run_app")
     try:
         # Check if running in Databricks (interactive environment)
         if 'DATABRICKS_RUNTIME_VERSION' in os.environ:
             logger.info("Detected Databricks environment")
+            logger.debug("Applying nest_asyncio")
             nest_asyncio.apply()  # Allow nested event loops in Databricks
+            logger.debug("Starting uvicorn server in Databricks")
             uvicorn.run(app, host="0.0.0.0", port=8080, log_level="debug")
         else:
             # Assume AKS or standalone Python environment
             logger.info("Running in standalone/AKS environment")
+            logger.debug("Starting uvicorn server in AKS/standalone")
             uvicorn.run(app, host="0.0.0.0", port=8080, log_level="debug")
     except Exception as e:
         logger.error(f"Error running app: {str(e)}")
         raise
+    finally:
+        logger.debug("Exiting run_app")
 
 if __name__ == "__main__":
+    logger.debug("Entering main block")
     if 'DATABRICKS_RUNTIME_VERSION' in os.environ:
-        test_score_endpoint()  # Run test in Databricks before server starts
+        logger.debug("Running test in Databricks")
+        asyncio.run(test_score_endpoint())  # Run async test in Databricks
+    logger.debug("Calling run_app")
     run_app()
+    logger.debug("Exiting main block")

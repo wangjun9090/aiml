@@ -9,7 +9,7 @@ from azure.cosmos import CosmosClient
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.responses import Response
-from fastapi.testclient import TestClient  # For testing the endpoint
+from fastapi.testclient import TestClient  # For testing in Databricks
 import uvicorn
 import nest_asyncio
 
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 model = None
 behavioral_df_full = None
 plan_df_full = None
+app_ready = False  # For AKS health check
 
 # File definitions
 MODEL_FILE = "model-persona-0.0.1.pkl"
@@ -40,10 +41,12 @@ def load_data_from_cosmos(container):
 
 def init():
     """Initialize the model and load full datasets for the endpoint."""
-    global model, behavioral_df_full, plan_df_full
+    global model, behavioral_df_full, plan_df_full, app_ready
     try:
         # Load model
         model_path = MODEL_FILE
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found at {model_path}")
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
         logger.info(f"Model loaded from {model_path}")
@@ -70,8 +73,31 @@ def init():
         behavioral_df_full = load_data_from_cosmos(behavioral_container)
         plan_df_full = load_data_from_cosmos(plan_container)
 
+        # Convert numeric columns to appropriate types
+        numeric_columns = [
+            'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
+            'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
+            'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp', 'accordion_dental',
+            'accordion_transportation', 'accordion_otc', 'accordion_drug', 'accordion_provider',
+            'accordion_vision', 'accordion_csnp', 'accordion_dsnp', 'time_dental_pages',
+            'time_transportation_pages', 'time_otc_pages', 'time_drug_pages', 'time_provider_pages',
+            'time_vision_pages', 'time_csnp_pages', 'time_dsnp_pages', 'rel_time_dental_pages',
+            'rel_time_transportation_pages', 'rel_time_otc_pages', 'rel_time_drug_pages',
+            'rel_time_provider_pages', 'rel_time_vision_pages', 'rel_time_csnp_pages',
+            'rel_time_dsnp_pages', 'total_session_time', 'num_pages_viewed', 'num_plans_selected',
+            'num_plans_compared', 'submitted_application', 'dce_click_count', 'pro_click_count',
+            'ma_otc', 'ma_transportation', 'ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp',
+            'ma_provider_network', 'ma_drug_coverage'
+        ]
+        for df in [behavioral_df_full, plan_df_full]:
+            for col in numeric_columns:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
         logger.info(f"Behavioral data loaded: {len(behavioral_df_full)} rows")
         logger.info(f"Plan data loaded: {len(plan_df_full)} rows")
+        
+        app_ready = True  # Mark app as ready
     except Exception as e:
         logger.error(f"Error in init: {str(e)}")
         raise
@@ -143,10 +169,10 @@ def prepare_features(behavioral_df, plan_df):
         query_col = persona_info['query_col']
         filter_col = persona_info['filter_col']
         click_col = persona_info.get('click_col', None)
-        
+
         base_weight = 0
         if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
-            base_weight = min(row[plan_col], 0.7 if persona == 'csnp' else 0.5)
+            base_weight = min(float(row[plan_col]), 0.7 if persona == 'csnp' else 0.5)
             if persona == 'csnp' and 'csnp_type' in row and row['csnp_type'] == 'Y':
                 base_weight *= W_CSNP_HIGH
             elif persona == 'csnp':
@@ -166,41 +192,53 @@ def prepare_features(behavioral_df, plan_df):
                 elif persona == 'dsnp':
                     dsnp_type_y_ratio = (compared_plans['dsnp_type'] == 'Y').mean()
                     base_weight *= (W_DSNP_BASE + (W_DSNP_HIGH - W_DSNP_BASE) * dsnp_type_y_ratio)
-        
-        pages_viewed = min(row['num_pages_viewed'], 3) if pd.notna(row['num_pages_viewed']) else 0
-        query_value = row[query_col] if pd.notna(row[query_col]) else 0
-        filter_value = row[filter_col] if pd.notna(row[filter_col]) else 0
-        click_value = row[click_col] if click_col and pd.notna(row[click_col]) else 0
-        
+
+        pages_viewed = min(float(row['num_pages_viewed']), 3) if pd.notna(row['num_pages_viewed']) else 0
+        query_value = float(row[query_col]) if pd.notna(row[query_col]) else 0
+        filter_value = float(row[filter_col]) if pd.notna(row[filter_col]) else 0
+        click_value = float(row[click_col]) if click_col and pd.notna(row[click_col]) else 0
+
         query_coeff = k9 if persona == 'csnp' else k3
         filter_coeff = k10 if persona == 'csnp' else k4
         click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
-        
+
         behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
-        
+
         if persona == 'doctor':
-            if click_value >= 1.5: behavioral_score += 0.4
-            elif click_value >= 0.5: behavioral_score += 0.2
+            if click_value >= 1.5:
+                behavioral_score += 0.4
+            elif click_value >= 0.5:
+                behavioral_score += 0.2
         elif persona == 'drug':
-            if click_value >= 5: behavioral_score += 0.4
-            elif click_value >= 2: behavioral_score += 0.2
+            if click_value >= 5:
+                behavioral_score += 0.4
+            elif click_value >= 2:
+                behavioral_score += 0.2
         elif persona == 'dental':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.3
-            elif signal_count >= 1: behavioral_score += 0.15
+            signal_count = sum(1 for val in [query_value, filter_value, pages_viewed] if val > 0)
+            if signal_count >= 2:
+                behavioral_score += 0.3
+            elif signal_count >= 1:
+                behavioral_score += 0.15
         elif persona == 'vision':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 1: behavioral_score += 0.35
+            signal_count = sum(1 for val in [query_value, filter_value, pages_viewed] if val > 0)
+            if signal_count >= 1:
+                behavioral_score += 0.35
         elif persona == 'csnp':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.6
-            elif signal_count >= 1: behavioral_score += 0.5
-            if row['csnp_interaction'] > 0: behavioral_score += 0.3
-            if row['csnp_type_flag'] == 1: behavioral_score += 0.2
+            signal_count = sum(1 for val in [query_value, filter_value, pages_viewed] if val > 0)
+            if signal_count >= 2:
+                behavioral_score += 0.6
+            elif signal_count >= 1:
+                behavioral_score += 0.5
+            if row['csnp_interaction'] > 0:
+                behavioral_score += 0.3
+            if row['csnp_type_flag'] == 1:
+                behavioral_score += 0.2
         elif persona in ['fitness', 'hearing']:
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 1: behavioral_score += 0.3
-        
+            signal_count = sum(1 for val in [query_value, filter_value, pages_viewed] if val > 0)
+            if signal_count >= 1:
+                behavioral_score += 0.3
+
         adjusted_weight = base_weight + behavioral_score
         return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)
 
@@ -261,6 +299,8 @@ def score_data(model, X, metadata):
 @app.post("/score")
 async def score(request: ScoreRequest):
     """Score endpoint to process user data and return predictions."""
+    if not app_ready:
+        raise HTTPException(status_code=503, detail="Service is still initializing")
     try:
         userid = request.userid
         if not userid:
@@ -299,37 +339,37 @@ async def score(request: ScoreRequest):
 @app.get("/actuator/health")
 async def health_check():
     """Check if the service is up and running."""
+    if not app_ready:
+        raise HTTPException(status_code=503, detail="Service is still initializing")
     return Response(content="Healthy", status_code=200)
 
-# Initialize on startup
-@app.on_event("startup")
-async def startup_event():
-    init()
-
-# Test function with a sample request
+# Test function for Databricks
 def test_score_endpoint():
-    """Test the /score endpoint with a sample request."""
+    """Test the /score endpoint with userid='12345'."""
     client = TestClient(app)
     test_payload = {"userid": "12345"}
     try:
-        # Wait briefly to ensure the app is initialized (for Databricks)
         import asyncio
-        asyncio.sleep(2)  # Short delay to allow startup
+        asyncio.sleep(2)  # Brief delay to ensure app initialization
         response = client.post("/score", json=test_payload)
         logger.info(f"Test request status code: {response.status_code}")
         logger.info(f"Test request response: {response.json()}")
     except Exception as e:
         logger.error(f"Error during test request: {str(e)}")
 
+# Initialize on startup
+@app.on_event("startup")
+async def startup_event():
+    init()
+
 # Driver main method compatible with Databricks and AKS
 def run_app():
     """Run the FastAPI app, handling both Databricks and AKS environments."""
     try:
-        # Check if running in Databricks
+        # Check if running in Databricks (interactive environment)
         if 'DATABRICKS_RUNTIME_VERSION' in os.environ:
             logger.info("Detected Databricks environment")
             nest_asyncio.apply()  # Allow nested event loops in Databricks
-            test_score_endpoint()  # Run the test in Databricks
             uvicorn.run(app, host="0.0.0.0", port=8080, log_level="debug")
         else:
             # Assume AKS or standalone Python environment
@@ -340,4 +380,6 @@ def run_app():
         raise
 
 if __name__ == "__main__":
+    if 'DATABRICKS_RUNTIME_VERSION' in os.environ:
+        test_score_endpoint()  # Run test in Databricks before server starts
     run_app()

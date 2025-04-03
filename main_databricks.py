@@ -363,26 +363,6 @@ async def score(request: ScoreRequest):
     finally:
         logger.debug("Exiting /score endpoint")
 
-# Lifespan event handler to replace on_event
-async def startup():
-    logger.debug("Entering startup")
-    init()
-    logger.debug("Exiting startup")
-
-async def shutdown():
-    logger.debug("Entering shutdown")
-    logger.debug("Exiting shutdown")
-
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await startup()
-    yield
-    await shutdown()
-
-app.lifespan = lifespan
-
 # Test function for Databricks
 async def test_score_endpoint():
     """Test the /score endpoint with userid='12345'."""
@@ -390,8 +370,6 @@ async def test_score_endpoint():
     client = TestClient(app)
     test_payload = {"userid": "12345"}
     try:
-        logger.debug("Waiting for app initialization with 2-second delay")
-        await asyncio.sleep(2)  # Brief delay to ensure app initialization
         logger.debug("Sending test POST request to /score")
         response = client.post("/score", json=test_payload)
         logger.info(f"Test request status code: {response.status_code}")
@@ -404,6 +382,7 @@ async def test_score_endpoint():
 # Run the test in Databricks
 if __name__ == "__main__":
     logger.debug("Entering main block")
+    init()  # Call init synchronously before running the test
     nest_asyncio.apply()  # Allow nested event loops in Databricks
     loop = asyncio.get_event_loop()
     loop.run_until_complete(test_score_endpoint())

@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import asyncio
 from fastapi.testclient import TestClient
+import nest_asyncio
 
 # Set up logging with DEBUG level
 logging.basicConfig(level=logging.DEBUG)
@@ -400,8 +401,10 @@ async def test_score_endpoint():
     finally:
         logger.debug("Exiting test_score_endpoint")
 
-# Run the test
+# Run the test in Databricks
 if __name__ == "__main__":
     logger.debug("Entering main block")
-    asyncio.run(test_score_endpoint())
+    nest_asyncio.apply()  # Allow nested event loops in Databricks
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(test_score_endpoint())
     logger.debug("Exiting main block")

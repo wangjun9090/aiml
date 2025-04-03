@@ -8,11 +8,8 @@ import logging
 from azure.cosmos import CosmosClient
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from fastapi.responses import Response
-from fastapi.testclient import TestClient  # For testing in Databricks
-import uvicorn
-import nest_asyncio
 import asyncio
+from fastapi.testclient import TestClient
 
 # Set up logging with DEBUG level
 logging.basicConfig(level=logging.DEBUG)
@@ -22,7 +19,6 @@ logger = logging.getLogger(__name__)
 model = None
 behavioral_df_full = None
 plan_df_full = None
-app_ready = False  # For AKS health check
 
 # File definitions
 MODEL_FILE = "model-persona-0.0.1.pkl"
@@ -46,8 +42,8 @@ def load_data_from_cosmos(container):
     return df
 
 def init():
-    """Initialize the model and load full datasets for the endpoint."""
-    global model, behavioral_df_full, plan_df_full, app_ready
+    """Initialize the model and load full datasets."""
+    global model, behavioral_df_full, plan_df_full
     logger.debug("Entering init function")
     try:
         # Load model
@@ -115,9 +111,6 @@ def init():
 
         logger.info(f"Behavioral data loaded: {len(behavioral_df_full)} rows")
         logger.info(f"Plan data loaded: {len(plan_df_full)} rows")
-        
-        logger.debug("Setting app_ready to True")
-        app_ready = True  # Mark app as ready
     except Exception as e:
         logger.error(f"Error in init: {str(e)}")
         raise
@@ -323,9 +316,6 @@ def score_data(model, X, metadata):
 async def score(request: ScoreRequest):
     """Score endpoint to process user data and return predictions."""
     logger.debug("Entering /score endpoint")
-    if not app_ready:
-        logger.debug("App not ready, returning 503")
-        raise HTTPException(status_code=503, detail="Service is still initializing")
     try:
         userid = request.userid
         logger.debug(f"Processing request for userid: {userid}")
@@ -372,16 +362,25 @@ async def score(request: ScoreRequest):
     finally:
         logger.debug("Exiting /score endpoint")
 
-# Health check endpoint
-@app.get("/actuator/health")
-async def health_check():
-    """Check if the service is up and running."""
-    logger.debug("Entering /actuator/health endpoint")
-    if not app_ready:
-        logger.debug("App not ready, returning 503")
-        raise HTTPException(status_code=503, detail="Service is still initializing")
-    logger.debug("App is healthy, returning 200")
-    return Response(content="Healthy", status_code=200)
+# Lifespan event handler to replace on_event
+async def startup():
+    logger.debug("Entering startup")
+    init()
+    logger.debug("Exiting startup")
+
+async def shutdown():
+    logger.debug("Entering shutdown")
+    logger.debug("Exiting shutdown")
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await startup()
+    yield
+    await shutdown()
+
+app.lifespan = lifespan
 
 # Test function for Databricks
 async def test_score_endpoint():
@@ -401,41 +400,8 @@ async def test_score_endpoint():
     finally:
         logger.debug("Exiting test_score_endpoint")
 
-# Initialize on startup
-@app.on_event("startup")
-async def startup_event():
-    logger.debug("Entering startup_event")
-    init()
-    logger.debug("Exiting startup_event")
-
-# Driver main method compatible with Databricks and AKS
-def run_app():
-    """Run the FastAPI app, handling both Databricks and AKS environments."""
-    logger.debug("Entering run_app")
-    try:
-        # Check if running in Databricks (interactive environment)
-        if 'DATABRICKS_RUNTIME_VERSION' in os.environ:
-            logger.info("Detected Databricks environment")
-            logger.debug("Applying nest_asyncio")
-            nest_asyncio.apply()  # Allow nested event loops in Databricks
-            logger.debug("Starting uvicorn server in Databricks")
-            uvicorn.run(app, host="0.0.0.0", port=8080, log_level="debug")
-        else:
-            # Assume AKS or standalone Python environment
-            logger.info("Running in standalone/AKS environment")
-            logger.debug("Starting uvicorn server in AKS/standalone")
-            uvicorn.run(app, host="0.0.0.0", port=8080, log_level="debug")
-    except Exception as e:
-        logger.error(f"Error running app: {str(e)}")
-        raise
-    finally:
-        logger.debug("Exiting run_app")
-
+# Run the test
 if __name__ == "__main__":
     logger.debug("Entering main block")
-    if 'DATABRICKS_RUNTIME_VERSION' in os.environ:
-        logger.debug("Running test in Databricks")
-        asyncio.run(test_score_endpoint())  # Run async test in Databricks
-    logger.debug("Calling run_app")
-    run_app()
+    asyncio.run(test_score_endpoint())
     logger.debug("Exiting main block")

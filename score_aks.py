@@ -9,6 +9,8 @@ from azure.cosmos import CosmosClient
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.responses import Response
+import uvicorn
+import nest_asyncio
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 model = None
 behavioral_df_full = None
 plan_df_full = None
-app_ready = False  # Added for AKS health check
+app_ready = False  # For AKS health check
 
 # File definitions
 MODEL_FILE = "model-persona-0.0.1.pkl"
@@ -345,4 +347,22 @@ async def health_check():
 async def startup_event():
     init()
 
-# Removed Databricks-specific run logic
+# Driver main method compatible with Databricks and AKS
+def run_app():
+    """Run the FastAPI app, handling both Databricks and AKS environments."""
+    try:
+        # Check if running in Databricks (interactive environment)
+        if 'DATABRICKS_RUNTIME_VERSION' in os.environ:
+            logger.info("Detected Databricks environment")
+            nest_asyncio.apply()  # Allow nested event loops in Databricks
+            uvicorn.run(app, host="0.0.0.0", port=8080, log_level="debug")
+        else:
+            # Assume AKS or standalone Python environment
+            logger.info("Running in standalone/AKS environment")
+            uvicorn.run(app, host="0.0.0.0", port=8080, log_level="debug")
+    except Exception as e:
+        logger.error(f"Error running app: {str(e)}")
+        raise
+
+if __name__ == "__main__":
+    run_app()

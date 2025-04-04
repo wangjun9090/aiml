@@ -12,7 +12,7 @@ from fastapi.responses import Response
 import uvicorn
 from contextlib import asynccontextmanager
 
-# Set up logging with INFO level (no DEBUG for performance)
+# Set up logging with INFO level
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ def init():
         # Load model
         model_path = MODEL_FILE
         if not os.path.exists(model_path):
+            logger.error(f"Model file not found at {model_path}")
             raise FileNotFoundError(f"Model file not found at {model_path}")
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
@@ -58,12 +59,24 @@ def init():
         plan_container_name = os.getenv("COSMOS_PERSONA_CONTAINER_PLAN")
 
         if not all([endpoint, key, database_name, behavioral_container_name, plan_container_name]):
-            raise ValueError("One or more Cosmos DB environment variables are not set")
+            missing_vars = [var for var, val in [
+                ("COSMOS_ENDPOINT", endpoint),
+                ("COSMOS_KEY", key),
+                ("COSMOS_PERSONA_DB", database_name),
+                ("COSMOS_PERSONA_CONTAINER_BEHAVIOR", behavioral_container_name),
+                ("COSMOS_PERSONA_CONTAINER_PLAN", plan_container_name)
+            ] if not val]
+            logger.error(f"Missing environment variables: {missing_vars}")
+            raise ValueError(f"Missing environment variables: {missing_vars}")
 
         # Initialize Cosmos DB client
-        client = CosmosClient(endpoint, credential=key)
-        logger.info("Successfully connected to Cosmos DB")
-        
+        try:
+            client = CosmosClient(endpoint, credential=key)
+            logger.info("Successfully connected to Cosmos DB")
+        except Exception as e:
+            logger.error(f"Failed to connect to Cosmos DB: {str(e)}")
+            raise
+
         database = client.get_database_client(database_name)
         behavioral_container = database.get_container_client(behavioral_container_name)
         plan_container = database.get_container_client(plan_container_name)
@@ -97,11 +110,12 @@ def init():
         logger.info(f"Plan data loaded: {len(plan_df_full)} rows")
         
         app_ready = True  # Mark app as ready for health check
+        logger.info("Initialization completed successfully")
     except Exception as e:
         logger.error(f"Error in init: {str(e)}")
-        raise
+        raise  # Re-raise to ensure startup fails if init fails
 
-# Feature preparation and scoring functions
+# Feature preparation and scoring functions (unchanged from previous version)
 def prepare_features(behavioral_df, plan_df):
     """Prepare features and assign quality levels for scoring, joining with plan_df."""
     df = behavioral_df.merge(
@@ -201,7 +215,7 @@ def prepare_features(behavioral_df, plan_df):
         filter_coeff = k10 if persona == 'csnp' else k4
         click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
 
-        behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k:element1 * pages_viewed + click_coefficient * click_value
+        behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
 
         if persona == 'doctor':
             if click_value >= 1.5:

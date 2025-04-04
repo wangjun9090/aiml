@@ -10,10 +10,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.responses import Response
 import uvicorn
-from contextlib import asynccontextmanager
 
-# Set up logging with INFO level
-logging.basicConfig(level=logging.INFO)
+# Set up logging with INFO level (temporarily include DEBUG for debugging)
+logging.basicConfig(level=logging.DEBUG)  # Switch back to INFO after debugging
 logger = logging.getLogger(__name__)
 
 # Global variables
@@ -41,6 +40,7 @@ def load_data_from_cosmos(container):
 def init():
     """Initialize the model and load full datasets."""
     global model, behavioral_df_full, plan_df_full, app_ready
+    logger.debug("Entering init function")
     try:
         # Load model
         model_path = MODEL_FILE
@@ -109,13 +109,13 @@ def init():
         logger.info(f"Behavioral data loaded: {len(behavioral_df_full)} rows")
         logger.info(f"Plan data loaded: {len(plan_df_full)} rows")
         
-        app_ready = True  # Mark app as ready for health check
+        app_ready = True
         logger.info("Initialization completed successfully")
     except Exception as e:
         logger.error(f"Error in init: {str(e)}")
-        raise  # Re-raise to ensure startup fails if init fails
+        raise  # Ensure startup fails if init fails
 
-# Feature preparation and scoring functions (unchanged from previous version)
+# Feature preparation and scoring functions (unchanged)
 def prepare_features(behavioral_df, plan_df):
     """Prepare features and assign quality levels for scoring, joining with plan_df."""
     df = behavioral_df.merge(
@@ -354,20 +354,9 @@ async def health_check():
         raise HTTPException(status_code=503, detail="Service is still initializing")
     return Response(content="Healthy", status_code=200)
 
-# Lifespan event handler to replace deprecated on_event
-async def startup():
-    init()
-
-async def shutdown():
-    pass  # No cleanup needed for this use case
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await startup()
-    yield
-    await shutdown()
-
-app.lifespan = lifespan
-
+# Main execution
 if __name__ == "__main__":
+    logger.debug("Starting application")
+    init()  # Call init synchronously before running the server
+    logger.debug("Starting Uvicorn server")
     uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")

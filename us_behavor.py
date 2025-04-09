@@ -98,11 +98,19 @@ schema = pa.schema([
 
 # Process each sub-chunk
 def process_sub_chunk(chunk):
+    print(f"Initial chunk rows: {len(chunk)}")
+    # Sample input data
+    if not chunk.empty:
+        print("Sample of input chunk:")
+        print(chunk[['internalUserId', 'startTime', 'userActions.targetUrl']].head())
+    
     # Filter only for non-null internalUserId
     chunk = chunk[chunk['internalUserId'].notna()].reset_index(drop=True)
+    print(f"Rows after internalUserId filter: {len(chunk)}")
     
     # Initial deduplication within chunk
     chunk = chunk.drop_duplicates(subset=['internalUserId', 'userActions.targetUrl'], keep='first').reset_index(drop=True)
+    print(f"Rows after initial deduplication: {len(chunk)}")
     
     # Initialize output_df for chunk
     output_df = pd.DataFrame(index=chunk.index, columns=output_columns)
@@ -110,6 +118,7 @@ def process_sub_chunk(chunk):
     # Populate basic fields
     output_df['userid'] = chunk['internalUserId']
     output_df['start_time'] = chunk['startTime']
+    print(f"Rows after basic fields: {len(output_df)}")
     
     # URL extraction functions
     def extract_zip(url):
@@ -148,6 +157,7 @@ def process_sub_chunk(chunk):
     output_df['compared_plan_ids'] = chunk['userActions.targetUrl'].apply(extract_compared_plan_ids)
     output_df['city'] = chunk.get('city', pd.Series(index=chunk.index, dtype='object'))
     output_df['state'] = chunk.get('userActions.extracted_data.text.stateCode', pd.Series(index=chunk.index, dtype='object'))
+    print(f"Rows after URL extraction: {len(output_df)}")
     
     # Deduplicate compared_plan_ids
     def deduplicate_compared_plan_ids(df):
@@ -158,6 +168,7 @@ def process_sub_chunk(chunk):
         return df
     
     output_df = deduplicate_compared_plan_ids(output_df)
+    print(f"Rows after deduplicate_compared_plan_ids: {len(output_df)}")
     
     # Query and filter mappings
     query_mappings = {
@@ -188,6 +199,7 @@ def process_sub_chunk(chunk):
         output_df[col] = chunk['userActions.targetUrl'].str.contains(pattern, case=False, na=False).astype(int)
     
     output_df['filter_provider'] = 0
+    print(f"Rows after query/filter mappings: {len(output_df)}")
     
     # Ignored fields
     for col in ['accordion_dental', 'accordion_transportation', 'accordion_otc', 'accordion_drug',
@@ -212,6 +224,7 @@ def process_sub_chunk(chunk):
     )
     output_df['submitted_application'] = chunk['userActions.targetUrl'].str.contains(
         r'online-application.html', case=False, na=False).astype(int)
+    print(f"Rows after session metrics: {len(output_df)}")
     
     # Date filter
     date_pattern = r'^[A-Za-z]{3} \d{1,2}, \d{4} @ \d{2}:\d{2}:\d{2}\.\d{3}$'
@@ -219,6 +232,10 @@ def process_sub_chunk(chunk):
     output_df = output_df[mask]
     chunk = chunk[mask].reset_index(drop=True)
     output_df = output_df.reset_index(drop=True)
+    print(f"Rows after date filter: {len(output_df)}")
+    if not output_df.empty:
+        print("Sample after date filter:")
+        print(output_df[['userid', 'start_time']].head())
     
     # Final deduplication by userid
     def deduplicate_state(df):
@@ -227,6 +244,7 @@ def process_sub_chunk(chunk):
     
     output_df = deduplicate_state(output_df)
     chunk = chunk[chunk['internalUserId'].isin(output_df['userid'])].reset_index(drop=True)
+    print(f"Rows after final deduplication: {len(output_df)}")
     
     # Persona logic
     top_priority_mapping = {
@@ -277,7 +295,6 @@ def process_sub_chunk(chunk):
         mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
         return ','.join(mapped)
     
-    # Debug persona function on first few rows
     if not chunk.empty:
         print("Debugging determine_persona on first 5 rows:")
         for idx, row in chunk.head(5).iterrows():
@@ -289,6 +306,7 @@ def process_sub_chunk(chunk):
     output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))
     output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])
     output_df['persona'] = output_df['persona'].apply(map_persona)
+    print(f"Rows after persona assignment: {len(output_df)}")
     
     return output_df
 

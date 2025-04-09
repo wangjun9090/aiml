@@ -1,22 +1,20 @@
 import pandas as pd
 import numpy as np
+import pyarrow.parquet as pq
 
 # Load the cleaned clickstream data
 clickstream_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/us/union_elastic_us_0301_0331_2025.parquet'
 output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025.parquet'
 print(f"Loading file: {clickstream_file}")
 
-try:
-    clickstream_df = pd.read_parquet(clickstream_file)
-except Exception as e:
-    print(f"Error loading file: {e}")
-    raise
+# Use pyarrow to read Parquet metadata
+parquet_file = pq.ParquetFile(clickstream_file)
+total_rows = parquet_file.metadata.num_rows
+print(f"Initial rows loaded: {total_rows}")
 
-print(f"Initial rows loaded: {len(clickstream_df)}")
-
-# Check if DataFrame is empty
-if clickstream_df.empty:
-    print("Error: The input DataFrame is empty. Please check the Parquet file.")
+# Check if file is empty
+if total_rows == 0:
+    print("Error: The input Parquet file is empty.")
     output_columns = [
         'userid', 'start_time', 'city', 'state', 'zip', 'plan_id', 'compared_plan_ids',
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
@@ -35,12 +33,12 @@ if clickstream_df.empty:
     output_df = pd.DataFrame(columns=output_columns)
     output_df.to_parquet(output_file, index=False, compression='snappy')
     print(f"Saved empty output file to {output_file}")
-    raise ValueError("Processing stopped due to empty input DataFrame.")
+    raise ValueError("Processing stopped due to empty input Parquet file.")
 
-# Define chunk size
-chunk_size = 100000  # Adjust based on your cluster's capacity (e.g., 50k, 200k)
+# Define chunk size (adjust based on memory capacity)
+chunk_size = 100000
 
-# Process in chunks
+# Process in chunks using pyarrow
 def process_chunk(chunk):
     # Filter only for non-null internalUserId
     chunk = chunk[chunk['internalUserId'].notna()].reset_index(drop=True)
@@ -230,7 +228,9 @@ def process_chunk(chunk):
 
 # Process chunks and append to output file
 first_chunk = True
-for i, chunk in enumerate(pd.read_parquet(clickstream_file, chunksize=chunk_size)):
+for i in range(parquet_file.num_row_groups):
+    # Read one row group at a time (approximate chunking)
+    chunk = parquet_file.read_row_group(i).to_pandas()
     print(f"Processing chunk {i + 1} with {len(chunk)} rows")
     output_chunk = process_chunk(chunk)
     mode = 'w' if first_chunk else 'a'  # Overwrite on first chunk, append on subsequent

@@ -12,21 +12,30 @@ except Exception as e:
     raise
 
 print(f"Initial rows loaded: {len(clickstream_df)}")
-print("Column names in input file:")
-print(list(clickstream_df.columns))
-print("Sample of initial data:")
-print(clickstream_df.head())
 
-# Check if required columns exist
-expected_columns = ['internalUserId', 'startTime', 'userActions.extracted_data.text.topPriority', 
-                   'userActions.extracted_data.text.specialneeds_option', 'userActions.extracted_data.text.drugs_option',
-                   'userActions.targetUrl', 'duration', 'userActions.extracted_data.text.stateCode']
-print("Checking for expected columns:")
-for col in expected_columns:
-    if col in clickstream_df.columns:
-        print(f" - Found: {col}")
-    else:
-        print(f" - Missing: {col}")
+# Check if DataFrame is empty
+if clickstream_df.empty:
+    print("Error: The input DataFrame is empty. Please check the Parquet file.")
+    output_columns = [
+        'userid', 'start_time', 'city', 'state', 'zip', 'plan_id', 'compared_plan_ids',
+        'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
+        'query_csnp', 'query_dsnp',
+        'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug', 'filter_provider', 'filter_vision',
+        'filter_csnp', 'filter_dsnp',
+        'accordion_dental', 'accordion_transportation', 'accordion_otc', 'accordion_drug', 'accordion_provider',
+        'accordion_vision', 'accordion_csnp', 'accordion_dsnp',
+        'time_dental_pages', 'time_transportation_pages', 'time_otc_pages', 'time_drug_pages',
+        'time_provider_pages', 'time_vision_pages', 'time_csnp_pages', 'time_dsnp_pages',
+        'rel_time_dental_pages', 'rel_time_transportation_pages', 'rel_time_otc_pages', 'rel_time_drug_pages',
+        'rel_time_provider_pages', 'rel_time_vision_pages', 'rel_time_csnp_pages', 'rel_time_dsnp_pages',
+        'total_session_time', 'num_pages_viewed', 'num_plans_selected', 'num_plans_compared',
+        'submitted_application', 'persona'
+    ]
+    output_df = pd.DataFrame(columns=output_columns)
+    output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025.parquet'
+    output_df.to_parquet(output_file, index=False, compression='snappy')
+    print(f"Saved empty output file to {output_file}")
+    raise ValueError("Processing stopped due to empty input DataFrame.")
 
 # Filter only for non-null internalUserId
 clickstream_df = clickstream_df[clickstream_df['internalUserId'].notna()]
@@ -37,23 +46,6 @@ print(f"Rows after filtering non-null internalUserId: {len(clickstream_df)}")
 clickstream_df = clickstream_df.drop_duplicates(subset=['internalUserId', 'userActions.targetUrl'], keep='first')
 clickstream_df = clickstream_df.reset_index(drop=True)
 print(f"Rows after initial deduplication: {len(clickstream_df)}")
-
-# Define output columns
-output_columns = [
-    'userid', 'start_time', 'city', 'state', 'zip', 'plan_id', 'compared_plan_ids',
-    'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
-    'query_csnp', 'query_dsnp',
-    'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug', 'filter_provider', 'filter_vision',
-    'filter_csnp', 'filter_dsnp',
-    'accordion_dental', 'accordion_transportation', 'accordion_otc', 'accordion_drug', 'accordion_provider',
-    'accordion_vision', 'accordion_csnp', 'accordion_dsnp',
-    'time_dental_pages', 'time_transportation_pages', 'time_otc_pages', 'time_drug_pages',
-    'time_provider_pages', 'time_vision_pages', 'time_csnp_pages', 'time_dsnp_pages',
-    'rel_time_dental_pages', 'rel_time_transportation_pages', 'rel_time_otc_pages', 'rel_time_drug_pages',
-    'rel_time_provider_pages', 'rel_time_vision_pages', 'rel_time_csnp_pages', 'rel_time_dsnp_pages',
-    'total_session_time', 'num_pages_viewed', 'num_plans_selected', 'num_plans_compared',
-    'submitted_application', 'persona'
-]
 
 # Initialize output_df
 output_df = pd.DataFrame(index=clickstream_df.index, columns=output_columns)
@@ -97,8 +89,8 @@ def extract_compared_plan_ids(url):
 output_df['zip'] = clickstream_df['userActions.targetUrl'].apply(extract_zip)
 output_df['plan_id'] = clickstream_df['userActions.targetUrl'].apply(extract_plan_id)
 output_df['compared_plan_ids'] = clickstream_df['userActions.targetUrl'].apply(extract_compared_plan_ids)
-output_df['city'] = clickstream_df.get('city', pd.Series(index=clickstream_df.index))
-output_df['state'] = clickstream_df.get('userActions.extracted_data.text.stateCode', pd.Series(index=clickstream_df.index))
+output_df['city'] = clickstream_df.get('city', pd.Series(index=clickstream_df.index, dtype='object'))
+output_df['state'] = clickstream_df.get('userActions.extracted_data.text.stateCode', pd.Series(index=clickstream_df.index, dtype='object'))
 
 # Deduplicate compared_plan_ids
 def deduplicate_compared_plan_ids(df):
@@ -202,7 +194,6 @@ def determine_persona(row):
     
     persona_parts = []
     
-    # CSNP condition
     if specialneeds_option and '["snp_chronic"]' in specialneeds_option:
         if pd.notna(top_priority) and top_priority != 'csnp':
             persona_parts.append(determine_base_persona(top_priority))
@@ -210,7 +201,6 @@ def determine_persona(row):
         else:
             persona_parts.append('csnp')
     
-    # DSNP condition
     if specialneeds_option and '["snp_medicaid"]' in specialneeds_option:
         if pd.notna(top_priority) and top_priority != 'dsnp':
             if not persona_parts:
@@ -219,17 +209,13 @@ def determine_persona(row):
         else:
             persona_parts.append('dsnp')
     
-    # Drugs option
     if drugs_option and '["drug_yes"]' in drugs_option:
         persona_parts.append('ma_drug_coverage')
     
-    # Top priority fallback
     if not persona_parts and pd.notna(top_priority):
         persona_parts.append(determine_base_persona(top_priority))
     
-    # Ensure scalar string output
-    result = ','.join(persona_parts) if persona_parts else 'unknown'
-    return str(result)  # Force string output
+    return ','.join(persona_parts) if persona_parts else 'unknown'
 
 def determine_base_persona(top_priority):
     return top_priority_mapping.get(top_priority, top_priority)
@@ -241,32 +227,15 @@ def map_persona(persona):
     mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
     return ','.join(mapped)
 
-# Debug: Test persona function on a small subset
-print("Testing determine_persona on first 5 rows:")
-test_subset = clickstream_df.head(5)
-for idx, row in test_subset.iterrows():
-    result = determine_persona(row)
-    print(f"Row {idx}: Result = {result}, Type = {type(result)}")
-
 # Apply persona and merge
 clickstream_df['persona'] = clickstream_df.apply(determine_persona, axis=1)
-print("Sample of clickstream_df with persona:")
-print(clickstream_df[['internalUserId', 'persona']].head())
-
 persona_df = clickstream_df.groupby('internalUserId')['persona'].first().reset_index()
 output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))
 output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])
 output_df['persona'] = output_df['persona'].apply(map_persona)
 
-# Debug persona distribution
-print("Persona distribution after mapping:")
-print(output_df['persona'].value_counts())
-
-# Save output
+# Save output with compression
 output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025.parquet'
 print(f"Final rows in output_df: {len(output_df)}")
-pd.set_option('display.max_columns', None)
-pd.set_option('display.width', None)
-print(output_df.head())
-output_df.to_parquet(output_file, index=False)
+output_df.to_parquet(output_file, index=False, compression='snappy')
 print(f"Behavioral feature file saved to {output_file}")

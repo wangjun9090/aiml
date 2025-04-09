@@ -17,6 +17,17 @@ print(list(clickstream_df.columns))
 print("Sample of initial data:")
 print(clickstream_df.head())
 
+# Check if required columns exist
+expected_columns = ['internalUserId', 'startTime', 'userActions.extracted_data.text.topPriority', 
+                   'userActions.extracted_data.text.specialneeds_option', 'userActions.extracted_data.text.drugs_option',
+                   'userActions.targetUrl', 'duration', 'userActions.extracted_data.text.stateCode']
+print("Checking for expected columns:")
+for col in expected_columns:
+    if col in clickstream_df.columns:
+        print(f" - Found: {col}")
+    else:
+        print(f" - Missing: {col}")
+
 # Filter only for non-null internalUserId
 clickstream_df = clickstream_df[clickstream_df['internalUserId'].notna()]
 clickstream_df = clickstream_df.reset_index(drop=True)
@@ -44,7 +55,7 @@ output_columns = [
     'submitted_application', 'persona'
 ]
 
-# Initialize output_df with same index as clickstream_df
+# Initialize output_df
 output_df = pd.DataFrame(index=clickstream_df.index, columns=output_columns)
 
 # Populate basic fields
@@ -139,7 +150,12 @@ for col in ['accordion_dental', 'accordion_transportation', 'accordion_otc', 'ac
     output_df[col] = 0.0
 
 # Session metrics
-output_df['total_session_time'] = pd.to_numeric(clickstream_df['duration'], errors='coerce').fillna(0.0)
+if 'duration' in clickstream_df.columns:
+    output_df['total_session_time'] = pd.to_numeric(clickstream_df['duration'], errors='coerce').fillna(0.0)
+else:
+    print("Warning: 'duration' column not found in clickstream_df. Setting total_session_time to 0.0")
+    output_df['total_session_time'] = 0.0
+
 output_df['num_pages_viewed'] = 1
 output_df['num_plans_selected'] = clickstream_df['userActions.targetUrl'].str.contains(
     'https://www.uhc.com/medicare/health-plans/details.html', case=False, na=False).astype(int)
@@ -215,11 +231,11 @@ def map_persona(persona):
     mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
     return ','.join(mapped)
 
-# Debug lengths before applying persona
+# Debug lengths
 print(f"Length of clickstream_df: {len(clickstream_df)}")
 print(f"Length of output_df: {len(output_df)}")
 
-# Since output_df is grouped by userid, merge persona based on userid
+# Merge persona based on userid
 clickstream_df['persona'] = clickstream_df.apply(determine_persona, axis=1)
 persona_df = clickstream_df.groupby('internalUserId')['persona'].first().reset_index()
 output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))

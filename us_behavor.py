@@ -5,7 +5,7 @@ import pyarrow.parquet as pq
 
 # File paths
 clickstream_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/us/union_elastic_us_0301_0331_2025.parquet'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025.parquet'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025_test.parquet'  # Changed for test
 print(f"Loading file: {clickstream_file}")
 
 # Use pyarrow to read Parquet metadata
@@ -35,9 +35,6 @@ if total_rows == 0:
     output_df.to_parquet(output_file, index=False, compression='snappy')
     print(f"Saved empty output file to {output_file}")
     raise ValueError("Processing stopped due to empty input Parquet file.")
-
-# Define sub-chunk size
-sub_chunk_size = 100000
 
 # Define schema for output Parquet file
 schema = pa.schema([
@@ -96,10 +93,9 @@ schema = pa.schema([
     ('persona', pa.string())
 ])
 
-# Process each sub-chunk
-def process_sub_chunk(chunk):
+# Process a single chunk with top 10000 records
+def process_chunk(chunk):
     print(f"Initial chunk rows: {len(chunk)}")
-    # Sample input data
     if not chunk.empty:
         print("Sample of input chunk:")
         print(chunk[['internalUserId', 'startTime', 'userActions.targetUrl']].head())
@@ -299,40 +295,19 @@ def process_sub_chunk(chunk):
     
     return output_df
 
-# Process row groups and sub-chunks with pyarrow ParquetWriter
-writer = None
-first_chunk = True
-for i in range(parquet_file.num_row_groups):
-    # Read one row group
-    row_group = parquet_file.read_row_group(i).to_pandas()
-    print(f"Processing row group {i + 1} with {len(row_group)} rows")
-    
-    # Split row group into sub-chunks
-    num_sub_chunks = (len(row_group) + sub_chunk_size - 1) // sub_chunk_size  # Ceiling division
-    for j in range(num_sub_chunks):
-        start_idx = j * sub_chunk_size
-        end_idx = min((j + 1) * sub_chunk_size, len(row_group))
-        sub_chunk = row_group.iloc[start_idx:end_idx].reset_index(drop=True)
-        print(f"  Processing sub-chunk {j + 1}/{num_sub_chunks} with {len(sub_chunk)} rows")
-        
-        # Process sub-chunk
-        output_sub_chunk = process_sub_chunk(sub_chunk)
-        
-        # Convert to pyarrow Table
-        table = pa.Table.from_pandas(output_sub_chunk, schema=schema, preserve_index=False)
-        
-        # Initialize writer on first chunk, then append
-        if first_chunk:
-            writer = pq.ParquetWriter(output_file, schema, compression='snappy')
-            writer.write_table(table)
-            first_chunk = False
-        else:
-            writer.write_table(table)
-        
-        print(f"  Sub-chunk {j + 1}/{num_sub_chunks} processed and saved. Rows in output: {len(output_sub_chunk)}")
+# Process only the top 10000 records from the first row group
+row_group = parquet_file.read_row_group(0).to_pandas()  # First row group
+chunk = row_group.head(10000).reset_index(drop=True)  # Top 10000 rows
+print(f"Processing test chunk with {len(chunk)} rows")
 
-# Close the writer
-if writer:
-    writer.close()
+# Process the chunk
+output_chunk = process_chunk(chunk)
 
-print(f"Behavioral feature file saved to {output_file}")
+# Write the output
+writer = pq.ParquetWriter(output_file, schema, compression='snappy')
+table = pa.Table.from_pandas(output_chunk, schema=schema, preserve_index=False)
+writer.write_table(table)
+writer.close()
+
+print(f"Test behavioral feature file saved to {output_file}")
+print(f"Final rows in output: {len(output_chunk)}")

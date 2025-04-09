@@ -36,9 +36,9 @@ if total_rows == 0:
     raise ValueError("Processing stopped due to empty input Parquet file.")
 
 # Define sub-chunk size
-sub_chunk_size = 100000  # 100k rows per sub-chunk
+sub_chunk_size = 100000
 
-# Process each row group and split into sub-chunks
+# Process each sub-chunk
 def process_sub_chunk(chunk):
     # Filter only for non-null internalUserId
     chunk = chunk[chunk['internalUserId'].notna()].reset_index(drop=True)
@@ -188,14 +188,14 @@ def process_sub_chunk(chunk):
         
         persona_parts = []
         
-        if specialneeds_option and '["snp_chronic"]' in specialneeds_option:
+        if isinstance(specialneeds_option, str) and '["snp_chronic"]' in specialneeds_option:
             if pd.notna(top_priority) and top_priority != 'csnp':
                 persona_parts.append(top_priority_mapping.get(top_priority, top_priority))
                 persona_parts.append('csnp')
             else:
                 persona_parts.append('csnp')
         
-        if specialneeds_option and '["snp_medicaid"]' in specialneeds_option:
+        if isinstance(specialneeds_option, str) and '["snp_medicaid"]' in specialneeds_option:
             if pd.notna(top_priority) and top_priority != 'dsnp':
                 if not persona_parts:
                     persona_parts.append(top_priority_mapping.get(top_priority, top_priority))
@@ -203,13 +203,27 @@ def process_sub_chunk(chunk):
             else:
                 persona_parts.append('dsnp')
         
-        if drugs_option and '["drug_yes"]' in drugs_option:
+        if isinstance(drugs_option, str) and '["drug_yes"]' in drugs_option:
             persona_parts.append('ma_drug_coverage')
         
         if not persona_parts and pd.notna(top_priority):
             persona_parts.append(top_priority_mapping.get(top_priority, top_priority))
         
-        return ','.join(persona_parts) if persona_parts else 'unknown'
+        result = ','.join(persona_parts) if persona_parts else 'unknown'
+        return str(result)  # Explicitly ensure string output
+    
+    # Debug persona function on first few rows
+    if not chunk.empty:
+        print("Debugging determine_persona on first 5 rows:")
+        for idx, row in chunk.head(5).iterrows():
+            result = determine_persona(row)
+            print(f"Row {idx}: Result = {result}, Type = {type(result)}")
+    
+    chunk['persona'] = chunk.apply(determine_persona, axis=1)
+    persona_df = chunk.groupby('internalUserId')['persona'].first().reset_index()
+    output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))
+    output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])
+    output_df['persona'] = output_df['persona'].apply(map_persona)
     
     def map_persona(persona):
         if pd.isna(persona) or persona == 'unknown':
@@ -217,12 +231,6 @@ def process_sub_chunk(chunk):
         parts = persona.split(',')
         mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
         return ','.join(mapped)
-    
-    chunk['persona'] = chunk.apply(determine_persona, axis=1)
-    persona_df = chunk.groupby('internalUserId')['persona'].first().reset_index()
-    output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))
-    output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])
-    output_df['persona'] = output_df['persona'].apply(map_persona)
     
     return output_df
 

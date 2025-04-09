@@ -226,17 +226,6 @@ def process_sub_chunk(chunk):
         r'online-application.html', case=False, na=False).astype(int)
     print(f"Rows after session metrics: {len(output_df)}")
     
-    # Date filter
-    date_pattern = r'^[A-Za-z]{3} \d{1,2}, \d{4} @ \d{2}:\d{2}:\d{2}\.\d{3}$'
-    mask = output_df['start_time'].str.match(date_pattern, na=False)
-    output_df = output_df[mask]
-    chunk = chunk[mask].reset_index(drop=True)
-    output_df = output_df.reset_index(drop=True)
-    print(f"Rows after date filter: {len(output_df)}")
-    if not output_df.empty:
-        print("Sample after date filter:")
-        print(output_df[['userid', 'start_time']].head())
-    
     # Final deduplication by userid
     def deduplicate_state(df):
         df = df.sort_values('start_time')

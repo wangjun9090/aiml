@@ -253,4 +253,79 @@ def process_sub_chunk(chunk):
             else:
                 persona_parts.append('csnp')
         
-        if isinstance(s
+        if isinstance(specialneeds_option, str) and '["snp_medicaid"]' in specialneeds_option:
+            if pd.notna(top_priority) and top_priority != 'dsnp':
+                if not persona_parts:
+                    persona_parts.append(top_priority_mapping.get(top_priority, top_priority))
+                persona_parts.append('dsnp')
+            else:
+                persona_parts.append('dsnp')
+        
+        if isinstance(drugs_option, str) and '["drug_yes"]' in drugs_option:
+            persona_parts.append('ma_drug_coverage')
+        
+        if not persona_parts and pd.notna(top_priority):
+            persona_parts.append(top_priority_mapping.get(top_priority, top_priority))
+        
+        result = ','.join(persona_parts) if persona_parts else 'unknown'
+        return str(result)
+    
+    def map_persona(persona):
+        if pd.isna(persona) or persona == 'unknown':
+            return persona
+        parts = persona.split(',')
+        mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
+        return ','.join(mapped)
+    
+    # Debug persona function on first few rows
+    if not chunk.empty:
+        print("Debugging determine_persona on first 5 rows:")
+        for idx, row in chunk.head(5).iterrows():
+            result = determine_persona(row)
+            print(f"Row {idx}: Result = {result}, Type = {type(result)}")
+    
+    chunk['persona'] = chunk.apply(determine_persona, axis=1)
+    persona_df = chunk.groupby('internalUserId')['persona'].first().reset_index()
+    output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))
+    output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])
+    output_df['persona'] = output_df['persona'].apply(map_persona)
+    
+    return output_df
+
+# Process row groups and sub-chunks with pyarrow ParquetWriter
+writer = None
+first_chunk = True
+for i in range(parquet_file.num_row_groups):
+    # Read one row group
+    row_group = parquet_file.read_row_group(i).to_pandas()
+    print(f"Processing row group {i + 1} with {len(row_group)} rows")
+    
+    # Split row group into sub-chunks
+    num_sub_chunks = (len(row_group) + sub_chunk_size - 1) // sub_chunk_size  # Ceiling division
+    for j in range(num_sub_chunks):
+        start_idx = j * sub_chunk_size
+        end_idx = min((j + 1) * sub_chunk_size, len(row_group))
+        sub_chunk = row_group.iloc[start_idx:end_idx].reset_index(drop=True)
+        print(f"  Processing sub-chunk {j + 1}/{num_sub_chunks} with {len(sub_chunk)} rows")
+        
+        # Process sub-chunk
+        output_sub_chunk = process_sub_chunk(sub_chunk)
+        
+        # Convert to pyarrow Table
+        table = pa.Table.from_pandas(output_sub_chunk, schema=schema, preserve_index=False)
+        
+        # Initialize writer on first chunk, then append
+        if first_chunk:
+            writer = pq.ParquetWriter(output_file, schema, compression='snappy')
+            writer.write_table(table)
+            first_chunk = False
+        else:
+            writer.write_table(table)
+        
+        print(f"  Sub-chunk {j + 1}/{num_sub_chunks} processed and saved. Rows in output: {len(output_sub_chunk)}")
+
+# Close the writer
+if writer:
+    writer.close()
+
+print(f"Behavioral feature file saved to {output_file}")

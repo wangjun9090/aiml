@@ -200,26 +200,38 @@ def determine_persona(row):
     drugs_option = row.get('userActions.extracted_data.text.drugs_option', '')
     top_priority = row.get('userActions.extracted_data.text.topPriority', np.nan)
     
-    persona = ''
+    persona = []
+    
+    # CSNP condition
     if specialneeds_option and '["snp_chronic"]' in specialneeds_option:
         if pd.notna(top_priority) and top_priority != 'csnp':
-            persona = f'{determine_base_persona(top_priority)},csnp'
+            persona.append(determine_base_persona(top_priority))
+            persona.append('csnp')
         else:
-            persona = 'csnp'
+            persona.append('csnp')
     
+    # DSNP condition
     if specialneeds_option and '["snp_medicaid"]' in specialneeds_option:
         if pd.notna(top_priority) and top_priority != 'dsnp':
-            persona = f'{persona or determine_base_persona(top_priority)},dsnp'
+            if not persona:
+                persona.append(determine_base_persona(top_priority))
+            persona.append('dsnp')
         else:
-            persona = 'dsnp' if not persona else f'{persona},dsnp'
+            persona.append('dsnp')
     
+    # Drugs option
     if drugs_option and '["drug_yes"]' in drugs_option:
-        persona = f'{persona},ma_drug_coverage' if persona else 'ma_drug_coverage'
+        persona.append('ma_drug_coverage')
     
+    # Top priority fallback
     if not persona and pd.notna(top_priority):
-        persona = determine_base_persona(top_priority)
+        persona.append(determine_base_persona(top_priority))
     
-    return persona if persona else 'unknown'
+    # Debug output
+    result = ','.join(persona) if persona else 'unknown'
+    # Uncomment the following line to debug specific rows
+    # print(f"Row: specialneeds={specialneeds_option}, drugs={drugs_option}, top_priority={top_priority}, persona={result}")
+    return result
 
 def determine_base_persona(top_priority):
     return top_priority_mapping.get(top_priority, top_priority)
@@ -235,7 +247,7 @@ def map_persona(persona):
 print(f"Length of clickstream_df: {len(clickstream_df)}")
 print(f"Length of output_df: {len(output_df)}")
 
-# Merge persona based on userid
+# Apply persona and merge
 clickstream_df['persona'] = clickstream_df.apply(determine_persona, axis=1)
 persona_df = clickstream_df.groupby('internalUserId')['persona'].first().reset_index()
 output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))

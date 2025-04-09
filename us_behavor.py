@@ -200,38 +200,36 @@ def determine_persona(row):
     drugs_option = row.get('userActions.extracted_data.text.drugs_option', '')
     top_priority = row.get('userActions.extracted_data.text.topPriority', np.nan)
     
-    persona = []
+    persona_parts = []
     
     # CSNP condition
     if specialneeds_option and '["snp_chronic"]' in specialneeds_option:
         if pd.notna(top_priority) and top_priority != 'csnp':
-            persona.append(determine_base_persona(top_priority))
-            persona.append('csnp')
+            persona_parts.append(determine_base_persona(top_priority))
+            persona_parts.append('csnp')
         else:
-            persona.append('csnp')
+            persona_parts.append('csnp')
     
     # DSNP condition
     if specialneeds_option and '["snp_medicaid"]' in specialneeds_option:
         if pd.notna(top_priority) and top_priority != 'dsnp':
-            if not persona:
-                persona.append(determine_base_persona(top_priority))
-            persona.append('dsnp')
+            if not persona_parts:
+                persona_parts.append(determine_base_persona(top_priority))
+            persona_parts.append('dsnp')
         else:
-            persona.append('dsnp')
+            persona_parts.append('dsnp')
     
     # Drugs option
     if drugs_option and '["drug_yes"]' in drugs_option:
-        persona.append('ma_drug_coverage')
+        persona_parts.append('ma_drug_coverage')
     
     # Top priority fallback
-    if not persona and pd.notna(top_priority):
-        persona.append(determine_base_persona(top_priority))
+    if not persona_parts and pd.notna(top_priority):
+        persona_parts.append(determine_base_persona(top_priority))
     
-    # Debug output
-    result = ','.join(persona) if persona else 'unknown'
-    # Uncomment the following line to debug specific rows
-    # print(f"Row: specialneeds={specialneeds_option}, drugs={drugs_option}, top_priority={top_priority}, persona={result}")
-    return result
+    # Ensure scalar string output
+    result = ','.join(persona_parts) if persona_parts else 'unknown'
+    return str(result)  # Force string output
 
 def determine_base_persona(top_priority):
     return top_priority_mapping.get(top_priority, top_priority)
@@ -243,12 +241,18 @@ def map_persona(persona):
     mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
     return ','.join(mapped)
 
-# Debug lengths
-print(f"Length of clickstream_df: {len(clickstream_df)}")
-print(f"Length of output_df: {len(output_df)}")
+# Debug: Test persona function on a small subset
+print("Testing determine_persona on first 5 rows:")
+test_subset = clickstream_df.head(5)
+for idx, row in test_subset.iterrows():
+    result = determine_persona(row)
+    print(f"Row {idx}: Result = {result}, Type = {type(result)}")
 
 # Apply persona and merge
 clickstream_df['persona'] = clickstream_df.apply(determine_persona, axis=1)
+print("Sample of clickstream_df with persona:")
+print(clickstream_df[['internalUserId', 'persona']].head())
+
 persona_df = clickstream_df.groupby('internalUserId')['persona'].first().reset_index()
 output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))
 output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])

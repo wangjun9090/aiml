@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import pyarrow.parquet as pq
 
-# Load the cleaned clickstream data
+# File paths
 clickstream_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/us/union_elastic_us_0301_0331_2025.parquet'
 output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025.parquet'
 print(f"Loading file: {clickstream_file}")
@@ -35,11 +35,11 @@ if total_rows == 0:
     print(f"Saved empty output file to {output_file}")
     raise ValueError("Processing stopped due to empty input Parquet file.")
 
-# Define chunk size (adjust based on memory capacity)
-chunk_size = 100000
+# Define sub-chunk size
+sub_chunk_size = 100000  # 100k rows per sub-chunk
 
-# Process in chunks using pyarrow
-def process_chunk(chunk):
+# Process each row group and split into sub-chunks
+def process_sub_chunk(chunk):
     # Filter only for non-null internalUserId
     chunk = chunk[chunk['internalUserId'].notna()].reset_index(drop=True)
     
@@ -226,16 +226,28 @@ def process_chunk(chunk):
     
     return output_df
 
-# Process chunks and append to output file
+# Process row groups and sub-chunks
 first_chunk = True
 for i in range(parquet_file.num_row_groups):
-    # Read one row group at a time (approximate chunking)
-    chunk = parquet_file.read_row_group(i).to_pandas()
-    print(f"Processing chunk {i + 1} with {len(chunk)} rows")
-    output_chunk = process_chunk(chunk)
-    mode = 'w' if first_chunk else 'a'  # Overwrite on first chunk, append on subsequent
-    output_chunk.to_parquet(output_file, index=False, compression='snappy', engine='pyarrow', mode=mode)
-    first_chunk = False
-    print(f"Chunk {i + 1} processed and saved. Rows in chunk output: {len(output_chunk)}")
+    # Read one row group
+    row_group = parquet_file.read_row_group(i).to_pandas()
+    print(f"Processing row group {i + 1} with {len(row_group)} rows")
+    
+    # Split row group into sub-chunks
+    num_sub_chunks = (len(row_group) + sub_chunk_size - 1) // sub_chunk_size  # Ceiling division
+    for j in range(num_sub_chunks):
+        start_idx = j * sub_chunk_size
+        end_idx = min((j + 1) * sub_chunk_size, len(row_group))
+        sub_chunk = row_group.iloc[start_idx:end_idx].reset_index(drop=True)
+        print(f"  Processing sub-chunk {j + 1}/{num_sub_chunks} with {len(sub_chunk)} rows")
+        
+        # Process sub-chunk
+        output_sub_chunk = process_sub_chunk(sub_chunk)
+        
+        # Save sub-chunk
+        mode = 'w' if first_chunk else 'a'  # Overwrite on first, append on subsequent
+        output_sub_chunk.to_parquet(output_file, index=False, compression='snappy', engine='pyarrow', mode=mode)
+        first_chunk = False
+        print(f"  Sub-chunk {j + 1}/{num_sub_chunks} processed and saved. Rows in output: {len(output_sub_chunk)}")
 
 print(f"Behavioral feature file saved to {output_file}")

@@ -95,6 +95,16 @@ schema = pa.schema([
 
 # Process a single chunk with top 10000 records
 def process_chunk(chunk):
+    # Check topPriority row count first
+    top_priority_col = 'userActions.extracted_data.text.topPriority'
+    if top_priority_col in chunk.columns:
+        top_priority_count = chunk[top_priority_col].notna().sum()
+        print(f"Non-null row count for {top_priority_col}: {top_priority_count}")
+        print(f"Sample of {top_priority_col}:")
+        print(chunk[top_priority_col].head())
+    else:
+        print(f"Column {top_priority_col} not found in chunk")
+    
     print(f"Initial chunk rows: {len(chunk)}")
     if not chunk.empty:
         print("Sample of input chunk:")

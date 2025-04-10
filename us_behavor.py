@@ -99,11 +99,20 @@ def process_chunk(chunk):
     if not chunk.empty:
         print("Sample of input chunk:")
         print(chunk[['internalUserId', 'startTime', 'userActions.targetUrl']].head())
-        # Check persona-related columns
-        print("Sample of persona-related columns:")
-        print(chunk[['userActions.extracted_data.text.specialneeds_option', 
-                     'userActions.extracted_data.text.drugs_option', 
-                     'userActions.extracted_data.text.topPriority']].head())
+        # Check all available columns
+        print("All columns in chunk:")
+        print(chunk.columns.tolist())
+        # Check persona-related columns with existence check
+        persona_cols = ['userActions.extracted_data.text.specialneeds_option', 
+                        'userActions.extracted_data.text.drugs_option', 
+                        'userActions.extracted_data.text.topPriority']
+        for col in persona_cols:
+            if col in chunk.columns:
+                print(f"Sample of {col}:")
+                print(chunk[col].head())
+                print(f"Non-null count in {col}: {chunk[col].notna().sum()}")
+            else:
+                print(f"Column {col} not found in chunk")
     
     # Filter only for non-null internalUserId
     chunk = chunk[chunk['internalUserId'].notna()].reset_index(drop=True)
@@ -252,6 +261,9 @@ def process_chunk(chunk):
         drugs_option = row.get('userActions.extracted_data.text.drugs_option', '')
         top_priority = row.get('userActions.extracted_data.text.topPriority', np.nan)
         
+        # Debug input values
+        print(f"Row {row.name}: specialneeds_option={specialneeds_option}, drugs_option={drugs_option}, top_priority={top_priority}")
+        
         persona_parts = []
         
         if isinstance(specialneeds_option, str) and '["snp_chronic"]' in specialneeds_option:
@@ -276,6 +288,7 @@ def process_chunk(chunk):
             persona_parts.append(top_priority_mapping.get(top_priority, top_priority))
         
         result = ','.join(persona_parts) if persona_parts else 'unknown'
+        print(f"Row {row.name}: Persona result = {result}")
         return str(result)
     
     def map_persona(persona):
@@ -283,7 +296,9 @@ def process_chunk(chunk):
             return persona
         parts = persona.split(',')
         mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
-        return ','.join(mapped)
+        result = ','.join(mapped)
+        print(f"Mapping persona: {persona} -> {result}")
+        return result
     
     if not chunk.empty:
         print("Debugging determine_persona on first 5 rows:")
@@ -328,3 +343,4 @@ writer.close()
 
 print(f"Test behavioral feature file saved to {output_file}")
 print(f"Final rows in output: {len(output_chunk)}")
+print(f"Non-null persona row count: {output_chunk['persona'].notna().sum()}")

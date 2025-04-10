@@ -5,7 +5,7 @@ import pyarrow.parquet as pq
 
 # File paths
 clickstream_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/us/union_elastic_us_0301_0331_2025.parquet'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025_test.parquet'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025_test.csv'
 print(f"Loading file: {clickstream_file}")
 
 # Use pyarrow to read Parquet metadata
@@ -32,66 +32,9 @@ if total_rows == 0:
         'submitted_application', 'persona'
     ]
     output_df = pd.DataFrame(columns=output_columns)
-    output_df.to_parquet(output_file, index=False, compression='snappy')
+    output_df.to_csv(output_file, index=False)
     print(f"Saved empty output file to {output_file}")
     raise ValueError("Processing stopped due to empty input Parquet file.")
-
-# Define schema for output Parquet file
-schema = pa.schema([
-    ('userid', pa.string()),
-    ('start_time', pa.string()),
-    ('city', pa.string()),
-    ('state', pa.string()),
-    ('zip', pa.string()),
-    ('plan_id', pa.string()),
-    ('compared_plan_ids', pa.string()),
-    ('query_dental', pa.int32()),
-    ('query_transportation', pa.int32()),
-    ('query_otc', pa.int32()),
-    ('query_drug', pa.int32()),
-    ('query_provider', pa.int32()),
-    ('query_vision', pa.int32()),
-    ('query_csnp', pa.int32()),
-    ('query_dsnp', pa.int32()),
-    ('filter_dental', pa.int32()),
-    ('filter_transportation', pa.int32()),
-    ('filter_otc', pa.int32()),
-    ('filter_drug', pa.int32()),
-    ('filter_provider', pa.int32()),
-    ('filter_vision', pa.int32()),
-    ('filter_csnp', pa.int32()),
-    ('filter_dsnp', pa.int32()),
-    ('accordion_dental', pa.float64()),
-    ('accordion_transportation', pa.float64()),
-    ('accordion_otc', pa.float64()),
-    ('accordion_drug', pa.float64()),
-    ('accordion_provider', pa.float64()),
-    ('accordion_vision', pa.float64()),
-    ('accordion_csnp', pa.float64()),
-    ('accordion_dsnp', pa.float64()),
-    ('time_dental_pages', pa.float64()),
-    ('time_transportation_pages', pa.float64()),
-    ('time_otc_pages', pa.float64()),
-    ('time_drug_pages', pa.float64()),
-    ('time_provider_pages', pa.float64()),
-    ('time_vision_pages', pa.float64()),
-    ('time_csnp_pages', pa.float64()),
-    ('time_dsnp_pages', pa.float64()),
-    ('rel_time_dental_pages', pa.float64()),
-    ('rel_time_transportation_pages', pa.float64()),
-    ('rel_time_otc_pages', pa.float64()),
-    ('rel_time_drug_pages', pa.float64()),
-    ('rel_time_provider_pages', pa.float64()),
-    ('rel_time_vision_pages', pa.float64()),
-    ('rel_time_csnp_pages', pa.float64()),
-    ('rel_time_dsnp_pages', pa.float64()),
-    ('total_session_time', pa.float64()),
-    ('num_pages_viewed', pa.int32()),
-    ('num_plans_selected', pa.int32()),
-    ('num_plans_compared', pa.int32()),
-    ('submitted_application', pa.int32()),
-    ('persona', pa.string())
-])
 
 # Process a single chunk with filtered records
 def process_chunk(chunk):
@@ -102,7 +45,7 @@ def process_chunk(chunk):
     print(f"Initial chunk rows: {len(chunk)}")
     if not chunk.empty:
         print("Sample of input chunk:")
-        print(chunk.head())  # Print full row to inspect all columns
+        print(chunk.head())
         print("All columns in chunk:")
         print(chunk.columns.tolist())
     
@@ -119,7 +62,11 @@ def process_chunk(chunk):
     
     # Populate basic fields
     output_df['userid'] = chunk['userid']
-    output_df['start_time'] = chunk.get('startTime', pd.Series(index=chunk.index, dtype='object'))  # Fallback if startTime missing
+    # Handle start_time with fallback and convert to yyyy-mm-dd
+    if 'startTime' in chunk.columns:
+        output_df['start_time'] = pd.to_datetime(chunk['startTime'], errors='coerce').dt.strftime('%Y-%m-%d')
+    else:
+        output_df['start_time'] = pd.Series(index=chunk.index, dtype='object')
     print(f"Rows after basic fields: {len(output_df)}")
     
     # URL extraction functions
@@ -236,7 +183,7 @@ def process_chunk(chunk):
         return df.drop_duplicates(subset=['userid'], keep='first').reset_index(drop=True)
     
     output_df = deduplicate_state(output_df)
-    chunk = deduplicate_state(chunk)  # Apply same deduplication to chunk
+    chunk = deduplicate_state(chunk)
     print(f"Rows after final deduplication: {len(output_df)}")
     print("Sample of output_df['userid'] after deduplication:")
     print(output_df['userid'].head())
@@ -319,17 +266,17 @@ def process_chunk(chunk):
     # Apply persona directly to output_df
     output_df['persona'] = chunk.apply(determine_persona, axis=1)
     print("Sample of output_df with persona before mapping:")
-    print(output_df[['userid', 'persona']].head())
+    print(output_df[['userid', 'start_time', 'persona']].head())
     print(f"Non-null persona count before mapping: {output_df['persona'].notna().sum()}")
     
     output_df['persona'] = output_df['persona'].apply(map_persona)
     print(f"Rows after persona assignment: {len(output_df)}")
     print("Sample of final output_df:")
-    print(output_df[['userid', 'persona']].head())
+    print(output_df[['userid', 'start_time', 'persona']].head())
     
     return output_df
 
-# Filter records where topPriority is not null and not empty, limit to 100
+# Filter records where topPriority is not null and not empty, limit to 10,000
 top_priority_col = 'userActions.extracted_data.text.topPriority'
 filtered_chunk = pd.DataFrame()
 for i in range(parquet_file.num_row_groups):
@@ -341,8 +288,8 @@ for i in range(parquet_file.num_row_groups):
             (row_group[top_priority_col] != 'None')
         ]
         filtered_chunk = pd.concat([filtered_chunk, valid_rows])
-        if len(filtered_chunk) >= 100:
-            filtered_chunk = filtered_chunk.head(100).reset_index(drop=True)
+        if len(filtered_chunk) >= 10000:
+            filtered_chunk = filtered_chunk.head(10000).reset_index(drop=True)
             break
     else:
         print(f"Column {top_priority_col} not found in row group {i}")
@@ -354,12 +301,8 @@ else:
     print(f"Processing test chunk with {len(filtered_chunk)} rows where {top_priority_col} is non-null and non-empty")
     output_chunk = process_chunk(filtered_chunk)
 
-    # Write the output
-    writer = pq.ParquetWriter(output_file, schema, compression='snappy')
-    table = pa.Table.from_pandas(output_chunk, schema=schema, preserve_index=False)
-    writer.write_table(table)
-    writer.close()
-
+    # Write the output to CSV
+    output_chunk.to_csv(output_file, index=False)
     print(f"Test behavioral feature file saved to {output_file}")
     print(f"Final rows in output: {len(output_chunk)}")
     print(f"Non-null persona row count: {output_chunk['persona'].notna().sum()}")

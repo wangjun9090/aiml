@@ -228,16 +228,18 @@ def process_chunk(chunk):
         r'online-application.html', case=False, na=False).astype(int)
     print(f"Rows after session metrics: {len(output_df)}")
     
-    # Final deduplication by userid (preserve order for merge)
+    # Synchronized deduplication
     def deduplicate_state(df):
         df = df.sort_values('start_time')
         return df.drop_duplicates(subset=['userid'], keep='first').reset_index(drop=True)
     
     output_df = deduplicate_state(output_df)
-    chunk = chunk[chunk['userid'].isin(output_df['userid'])].reset_index(drop=True)
+    chunk = deduplicate_state(chunk)  # Apply same deduplication to chunk
     print(f"Rows after final deduplication: {len(output_df)}")
     print("Sample of output_df['userid'] after deduplication:")
     print(output_df['userid'].head())
+    print("Sample of chunk['userid'] after deduplication:")
+    print(chunk['userid'].head())
     
     # Persona logic
     top_priority_mapping = {
@@ -312,28 +314,10 @@ def process_chunk(chunk):
             result = determine_persona(row)
             print(f"Row {idx}: Result = {result}, Type = {type(result)}")
     
-    # Apply persona and debug intermediate steps
-    chunk['persona'] = chunk.apply(determine_persona, axis=1)
-    print("Sample of chunk with persona:")
-    print(chunk[['userid', 'persona']].head())
-    
-    persona_df = chunk.groupby('userid')['persona'].first().reset_index()
-    print("Sample of persona_df:")
-    print(persona_df[['userid', 'persona']].head())
-    
-    # Debug before merge
-    print("Before merge, sample of output_df['userid']:")
-    print(output_df['userid'].head())
-    print("Before merge, sample of persona_df['userid']:")
-    print(persona_df['userid'].head())
-    
-    output_df = output_df.merge(persona_df, on='userid', how='left', suffixes=('', '_drop'))
-    print("Sample of output_df after merge:")
+    # Apply persona directly to output_df
+    output_df['persona'] = chunk.apply(determine_persona, axis=1)
+    print("Sample of output_df with persona before mapping:")
     print(output_df[['userid', 'persona']].head())
-    
-    output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])
-    print("Before mapping, sample of output_df['persona']:")
-    print(output_df['persona'].head())
     print(f"Non-null persona count before mapping: {output_df['persona'].notna().sum()}")
     
     output_df['persona'] = output_df['persona'].apply(map_persona)

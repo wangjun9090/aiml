@@ -249,7 +249,6 @@ def process_chunk(chunk):
         drugs_option = row.get('userActions.extracted_data.text.drugs_option', '')
         top_priority = row.get('userActions.extracted_data.text.topPriority', np.nan)
         
-        # Debug input values
         print(f"Row {row.name}: specialneeds_option={specialneeds_option}, drugs_option={drugs_option}, top_priority={top_priority}")
         
         persona_parts = []
@@ -280,8 +279,9 @@ def process_chunk(chunk):
         return str(result)
     
     def map_persona(persona):
-        if pd.isna(persona) or persona == 'unknown':
-            return persona
+        if pd.isna(persona) or persona == 'unknown' or persona == 'none':
+            print(f"Mapping persona: {persona} -> {persona}")
+            return persona  # Preserve 'unknown' and 'none' as-is
         parts = persona.split(',')
         mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
         result = ','.join(mapped)
@@ -308,6 +308,10 @@ def process_chunk(chunk):
     print(output_df[['userid', 'persona']].head())
     
     output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])
+    print("Before mapping, sample of output_df['persona']:")
+    print(output_df['persona'].head())
+    print(f"Non-null persona count before mapping: {output_df['persona'].notna().sum()}")
+    
     output_df['persona'] = output_df['persona'].apply(map_persona)
     print(f"Rows after persona assignment: {len(output_df)}")
     print("Sample of final output_df:")
@@ -321,7 +325,6 @@ filtered_chunk = pd.DataFrame()
 for i in range(parquet_file.num_row_groups):
     row_group = parquet_file.read_row_group(i).to_pandas()
     if top_priority_col in row_group.columns:
-        # Filter for non-null and non-empty topPriority
         valid_rows = row_group[
             row_group[top_priority_col].notna() & 
             (row_group[top_priority_col] != '') & 
@@ -339,7 +342,6 @@ if filtered_chunk.empty:
     print("No records found with non-null and non-empty userActions.extracted_data.text.topPriority")
 else:
     print(f"Processing test chunk with {len(filtered_chunk)} rows where {top_priority_col} is non-null and non-empty")
-    # Process the filtered chunk
     output_chunk = process_chunk(filtered_chunk)
 
     # Write the output

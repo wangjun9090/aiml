@@ -102,7 +102,7 @@ def process_chunk(chunk):
     print(f"Initial chunk rows: {len(chunk)}")
     if not chunk.empty:
         print("Sample of input chunk:")
-        print(chunk[['userid', 'startTime', 'userActions.targetUrl', 'userActions.extracted_data.text.topPriority']].head())
+        print(chunk.head())  # Print full row to inspect all columns
         print("All columns in chunk:")
         print(chunk.columns.tolist())
     
@@ -119,7 +119,7 @@ def process_chunk(chunk):
     
     # Populate basic fields
     output_df['userid'] = chunk['userid']
-    output_df['start_time'] = chunk['startTime']
+    output_df['start_time'] = chunk.get('startTime', pd.Series(index=chunk.index, dtype='object'))  # Fallback if startTime missing
     print(f"Rows after basic fields: {len(output_df)}")
     
     # URL extraction functions
@@ -163,7 +163,8 @@ def process_chunk(chunk):
     
     # Deduplicate compared_plan_ids
     def deduplicate_compared_plan_ids(df):
-        df = df.sort_values('start_time')
+        if 'start_time' in df.columns and not df['start_time'].isna().all():
+            df = df.sort_values('start_time')
         df['compared_plan_ids'] = df.groupby('userid')['compared_plan_ids'].transform(
             lambda x: x.where(x != x.shift()).fillna(x)
         )
@@ -230,7 +231,8 @@ def process_chunk(chunk):
     
     # Synchronized deduplication
     def deduplicate_state(df):
-        df = df.sort_values('start_time')
+        if 'startTime' in df.columns and not df['startTime'].isna().all():
+            df = df.sort_values('startTime')
         return df.drop_duplicates(subset=['userid'], keep='first').reset_index(drop=True)
     
     output_df = deduplicate_state(output_df)

@@ -93,36 +93,14 @@ schema = pa.schema([
     ('persona', pa.string())
 ])
 
-# Process a single chunk with top 10000 records
+# Process a single chunk with filtered records
 def process_chunk(chunk):
-    # Check topPriority row count first
-    top_priority_col = 'userActions.extracted_data.text.topPriority'
-    if top_priority_col in chunk.columns:
-        top_priority_count = chunk[top_priority_col].notna().sum()
-        print(f"Non-null row count for {top_priority_col}: {top_priority_count}")
-        print(f"Sample of {top_priority_col}:")
-        print(chunk[top_priority_col].head())
-    else:
-        print(f"Column {top_priority_col} not found in chunk")
-    
     print(f"Initial chunk rows: {len(chunk)}")
     if not chunk.empty:
         print("Sample of input chunk:")
-        print(chunk[['internalUserId', 'startTime', 'userActions.targetUrl']].head())
-        # Check all available columns
+        print(chunk[['internalUserId', 'startTime', 'userActions.targetUrl', 'userActions.extracted_data.text.topPriority']].head())
         print("All columns in chunk:")
         print(chunk.columns.tolist())
-        # Check persona-related columns with existence check
-        persona_cols = ['userActions.extracted_data.text.specialneeds_option', 
-                        'userActions.extracted_data.text.drugs_option', 
-                        'userActions.extracted_data.text.topPriority']
-        for col in persona_cols:
-            if col in chunk.columns:
-                print(f"Sample of {col}:")
-                print(chunk[col].head())
-                print(f"Non-null count in {col}: {chunk[col].notna().sum()}")
-            else:
-                print(f"Column {col} not found in chunk")
     
     # Filter only for non-null internalUserId
     chunk = chunk[chunk['internalUserId'].notna()].reset_index(drop=True)
@@ -337,20 +315,39 @@ def process_chunk(chunk):
     
     return output_df
 
-# Process only the top 10000 records from the first row group
-row_group = parquet_file.read_row_group(0).to_pandas()  # First row group
-chunk = row_group.head(10000).reset_index(drop=True)  # Top 10000 rows
-print(f"Processing test chunk with {len(chunk)} rows")
+# Filter records where topPriority is not null and not empty, limit to 100
+top_priority_col = 'userActions.extracted_data.text.topPriority'
+filtered_chunk = pd.DataFrame()
+for i in range(parquet_file.num_row_groups):
+    row_group = parquet_file.read_row_group(i).to_pandas()
+    if top_priority_col in row_group.columns:
+        # Filter for non-null and non-empty topPriority
+        valid_rows = row_group[
+            row_group[top_priority_col].notna() & 
+            (row_group[top_priority_col] != '') & 
+            (row_group[top_priority_col] != 'None')
+        ]
+        filtered_chunk = pd.concat([filtered_chunk, valid_rows])
+        if len(filtered_chunk) >= 100:
+            filtered_chunk = filtered_chunk.head(100).reset_index(drop=True)
+            break
+    else:
+        print(f"Column {top_priority_col} not found in row group {i}")
+        break
 
-# Process the chunk
-output_chunk = process_chunk(chunk)
+if filtered_chunk.empty:
+    print("No records found with non-null and non-empty userActions.extracted_data.text.topPriority")
+else:
+    print(f"Processing test chunk with {len(filtered_chunk)} rows where {top_priority_col} is non-null and non-empty")
+    # Process the filtered chunk
+    output_chunk = process_chunk(filtered_chunk)
 
-# Write the output
-writer = pq.ParquetWriter(output_file, schema, compression='snappy')
-table = pa.Table.from_pandas(output_chunk, schema=schema, preserve_index=False)
-writer.write_table(table)
-writer.close()
+    # Write the output
+    writer = pq.ParquetWriter(output_file, schema, compression='snappy')
+    table = pa.Table.from_pandas(output_chunk, schema=schema, preserve_index=False)
+    writer.write_table(table)
+    writer.close()
 
-print(f"Test behavioral feature file saved to {output_file}")
-print(f"Final rows in output: {len(output_chunk)}")
-print(f"Non-null persona row count: {output_chunk['persona'].notna().sum()}")
+    print(f"Test behavioral feature file saved to {output_file}")
+    print(f"Final rows in output: {len(output_chunk)}")
+    print(f"Non-null persona row count: {output_chunk['persona'].notna().sum()}")

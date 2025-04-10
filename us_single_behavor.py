@@ -1,16 +1,14 @@
 import pandas as pd
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 # File paths
 clickstream_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/us/elastic_us_0301_2025.csv'
 output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_2025.csv'
 print(f"Loading file: {clickstream_file}")
 
-# Use pyarrow to read Parquet metadata
-parquet_file = pq.ParquetFile(clickstream_file)
-total_rows = parquet_file.metadata.num_rows
+# Read CSV file
+data = pd.read_csv(clickstream_file)
+total_rows = len(data)
 print(f"Initial rows loaded: {total_rows}")
 
 # Define output columns
@@ -32,30 +30,23 @@ output_columns = [
 
 # Check if file is empty
 if total_rows == 0:
-    print("Error: The input Parquet file is empty.")
+    print("Error: The input CSV file is empty.")
     output_df = pd.DataFrame(columns=output_columns)
     output_df.to_csv(output_file, index=False)
     print(f"Saved empty output file to {output_file}")
-    raise ValueError("Processing stopped due to empty input Parquet file.")
+    raise ValueError("Processing stopped due to empty input CSV file.")
 
 # Filter records where topPriority is not null and not empty, limit to 10,000
 top_priority_col = 'userActions.extracted_data.text.topPriority'
-filtered_data = pd.DataFrame()
-for i in range(parquet_file.num_row_groups):
-    row_group = parquet_file.read_row_group(i).to_pandas()
-    if top_priority_col in row_group.columns:
-        valid_rows = row_group[
-            row_group[top_priority_col].notna() & 
-            (row_group[top_priority_col] != '') & 
-            (row_group[top_priority_col] != 'None')
-        ]
-        filtered_data = pd.concat([filtered_data, valid_rows])
-        if len(filtered_data) >= 10000:
-            filtered_data = filtered_data.head(10000).reset_index(drop=True)
-            break
-    else:
-        print(f"Column {top_priority_col} not found in row group {i}")
-        break
+if top_priority_col in data.columns:
+    filtered_data = data[
+        data[top_priority_col].notna() & 
+        (data[top_priority_col] != '') & 
+        (data[top_priority_col] != 'None')
+    ].head(10000).reset_index(drop=True)
+else:
+    print(f"Column {top_priority_col} not found in CSV file")
+    filtered_data = pd.DataFrame()
 
 if filtered_data.empty:
     print("No records found with non-null and non-empty userActions.extracted_data.text.topPriority")

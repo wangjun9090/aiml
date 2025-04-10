@@ -235,13 +235,25 @@ def process_chunk(chunk):
     
     # Persona logic
     top_priority_mapping = {
-        'doctorPref': 'ma_provider_network', 'drugPref': 'ma_drug_coverage', 'additional-vision': 'ma_vision',
-        'additional-dental': 'ma_dental_benefit', 'additional-hearing': 'ma_hearing', 'additional-fitness': 'ma_fitness'
+        'doctorPref': 'ma_provider_network', 
+        'drugPref': 'ma_drug_coverage', 
+        'additional-vision': 'ma_vision',
+        'additional-dental': 'ma_dental_benefit', 
+        'additional-hearing': 'ma_hearing', 
+        'additional-fitness': 'ma_fitness',
+        'healthCarePref': 'ma_healthcare'  # Added to map healthCarePref
     }
     
     persona_mapping = {
-        'ma_provider_network': 'doctor', 'ma_drug_coverage': 'drug', 'ma_vision': 'vision',
-        'ma_dental_benefit': 'dental', 'ma_hearing': 'hearing', 'ma_fitness': 'fitness'
+        'ma_provider_network': 'doctor', 
+        'ma_drug_coverage': 'drug', 
+        'ma_vision': 'vision',
+        'ma_dental_benefit': 'dental', 
+        'ma_hearing': 'hearing', 
+        'ma_fitness': 'fitness',
+        'ma_healthcare': 'healthcare',  # Added for healthCarePref
+        'csnp': 'csnp',  # Preserve as-is
+        'dsnp': 'dsnp'   # Preserve as-is
     }
     
     def determine_persona(row):
@@ -281,7 +293,7 @@ def process_chunk(chunk):
     def map_persona(persona):
         if pd.isna(persona) or persona == 'unknown' or persona == 'none':
             print(f"Mapping persona: {persona} -> {persona}")
-            return persona  # Preserve 'unknown' and 'none' as-is
+            return persona
         parts = persona.split(',')
         mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
         result = ','.join(mapped)

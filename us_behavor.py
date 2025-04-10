@@ -5,7 +5,7 @@ import pyarrow.parquet as pq
 
 # File paths
 clickstream_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/us/union_elastic_us_0301_0331_2025.parquet'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025_test.parquet'  # Changed for test
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025_test.parquet'
 print(f"Loading file: {clickstream_file}")
 
 # Use pyarrow to read Parquet metadata
@@ -99,6 +99,11 @@ def process_chunk(chunk):
     if not chunk.empty:
         print("Sample of input chunk:")
         print(chunk[['internalUserId', 'startTime', 'userActions.targetUrl']].head())
+        # Check persona-related columns
+        print("Sample of persona-related columns:")
+        print(chunk[['userActions.extracted_data.text.specialneeds_option', 
+                     'userActions.extracted_data.text.drugs_option', 
+                     'userActions.extracted_data.text.topPriority']].head())
     
     # Filter only for non-null internalUserId
     chunk = chunk[chunk['internalUserId'].notna()].reset_index(drop=True)
@@ -286,12 +291,24 @@ def process_chunk(chunk):
             result = determine_persona(row)
             print(f"Row {idx}: Result = {result}, Type = {type(result)}")
     
+    # Apply persona and debug intermediate steps
     chunk['persona'] = chunk.apply(determine_persona, axis=1)
+    print("Sample of chunk with persona:")
+    print(chunk[['internalUserId', 'persona']].head())
+    
     persona_df = chunk.groupby('internalUserId')['persona'].first().reset_index()
+    print("Sample of persona_df:")
+    print(persona_df.head())
+    
     output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))
+    print("Sample of output_df after merge:")
+    print(output_df[['userid', 'persona']].head())
+    
     output_df = output_df.drop(columns=[col for col in output_df.columns if col.endswith('_drop')])
     output_df['persona'] = output_df['persona'].apply(map_persona)
     print(f"Rows after persona assignment: {len(output_df)}")
+    print("Sample of final output_df:")
+    print(output_df[['userid', 'persona']].head())
     
     return output_df
 

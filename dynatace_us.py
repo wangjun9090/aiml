@@ -92,11 +92,16 @@ for record in records:
         field: ", ".join(str(item) if item is not None else "" for item in fields.get(field, []))
         for field in fieldnames
     }
+    # Ensure all values are UTF-8 compatible by replacing problematic characters
+    record_dict = {
+        field: value.encode('utf-8', errors='replace').decode('utf-8')
+        for field, value in record_dict.items()
+    }
     records_list.append(record_dict)
 
 # Define the function to convert JSON records to CSV
 def json_to_csv(json_records, csv_file_path, fieldnames):
-    with open(csv_file_path, 'w', newline='') as csvfile:
+    with open(csv_file_path, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for record in json_records:

@@ -95,26 +95,30 @@ schema = pa.schema([
 
 # Process a single chunk with filtered records
 def process_chunk(chunk):
+    # Rename internalUserId to userid at the beginning
+    if 'internalUserId' in chunk.columns:
+        chunk = chunk.rename(columns={'internalUserId': 'userid'})
+    
     print(f"Initial chunk rows: {len(chunk)}")
     if not chunk.empty:
         print("Sample of input chunk:")
-        print(chunk[['internalUserId', 'startTime', 'userActions.targetUrl', 'userActions.extracted_data.text.topPriority']].head())
+        print(chunk[['userid', 'startTime', 'userActions.targetUrl', 'userActions.extracted_data.text.topPriority']].head())
         print("All columns in chunk:")
         print(chunk.columns.tolist())
     
-    # Filter only for non-null internalUserId
-    chunk = chunk[chunk['internalUserId'].notna()].reset_index(drop=True)
-    print(f"Rows after internalUserId filter: {len(chunk)}")
+    # Filter only for non-null userid
+    chunk = chunk[chunk['userid'].notna()].reset_index(drop=True)
+    print(f"Rows after userid filter: {len(chunk)}")
     
     # Initial deduplication within chunk
-    chunk = chunk.drop_duplicates(subset=['internalUserId', 'userActions.targetUrl'], keep='first').reset_index(drop=True)
+    chunk = chunk.drop_duplicates(subset=['userid', 'userActions.targetUrl'], keep='first').reset_index(drop=True)
     print(f"Rows after initial deduplication: {len(chunk)}")
     
     # Initialize output_df for chunk
     output_df = pd.DataFrame(index=chunk.index, columns=output_columns)
     
     # Populate basic fields
-    output_df['userid'] = chunk['internalUserId']
+    output_df['userid'] = chunk['userid']
     output_df['start_time'] = chunk['startTime']
     print(f"Rows after basic fields: {len(output_df)}")
     
@@ -224,14 +228,16 @@ def process_chunk(chunk):
         r'online-application.html', case=False, na=False).astype(int)
     print(f"Rows after session metrics: {len(output_df)}")
     
-    # Final deduplication by userid
+    # Final deduplication by userid (preserve order for merge)
     def deduplicate_state(df):
         df = df.sort_values('start_time')
-        return df.groupby('userid').first().reset_index()
+        return df.drop_duplicates(subset=['userid'], keep='first').reset_index(drop=True)
     
     output_df = deduplicate_state(output_df)
-    chunk = chunk[chunk['internalUserId'].isin(output_df['userid'])].reset_index(drop=True)
+    chunk = chunk[chunk['userid'].isin(output_df['userid'])].reset_index(drop=True)
     print(f"Rows after final deduplication: {len(output_df)}")
+    print("Sample of output_df['userid'] after deduplication:")
+    print(output_df['userid'].head())
     
     # Persona logic
     top_priority_mapping = {
@@ -241,7 +247,7 @@ def process_chunk(chunk):
         'additional-dental': 'ma_dental_benefit', 
         'additional-hearing': 'ma_hearing', 
         'additional-fitness': 'ma_fitness',
-        'healthCarePref': 'ma_healthcare'  # Added to map healthCarePref
+        'healthCarePref': 'ma_healthcare'
     }
     
     persona_mapping = {
@@ -251,9 +257,9 @@ def process_chunk(chunk):
         'ma_dental_benefit': 'dental', 
         'ma_hearing': 'hearing', 
         'ma_fitness': 'fitness',
-        'ma_healthcare': 'healthcare',  # Added for healthCarePref
-        'csnp': 'csnp',  # Preserve as-is
-        'dsnp': 'dsnp'   # Preserve as-is
+        'ma_healthcare': 'healthcare',
+        'csnp': 'csnp',
+        'dsnp': 'dsnp'
     }
     
     def determine_persona(row):
@@ -309,13 +315,19 @@ def process_chunk(chunk):
     # Apply persona and debug intermediate steps
     chunk['persona'] = chunk.apply(determine_persona, axis=1)
     print("Sample of chunk with persona:")
-    print(chunk[['internalUserId', 'persona']].head())
+    print(chunk[['userid', 'persona']].head())
     
-    persona_df = chunk.groupby('internalUserId')['persona'].first().reset_index()
+    persona_df = chunk.groupby('userid')['persona'].first().reset_index()
     print("Sample of persona_df:")
-    print(persona_df.head())
+    print(persona_df[['userid', 'persona']].head())
     
-    output_df = output_df.merge(persona_df, left_on='userid', right_on='internalUserId', how='left', suffixes=('', '_drop'))
+    # Debug before merge
+    print("Before merge, sample of output_df['userid']:")
+    print(output_df['userid'].head())
+    print("Before merge, sample of persona_df['userid']:")
+    print(persona_df['userid'].head())
+    
+    output_df = output_df.merge(persona_df, on='userid', how='left', suffixes=('', '_drop'))
     print("Sample of output_df after merge:")
     print(output_df[['userid', 'persona']].head())
     

@@ -5,13 +5,13 @@ import pyarrow.parquet as pq
 
 # File paths
 clickstream_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/us/union_elastic_us_0301_0331_2025.parquet'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025_test.csv'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_0331_2025_full.csv'
 print(f"Loading file: {clickstream_file}")
 
 # Use pyarrow to read Parquet metadata
 parquet_file = pq.ParquetFile(clickstream_file)
 total_rows = parquet_file.metadata.num_rows
-print(f"Initial rows loaded: {total_rows}")
+print(f"Total rows in file: {total_rows}")
 
 # Check if file is empty
 if total_rows == 0:
@@ -36,18 +36,13 @@ if total_rows == 0:
     print(f"Saved empty output file to {output_file}")
     raise ValueError("Processing stopped due to empty input Parquet file.")
 
-# Process a single chunk with filtered records
+# Process a single chunk
 def process_chunk(chunk):
     # Rename internalUserId to userid at the beginning
     if 'internalUserId' in chunk.columns:
         chunk = chunk.rename(columns={'internalUserId': 'userid'})
     
-    print(f"Initial chunk rows: {len(chunk)}")
-    if not chunk.empty:
-        print("Sample of input chunk:")
-        print(chunk.head())
-        print("All columns in chunk:")
-        print(chunk.columns.tolist())
+    print(f"Processing chunk with {len(chunk)} rows")
     
     # Filter only for non-null userid
     chunk = chunk[chunk['userid'].notna()].reset_index(drop=True)
@@ -185,10 +180,6 @@ def process_chunk(chunk):
     output_df = deduplicate_state(output_df)
     chunk = deduplicate_state(chunk)
     print(f"Rows after final deduplication: {len(output_df)}")
-    print("Sample of output_df['userid'] after deduplication:")
-    print(output_df['userid'].head())
-    print("Sample of chunk['userid'] after deduplication:")
-    print(chunk['userid'].head())
     
     # Persona logic
     top_priority_mapping = {
@@ -218,8 +209,6 @@ def process_chunk(chunk):
         drugs_option = row.get('userActions.extracted_data.text.drugs_option', '')
         top_priority = row.get('userActions.extracted_data.text.topPriority', np.nan)
         
-        print(f"Row {row.name}: specialneeds_option={specialneeds_option}, drugs_option={drugs_option}, top_priority={top_priority}")
-        
         persona_parts = []
         
         if isinstance(specialneeds_option, str) and '["snp_chronic"]' in specialneeds_option:
@@ -244,65 +233,49 @@ def process_chunk(chunk):
             persona_parts.append(top_priority_mapping.get(top_priority, top_priority))
         
         result = ','.join(persona_parts) if persona_parts else 'unknown'
-        print(f"Row {row.name}: Persona result = {result}")
         return str(result)
     
     def map_persona(persona):
         if pd.isna(persona) or persona == 'unknown' or persona == 'none':
-            print(f"Mapping persona: {persona} -> {persona}")
             return persona
         parts = persona.split(',')
         mapped = [persona_mapping.get(part.strip(), part.strip()) for part in parts]
-        result = ','.join(mapped)
-        print(f"Mapping persona: {persona} -> {result}")
-        return result
-    
-    if not chunk.empty:
-        print("Debugging determine_persona on first 5 rows:")
-        for idx, row in chunk.head(5).iterrows():
-            result = determine_persona(row)
-            print(f"Row {idx}: Result = {result}, Type = {type(result)}")
+        return ','.join(mapped)
     
     # Apply persona directly to output_df
     output_df['persona'] = chunk.apply(determine_persona, axis=1)
-    print("Sample of output_df with persona before mapping:")
-    print(output_df[['userid', 'start_time', 'persona']].head())
-    print(f"Non-null persona count before mapping: {output_df['persona'].notna().sum()}")
-    
     output_df['persona'] = output_df['persona'].apply(map_persona)
-    print(f"Rows after persona assignment: {len(output_df)}")
-    print("Sample of final output_df:")
-    print(output_df[['userid', 'start_time', 'persona']].head())
+    print(f"Chunk processed, final rows: {len(output_df)}")
     
     return output_df
 
-# Filter records where topPriority is not null and not empty, limit to 10,000
-top_priority_col = 'userActions.extracted_data.text.topPriority'
-filtered_chunk = pd.DataFrame()
+# Process the entire file in chunks of 10,000
+chunk_size = 10000
+output_chunks = []
+rows_processed = 0
+
 for i in range(parquet_file.num_row_groups):
     row_group = parquet_file.read_row_group(i).to_pandas()
-    if top_priority_col in row_group.columns:
-        valid_rows = row_group[
-            row_group[top_priority_col].notna() & 
-            (row_group[top_priority_col] != '') & 
-            (row_group[top_priority_col] != 'None')
-        ]
-        filtered_chunk = pd.concat([filtered_chunk, valid_rows])
-        if len(filtered_chunk) >= 10000:
-            filtered_chunk = filtered_chunk.head(10000).reset_index(drop=True)
+    print(f"Reading row group {i+1}/{parquet_file.num_row_groups}, rows: {len(row_group)}")
+    
+    # Process in chunks of 10K
+    for start in range(0, len(row_group), chunk_size):
+        chunk = row_group.iloc[start:start + chunk_size].reset_index(drop=True)
+        if not chunk.empty:
+            output_chunk = process_chunk(chunk)
+            output_chunks.append(output_chunk)
+            rows_processed += len(chunk)
+            print(f"Processed {rows_processed} rows so far")
+        if rows_processed >= total_rows:
             break
-    else:
-        print(f"Column {top_priority_col} not found in row group {i}")
+    if rows_processed >= total_rows:
         break
 
-if filtered_chunk.empty:
-    print("No records found with non-null and non-empty userActions.extracted_data.text.topPriority")
-else:
-    print(f"Processing test chunk with {len(filtered_chunk)} rows where {top_priority_col} is non-null and non-empty")
-    output_chunk = process_chunk(filtered_chunk)
+# Combine all chunks
+final_output = pd.concat(output_chunks, ignore_index=True)
+print(f"Total rows after combining chunks: {len(final_output)}")
 
-    # Write the output to CSV
-    output_chunk.to_csv(output_file, index=False)
-    print(f"Test behavioral feature file saved to {output_file}")
-    print(f"Final rows in output: {len(output_chunk)}")
-    print(f"Non-null persona row count: {output_chunk['persona'].notna().sum()}")
+# Write to CSV
+final_output.to_csv(output_file, index=False)
+print(f"Behavioral feature file saved to {output_file}")
+print(f"Non-null persona row count: {final_output['persona'].notna().sum()}")

@@ -1,6 +1,7 @@
 import requests
 import json
 import csv
+from datetime import datetime
 
 # Define the Elasticsearch endpoint and headers
 url = 'http://5ff222d8671f414a8cdef95b2cded607.ctc-ece.optum.com:9200/user_sessions/_search?scroll=1m'
@@ -71,8 +72,8 @@ while True:
     records.extend(scroll_data['hits']['hits'])
     scroll_id = scroll_data['_scroll_id']
 
-# Define the expected fieldnames based on the query
-fieldnames = [
+# Define the input fieldnames
+input_fieldnames = [
     "startTime",
     "userActions.targetUrl",
     "city",
@@ -83,21 +84,96 @@ fieldnames = [
     "userActions.extracted_data.text.drugs_option"
 ]
 
-# Convert records to list of dictionaries, handling missing fields
+# Define the output fieldnames (rename internalUserId to useId)
+output_fieldnames = [
+    "startTime",
+    "userActions.targetUrl",
+    "city",
+    "userActions.extracted_data.text.stateCode",
+    "useId",
+    "userActions.extracted_data.text.topPriority",
+    "userActions.extracted_data.text.specialneeds_option",
+    "userActions.extracted_data.text.drugs_option"
+]
+
+# Define the allowed URL patterns
+allowed_url_patterns = [
+    "health-plans/plan-summary",
+    "/plan-compare",
+    "health-plans/details.html",
+    "site-search.html?q1",
+    "additionalBenefits="
+]
+
+# Convert records to list of dictionaries and preprocess startTime
 records_list = []
 for record in records:
     fields = record.get('fields', {})
-    # Join multi-valued fields, converting None to empty string
-    record_dict = {
-        field: ", ".join(str(item) if item is not None else "" for item in fields.get(field, []))
-        for field in fieldnames
-    }
-    # Ensure all values are UTF-8 compatible by replacing problematic characters
-    record_dict = {
-        field: value.encode('utf-8', errors='replace').decode('utf-8')
-        for field, value in record_dict.items()
-    }
+    record_dict = {}
+    for field in input_fieldnames:
+        if field == "startTime":
+            # Convert startTime to yyyy-mm-dd
+            start_time_values = fields.get(field, [""])
+            if start_time_values and start_time_values[0]:
+                try:
+                    dt = datetime.strptime(start_time_values[0], "%Y-%m-%dT%H:%M:%S.%fZ")
+                    record_dict[field] = dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    record_dict[field] = ""
+            else:
+                record_dict[field] = ""
+        elif field == "userActions.targetUrl":
+            # Get URLs, filter by allowed patterns, keep as list for now
+            urls = fields.get(field, [])
+            filtered_urls = [
+                str(url) for url in urls
+                if url is not None and any(pattern in str(url) for pattern in allowed_url_patterns)
+            ]
+            record_dict[field] = filtered_urls  # Store as list for grouping
+        else:
+            # Handle other fields
+            record_dict[field] = ", ".join(str(item) if item is not None else "" for item in fields.get(field, []))
+        # Ensure UTF-8 compatibility
+        if isinstance(record_dict[field], str):
+            record_dict[field] = record_dict[field].encode('utf-8', errors='replace').decode('utf-8')
     records_list.append(record_dict)
+
+# Group by internalUserId and startTime (date only), union and dedupe userActions.targetUrl
+grouped_records = {}
+for record in records_list:
+    key = (record["internalUserId"], record["startTime"])
+    if key not in grouped_records:
+        grouped_records[key] = {
+            "startTime": record["startTime"],
+            "userActions.targetUrl": set(record["userActions.targetUrl"]),  # Use set for deduplication
+            "city": record["city"],
+            "userActions.extracted_data.text.stateCode": record["userActions.extracted_data.text.stateCode"],
+            "internalUserId": record["internalUserId"],
+            "userActions.extracted_data.text.topPriority": record["userActions.extracted_data.text.topPriority"],
+            "userActions.extracted_data.text.specialneeds_option": record["userActions.extracted_data.text.specialneeds_option"],
+            "userActions.extracted_data.text.drugs_option": record["userActions.extracted_data.text.drugs_option"]
+        }
+    else:
+        # Union URLs and deduplicate
+        grouped_records[key]["userActions.targetUrl"].update(record["userActions.targetUrl"])
+        # For other fields, keep first non-empty value or combine if desired
+        for field in input_fieldnames:
+            if field not in ["startTime", "userActions.targetUrl", "internalUserId"]:
+                if not grouped_records[key][field] and record[field]:
+                    grouped_records[key][field] = record[field]
+                elif record[field] and grouped_records[key][field] != record[field]:
+                    # Optional: Combine non-empty values (e.g., comma-separated)
+                    grouped_records[key][field] = f"{grouped_records[key][field]}, {record[field]}" if grouped_records[key][field] else record[field]
+
+# Convert grouped records to final list, join URLs, and rename internalUserId
+final_records = []
+for key, record in grouped_records.items():
+    record_dict = record.copy()
+    # Convert URL set to sorted list and join
+    record_dict["userActions.targetUrl"] = ", ".join(sorted(record["userActions.targetUrl"])) if record["userActions.targetUrl"] else ""
+    # Rename internalUserId to useId
+    record_dict["useId"] = record_dict.pop("internalUserId")
+    final_records.append(record_dict)
 
 # Define the function to convert JSON records to CSV
 def json_to_csv(json_records, csv_file_path, fieldnames):
@@ -109,5 +185,5 @@ def json_to_csv(json_records, csv_file_path, fieldnames):
 
 # Save to CSV
 csv_file_path = r'c:\Users\jwang46\Documents\MR_AI\Website\persona\data\elastic_us_0301_0302_2025.csv'
-json_to_csv(records_list, csv_file_path, fieldnames)
+json_to_csv(final_records, csv_file_path, output_fieldnames)
 print("Data saved to CSV successfully.")

@@ -36,7 +36,43 @@ query = {
                         }
                     }
                 },
-                {"exists": {"field": "internalUserId"}}
+                {"exists": {"field": "internalUserId"}},
+                {
+                    "bool": {
+                        "must": [],
+                        "filter": [
+                            {
+                                "match_phrase": {
+                                    "custom_user_type.keyword": "REAL_USER"
+                                }
+                            },
+                            {
+                                "match_phrase": {
+                                    "supported_browser": True
+                                }
+                            },
+                            {
+                                "bool": {
+                                    "minimum_should_match": 1,
+                                    "should": [
+                                        {
+                                            "match_phrase": {
+                                                "application.keyword": "Online - aarpmedicareplans.com"
+                                            }
+                                        },
+                                        {
+                                            "match_phrase": {
+                                                "application.keyword": "Online - uhcmedicaresolutions.com"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                        "should": [],
+                        "must_not": []
+                    }
+                }
             ],
             "must_not": [
                 {"match_phrase": {"internalUserId": "null"}},
@@ -165,12 +201,15 @@ for record in records_list:
                     # Optional: Combine non-empty values (e.g., comma-separated)
                     grouped_records[key][field] = f"{grouped_records[key][field]}, {record[field]}" if grouped_records[key][field] else record[field]
 
-# Convert grouped records to final list, join URLs, and rename internalUserId
+# Convert grouped records to final list, join URLs, rename internalUserId, and filter out empty userActions.targetUrl
 final_records = []
 for key, record in grouped_records.items():
     record_dict = record.copy()
     # Convert URL set to sorted list and join
     record_dict["userActions.targetUrl"] = ", ".join(sorted(record["userActions.targetUrl"])) if record["userActions.targetUrl"] else ""
+    # Skip records where userActions.targetUrl is empty
+    if not record_dict["userActions.targetUrl"]:
+        continue
     # Rename internalUserId to useId
     record_dict["useId"] = record_dict.pop("internalUserId")
     final_records.append(record_dict)

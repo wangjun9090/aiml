@@ -4,7 +4,7 @@ import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # File paths
-behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0301_0302_2025.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_0301_0302_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights.pkl'
 output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_0301_0302_with_quality_levels_tweaked.csv'
@@ -38,6 +38,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         suffixes=('_beh', '_plan')
     )
     print(f"Rows after merge: {len(training_df)}")
+    print("Columns after merge:", training_df.columns.tolist())
 
     # Resolve state column conflict
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
@@ -64,19 +65,27 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ]
 
     # CSNP-specific features (consistent with training)
-    training_df['csnp_interaction'] = training_df['csnp'].fillna(0) * (
-        training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
-        training_df['time_csnp_pages'].fillna(0) + training_df['accordion_csnp'].fillna(0)
-    ) * 2
-    training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
+    additional_features = []
+    if 'csnp' in training_df.columns:
+        training_df['csnp_interaction'] = training_df['csnp'].fillna(0) * (
+            training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
+            training_df['time_csnp_pages'].fillna(0) + training_df['accordion_csnp'].fillna(0)
+        ) * 2
+        additional_features.append('csnp_interaction')
+    else:
+        training_df['csnp_interaction'] = 0
+    if 'csnp_type' in training_df.columns:
+        training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
+        additional_features.append('csnp_type_flag')
+    else:
+        training_df['csnp_type_flag'] = 0
     training_df['csnp_signal_strength'] = (
         training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
         training_df['accordion_csnp'].fillna(0) + training_df['time_csnp_pages'].fillna(0)
     ).clip(upper=5) * 1.5
+    additional_features.append('csnp_signal_strength')
 
-    additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
-
-    # Weighted features (pre-calculated during training, included as columns)
+    # Weighted features (expected from training)
     weighted_features = [
         'w_doctor', 'w_drug', 'w_vision', 'w_dental', 'w_otc', 'w_transportation',
         'w_csnp', 'w_dsnp', 'w_fitness', 'w_hearing'
@@ -84,6 +93,13 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     # Final feature set (must match training)
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + weighted_features
+
+    # Check for missing weighted features and warn
+    missing_weights = [col for col in weighted_features if col not in training_df.columns]
+    if missing_weights:
+        print(f"Warning: The following weighted features are missing: {missing_weights}. Filling with 0.")
+        for col in missing_weights:
+            training_df[col] = 0
 
     # Select features and handle missing values
     X = training_df[feature_columns].fillna(0)

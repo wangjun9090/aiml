@@ -1,21 +1,24 @@
 import pandas as pd
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 # File paths
 clickstream_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/us/elastic_us_0301_2025.csv'
 output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/us_behavioral_0301_2025.csv'
 print(f"Loading file: {clickstream_file}")
 
-# Use pyarrow to read Parquet metadata
-parquet_file = pq.ParquetFile(clickstream_file)
-total_rows = parquet_file.metadata.num_rows
+# Read the entire CSV file
+try:
+    df = pd.read_csv(clickstream_file)
+except Exception as e:
+    print(f"Error reading CSV file: {e}")
+    raise
+
+total_rows = len(df)
 print(f"Initial rows loaded: {total_rows}")
 
 # Check if file is empty
 if total_rows == 0:
-    print("Error: The input Parquet file is empty.")
+    print("Error: The input CSV file is empty.")
     output_columns = [
         'userid', 'start_time', 'city', 'state', 'zip', 'plan_id', 'compared_plan_ids',
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
@@ -34,9 +37,9 @@ if total_rows == 0:
     output_df = pd.DataFrame(columns=output_columns)
     output_df.to_csv(output_file, index=False)
     print(f"Saved empty output file to {output_file}")
-    raise ValueError("Processing stopped due to empty input Parquet file.")
+    raise ValueError("Processing stopped due to empty input CSV file.")
 
-# Process a single chunk with all records
+# Process the entire DataFrame
 def process_chunk(chunk):
     # Rename internalUserId to userid at the beginning
     if 'internalUserId' in chunk.columns:
@@ -276,26 +279,12 @@ def process_chunk(chunk):
     
     return output_df
 
-# Process all records from the Parquet file
-all_chunks = []
-for i in range(parquet_file.num_row_groups):
-    row_group = parquet_file.read_row_group(i).to_pandas()
-    all_chunks.append(row_group)
+# Process the entire DataFrame
+print(f"Processing DataFrame with {len(df)} rows")
+output_chunk = process_chunk(df)
 
-# Concatenate all row groups into a single DataFrame
-if all_chunks:
-    filtered_chunk = pd.concat(all_chunks, ignore_index=True)
-    print(f"Processing chunk with {len(filtered_chunk)} rows")
-    
-    if filtered_chunk.empty:
-        print("No records found in the Parquet file")
-    else:
-        output_chunk = process_chunk(filtered_chunk)
-        
-        # Write the output to CSV
-        output_chunk.to_csv(output_file, index=False)
-        print(f"Behavioral feature file saved to {output_file}")
-        print(f"Final rows in output: {len(output_chunk)}")
-        print(f"Non-null persona row count: {output_chunk['persona'].notna().sum()}")
-else:
-    print("No row groups found in the Parquet file")
+# Write the output to CSV
+output_chunk.to_csv(output_file, index=False)
+print(f"Behavioral feature file saved to {output_file}")
+print(f"Final rows in output: {len(output_chunk)}")
+print(f"Non-null persona row count: {output_chunk['persona'].notna().sum()}")

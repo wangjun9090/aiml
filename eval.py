@@ -264,8 +264,8 @@ def evaluate_predictions(model, X, y_true, metadata):
         print(f"Sample of excluded personas: {y_true[~valid_mask].head().tolist()}")
     
     X_valid = X[valid_mask]
-    y_true_valid = y_true[valid_mask]
-    metadata_valid = metadata[valid_mask]
+    y_true_valid = y_true[valid_mask].reset_index(drop=True)  # Reset index to align with output_df
+    metadata_valid = metadata[valid_mask].reset_index(drop=True)  # Reset index for consistency
 
     if len(y_true_valid) == 0:
         print("ERROR: No valid (non-blank) persona values remain for evaluation.")
@@ -278,7 +278,7 @@ def evaluate_predictions(model, X, y_true, metadata):
     y_pred = model.predict(X_valid)
     
     # Combine predictions with metadata
-    output_df = pd.concat([metadata_valid.reset_index(drop=True), proba_df], axis=1)
+    output_df = pd.concat([metadata_valid, proba_df], axis=1)
     output_df['predicted_persona'] = y_pred
     output_df['is_correct'] = (output_df['persona'] == output_df['predicted_persona'])
 
@@ -321,7 +321,7 @@ def evaluate_predictions(model, X, y_true, metadata):
     for level in quality_levels:
         level_mask = output_df['quality_level'] == level
         level_true = y_true_valid[level_mask]
-        level_pred = y_pred[level_mask]
+        level_pred = y_pred[level_mask.values]  # Convert to numpy array to use boolean indexing
         print(f"\n{level} Quality Data Results:")
         print(f"Rows: {len(level_true)}")
         if len(level_true) > 0:

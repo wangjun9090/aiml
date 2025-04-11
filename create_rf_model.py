@@ -27,6 +27,7 @@ def prepare_training_features(behavioral_df, plan_df):
         suffixes=('_beh', '_plan')
     )
     print(f"Rows after merge: {len(training_df)}")
+    print("Columns after merge:", training_df.columns.tolist())
 
     # Resolve state column conflict
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
@@ -52,18 +53,30 @@ def prepare_training_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # CSNP-specific features
-    training_df['csnp_interaction'] = training_df['csnp'].fillna(0) * (
-        training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
-        training_df['time_csnp_pages'].fillna(0) + training_df['accordion_csnp'].fillna(0)
-    ) * 2
-    training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
+    # CSNP-specific features (conditional on column availability)
+    additional_features = []
+    if 'csnp' in training_df.columns:
+        training_df['csnp_interaction'] = training_df['csnp'].fillna(0) * (
+            training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
+            training_df['time_csnp_pages'].fillna(0) + training_df['accordion_csnp'].fillna(0)
+        ) * 2
+        additional_features.append('csnp_interaction')
+    else:
+        training_df['csnp_interaction'] = 0
+        print("Warning: 'csnp' column not found. Setting 'csnp_interaction' to 0.")
+
+    if 'csnp_type' in training_df.columns:
+        training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
+        additional_features.append('csnp_type_flag')
+    else:
+        training_df['csnp_type_flag'] = 0
+        print("Warning: 'csnp_type' column not found. Setting 'csnp_type_flag' to 0.")
+
     training_df['csnp_signal_strength'] = (
         training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
         training_df['accordion_csnp'].fillna(0) + training_df['time_csnp_pages'].fillna(0)
     ).clip(upper=5) * 1.5
-
-    additional_features = ['csnp_interaction', 'csnp_type_flag', 'csnp_signal_strength']
+    additional_features.append('csnp_signal_strength')
 
     # Persona weights
     persona_weights = {
@@ -79,11 +92,11 @@ def prepare_training_features(behavioral_df, plan_df):
         'hearing': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'}
     }
 
-    k1, k3, k4, k7, k8 = 0.1, 0.5, 0.4, 'transportation', 'hearing'
+    k1, k3, k4, k7, k8 = 0.1, 0.5, 0.4, 0.15, 0.25  # Fixed typo from previous version
     k9, k10 = 1.0, 0.9
     W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.0, 3.0, 1.0, 1.5
 
-    def calculate_persona_weight(row, persona_info, persona):
+    def calculate_persona_weight(row, persona_info, persona, plan_df):
         plan_col = persona_info['plan_col']
         query_col = persona_info['query_col']
         filter_col = persona_info['filter_col']
@@ -102,12 +115,12 @@ def prepare_training_features(behavioral_df, plan_df):
         elif pd.isna(row['plan_id']) and pd.notna(row['compared_plan_ids']) and isinstance(row['compared_plan_ids'], str) and row['num_plans_compared'] > 0:
             compared_ids = row['compared_plan_ids'].split(',')
             compared_plans = plan_df[plan_df['plan_id'].isin(compared_ids) & (plan_df['zip'] == row['zip'])]
-            if not compared_plans.empty:
+            if not compared_plans.empty and plan_col in compared_plans.columns:
                 base_weight = min(compared_plans[plan_col].mean(), 0.7 if persona == 'csnp' else 0.5)
-                if persona == 'csnp':
+                if persona == 'csnp' and 'csnp_type' in compared_plans.columns:
                     csnp_type_y_ratio = (compared_plans['csnp_type'] == 'Y').mean()
                     base_weight *= (W_CSNP_BASE + (W_CSNP_HIGH - W_CSNP_BASE) * csnp_type_y_ratio)
-                elif persona == 'dsnp':
+                elif persona == 'dsnp' and 'dsnp_type' in compared_plans.columns:
                     dsnp_type_y_ratio = (compared_plans['dsnp_type'] == 'Y').mean()
                     base_weight *= (W_DSNP_BASE + (W_DSNP_HIGH - W_DSNP_BASE) * dsnp_type_y_ratio)
             else:
@@ -143,8 +156,8 @@ def prepare_training_features(behavioral_df, plan_df):
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 2: behavioral_score += 0.6
             elif signal_count >= 1: behavioral_score += 0.5
-            if row['csnp_interaction'] > 0: behavioral_score += 0.3
-            if row['csnp_type_flag'] == 1: behavioral_score += 0.2
+            if 'csnp_interaction' in row and row['csnp_interaction'] > 0: behavioral_score += 0.3
+            if 'csnp_type_flag' in row and row['csnp_type_flag'] == 1: behavioral_score += 0.2
         elif persona in ['fitness', 'hearing']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.3
@@ -174,7 +187,7 @@ def prepare_training_features(behavioral_df, plan_df):
                      0.3 if p in ['csnp', 'fitness', 'hearing'] and sum([1 for val in [row[info['query_col']], row[info['filter_col']], pages_viewed] if val > 0]) >= 1 else 0)
                 )
                 for p, info in persona_weights.items()
-                if p != row['persona'] and pd.notna(row[info['plan_col']])
+                if p != row['persona'] and info['plan_col'] in row and pd.notna(row[info['plan_col']])
             ]
             max_non_target = max(non_target_weights, default=0)
             adjusted_weight = max(adjusted_weight, max_non_target + 0.15)
@@ -183,7 +196,7 @@ def prepare_training_features(behavioral_df, plan_df):
 
     # Calculate weights
     for persona, info in persona_weights.items():
-        training_df[f'w_{persona}'] = training_df.apply(lambda row: calculate_persona_weight(row, info, persona), axis=1)
+        training_df[f'w_{persona}'] = training_df.apply(lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1)
 
     # Normalize weights, excluding csnp
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']

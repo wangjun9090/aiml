@@ -166,6 +166,10 @@ for record in records:
                 if url is not None and any(pattern in str(url) for pattern in allowed_url_patterns)
             ]
             record_dict[field] = filtered_urls  # Store as list for grouping
+        elif field == "userActions.extracted_data.text.stateCode":
+            # Split stateCode string into list for grouping
+            state_codes = fields.get(field, [])
+            record_dict[field] = [str(code) for code in state_codes if code is not None]
         else:
             # Handle other fields
             record_dict[field] = ", ".join(str(item) if item is not None else "" for item in fields.get(field, []))
@@ -174,7 +178,7 @@ for record in records:
             record_dict[field] = record_dict[field].encode('utf-8', errors='replace').decode('utf-8')
     records_list.append(record_dict)
 
-# Group by internalUserId and startTime (date only), union and dedupe userActions.targetUrl
+# Group by internalUserId and startTime (date only), union and dedupe userActions.targetUrl and stateCode
 grouped_records = {}
 for record in records_list:
     key = (record["internalUserId"], record["startTime"])
@@ -183,7 +187,7 @@ for record in records_list:
             "startTime": record["startTime"],
             "userActions.targetUrl": set(record["userActions.targetUrl"]),  # Use set for deduplication
             "city": record["city"],
-            "userActions.extracted_data.text.stateCode": record["userActions.extracted_data.text.stateCode"],
+            "userActions.extracted_data.text.stateCode": set(record["userActions.extracted_data.text.stateCode"]),  # Use set for deduplication
             "internalUserId": record["internalUserId"],
             "userActions.extracted_data.text.topPriority": record["userActions.extracted_data.text.topPriority"],
             "userActions.extracted_data.text.specialneeds_option": record["userActions.extracted_data.text.specialneeds_option"],
@@ -192,21 +196,25 @@ for record in records_list:
     else:
         # Union URLs and deduplicate
         grouped_records[key]["userActions.targetUrl"].update(record["userActions.targetUrl"])
+        # Union stateCodes and deduplicate
+        grouped_records[key]["userActions.extracted_data.text.stateCode"].update(record["userActions.extracted_data.text.stateCode"])
         # For other fields, keep first non-empty value or combine if desired
         for field in input_fieldnames:
-            if field not in ["startTime", "userActions.targetUrl", "internalUserId"]:
+            if field not in ["startTime", "userActions.targetUrl", "userActions.extracted_data.text.stateCode", "internalUserId"]:
                 if not grouped_records[key][field] and record[field]:
                     grouped_records[key][field] = record[field]
                 elif record[field] and grouped_records[key][field] != record[field]:
                     # Optional: Combine non-empty values (e.g., comma-separated)
                     grouped_records[key][field] = f"{grouped_records[key][field]}, {record[field]}" if grouped_records[key][field] else record[field]
 
-# Convert grouped records to final list, join URLs, rename internalUserId, and filter out empty userActions.targetUrl
+# Convert grouped records to final list, join URLs and stateCodes, rename internalUserId, and filter out empty userActions.targetUrl
 final_records = []
 for key, record in grouped_records.items():
     record_dict = record.copy()
     # Convert URL set to sorted list and join
     record_dict["userActions.targetUrl"] = ", ".join(sorted(record["userActions.targetUrl"])) if record["userActions.targetUrl"] else ""
+    # Convert stateCode set to sorted list and join
+    record_dict["userActions.extracted_data.text.stateCode"] = ", ".join(sorted(record["userActions.extracted_data.text.stateCode"])) if record["userActions.extracted_data.text.stateCode"] else ""
     # Skip records where userActions.targetUrl is empty
     if not record_dict["userActions.targetUrl"]:
         continue

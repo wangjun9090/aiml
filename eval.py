@@ -152,11 +152,12 @@ def evaluate_predictions(model, X, y_true, metadata):
         print(f"Results saved to {output_file}")
         return
 
-    # Filter out blank personas
-    valid_mask = y_true.notna() & (y_true != '')
+    # Filter out invalid personas: blank, NaN, 'unknown', 'none', 'healthcare'
+    invalid_personas = ['', 'unknown', 'none', 'healthcare']
+    valid_mask = y_true.notna() & (~y_true.isin(invalid_personas))
     if not valid_mask.all():
         excluded_count = (~valid_mask).sum()
-        print(f"Warning: Excluding {excluded_count} rows with blank or NaN 'persona' values from evaluation.")
+        print(f"Warning: Excluding {excluded_count} rows with invalid 'persona' values (blank, NaN, 'unknown', 'none', 'healthcare') from evaluation.")
         print(f"Sample of excluded personas: {y_true[~valid_mask].head().tolist()}")
     
     X_valid = X[valid_mask]
@@ -164,7 +165,7 @@ def evaluate_predictions(model, X, y_true, metadata):
     metadata_valid = metadata[valid_mask].reset_index(drop=True)
 
     if len(y_true_valid) == 0:
-        print("ERROR: No valid (non-blank) persona values remain for evaluation.")
+        print("ERROR: No valid persona values remain for evaluation.")
         raise ValueError("Cannot evaluate predictions with no valid ground truth data.")
 
     # Predict probabilities and top predictions
@@ -198,7 +199,7 @@ def evaluate_predictions(model, X, y_true, metadata):
 
     # Evaluate overall accuracy
     accuracy = accuracy_score(y_true_valid, y_pred)
-    print(f"\nOverall Accuracy (non-blank personas): {accuracy * 100:.2f}%")
+    print(f"\nOverall Accuracy (valid personas only): {accuracy * 100:.2f}%")
     print(f"Rows evaluated: {len(y_true_valid)}")
     print(f"Correct predictions: {sum(y_pred == y_true_valid)}")
     print("\nDetailed Classification Report:")
@@ -233,7 +234,7 @@ def evaluate_predictions(model, X, y_true, metadata):
         else:
             print("No records in this quality level.")
 
-    print("\nConfusion Matrix (Overall, non-blank personas):")
+    print("\nConfusion Matrix (Overall, valid personas only):")
     cm = confusion_matrix(y_true_valid, y_pred, labels=list(set(y_true_valid)))
     print(pd.DataFrame(cm, index=list(set(y_true_valid)), columns=list(set(y_true_valid))))
 

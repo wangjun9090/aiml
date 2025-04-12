@@ -30,7 +30,40 @@ def load_data(behavioral_path, plan_path):
         print(f"Error loading data: {e}")
         raise
 
+def normalize_persona(df):
+    """Apply persona normalization similar to the original normalization script."""
+    new_rows = []
+    for idx, row in df.iterrows():
+        if pd.isna(row['persona']):
+            new_rows.append(row)
+            continue
+        # Handle multi-persona values by splitting and prioritizing
+        personas = [p.strip().lower() for p in str(row['persona']).split(',')]
+        if 'dsnp' in personas or 'csnp' in personas:
+            # First row: Keep first persona (unless it's invalid)
+            first_row = row.copy()
+            first_persona = personas[0]
+            if first_persona in ['unknown', 'none', 'healthcare', '']:
+                first_persona = 'dsnp' if 'dsnp' in personas else 'csnp'
+            first_row['persona'] = first_persona
+            new_rows.append(first_row)
+            # Second row: dsnp or csnp (dsnp preferred)
+            second_row = row.copy()
+            second_row['persona'] = 'dsnp' if 'dsnp' in personas else 'csnp'
+            new_rows.append(second_row)
+        else:
+            # Keep only first persona, skip if invalid
+            row_copy = row.copy()
+            first_persona = personas[0]
+            row_copy['persona'] = first_persona
+            new_rows.append(row_copy)
+    return pd.DataFrame(new_rows)
+
 def prepare_evaluation_features(behavioral_df, plan_df):
+    # Normalize personas before merging
+    behavioral_df = normalize_persona(behavioral_df)
+    print(f"Rows after persona normalization: {len(behavioral_df)}")
+
     training_df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
@@ -94,16 +127,18 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     # Final feature set (must match training)
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + weighted_features
 
-    # Check for missing weighted features and warn
+    # Check for missing weighted features and raise error
     missing_weights = [col for col in weighted_features if col not in training_df.columns]
     if missing_weights:
-        print(f"Warning: The following weighted features are missing: {missing_weights}. Filling with 0.")
-        for col in missing_weights:
-            training_df[col] = 0
+        raise ValueError(f"Missing required weighted features: {missing_weights}. Ensure the input CSV includes weights from training.")
 
     # Select features and handle missing values
     X = training_df[feature_columns].fillna(0)
     y_true = training_df['persona'] if 'persona' in training_df.columns else None
+
+    # Log unique personas for debugging
+    if y_true is not None:
+        print(f"Unique personas before filtering: {y_true.unique().tolist()}")
 
     # Define quality levels (for evaluation output)
     filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
@@ -152,9 +187,10 @@ def evaluate_predictions(model, X, y_true, metadata):
         print(f"Results saved to {output_file}")
         return
 
-    # Filter out invalid personas: blank, NaN, 'unknown', 'none', 'healthcare'
+    # Filter out invalid personas: blank, NaN, 'unknown', 'none', 'healthcare' (case-insensitive)
+    y_true_lower = y_true.str.lower()  # Convert to lowercase for robust matching
     invalid_personas = ['', 'unknown', 'none', 'healthcare']
-    valid_mask = y_true.notna() & (~y_true.isin(invalid_personas))
+    valid_mask = y_true.notna() & (~y_true_lower.isin(invalid_personas))
     if not valid_mask.all():
         excluded_count = (~valid_mask).sum()
         print(f"Warning: Excluding {excluded_count} rows with invalid 'persona' values (blank, NaN, 'unknown', 'none', 'healthcare') from evaluation.")
@@ -167,6 +203,9 @@ def evaluate_predictions(model, X, y_true, metadata):
     if len(y_true_valid) == 0:
         print("ERROR: No valid persona values remain for evaluation.")
         raise ValueError("Cannot evaluate predictions with no valid ground truth data.")
+
+    # Log unique valid personas
+    print(f"Unique valid personas after filtering: {y_true_valid.unique().tolist()}")
 
     # Predict probabilities and top predictions
     y_pred_proba = model.predict_proba(X_valid)
@@ -206,7 +245,7 @@ def evaluate_predictions(model, X, y_true, metadata):
     print(classification_report(y_true_valid, y_pred))
     
     print("\nIndividual Persona Accuracy Rates (Overall):")
-    for persona in set(y_true_valid):
+    for persona in sorted(set(y_true_valid)):
         persona_true = y_true_valid == persona
         persona_count = sum(persona_true)
         if persona_count > 0:
@@ -225,7 +264,7 @@ def evaluate_predictions(model, X, y_true, metadata):
             level_accuracy = accuracy_score(level_true, level_pred) * 100
             print(f"Accuracy: {level_accuracy:.2f}%")
             print(f"Individual Persona Accuracy Rates ({level}):")
-            for persona in set(level_true):
+            for persona in sorted(set(level_true)):
                 persona_true = level_true == persona
                 persona_count = sum(persona_true)
                 if persona_count > 0:
@@ -235,8 +274,8 @@ def evaluate_predictions(model, X, y_true, metadata):
             print("No records in this quality level.")
 
     print("\nConfusion Matrix (Overall, valid personas only):")
-    cm = confusion_matrix(y_true_valid, y_pred, labels=list(set(y_true_valid)))
-    print(pd.DataFrame(cm, index=list(set(y_true_valid)), columns=list(set(y_true_valid))))
+    cm = confusion_matrix(y_true_valid, y_pred, labels=list(sorted(set(y_true_valid))))
+    print(pd.DataFrame(cm, index=list(sorted(set(y_true_valid))), columns=list(sorted(set(y_true_valid)))))
 
 def main():
     print("Evaluating data with pre-trained Random Forest model...")

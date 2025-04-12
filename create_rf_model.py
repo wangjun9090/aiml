@@ -7,6 +7,7 @@ import pickle
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0301_0302_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights.pkl'
+weighted_behavioral_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_0301_0302_2025.csv'
 
 def load_data(behavioral_path, plan_path):
     try:
@@ -92,7 +93,7 @@ def prepare_training_features(behavioral_df, plan_df):
         'hearing': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'}
     }
 
-    k1, k3, k4, k7, k8 = 0.1, 0.5, 0.4, 0.15, 0.25  # Fixed typo from previous version
+    k1, k3, k4, k7, k8 = 0.1, 0.5, 0.4, 0.15, 0.25
     k9, k10 = 1.0, 0.9
     W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.0, 3.0, 1.0, 1.5
 
@@ -195,6 +196,7 @@ def prepare_training_features(behavioral_df, plan_df):
         return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)
 
     # Calculate weights
+    print("Calculating persona weights...")
     for persona, info in persona_weights.items():
         training_df[f'w_{persona}'] = training_df.apply(lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1)
 
@@ -204,17 +206,30 @@ def prepare_training_features(behavioral_df, plan_df):
     for wf in weighted_features:
         training_df[wf] = training_df[wf] / weight_sum.where(weight_sum > 0, 1)
 
+    # Verify weighted features
+    print(f"Weighted features added: {[col for col in training_df.columns if col.startswith('w_')]}")
+    print("Sample weights:")
+    print(training_df[['persona'] + weighted_features].head())
+
     # Final feature set
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
     
     # Filter out blank personas for training
     valid_mask = training_df['persona'].notna() & (training_df['persona'] != '')
-    training_df = training_df[valid_mask]
-    print(f"Rows after filtering blank personas: {len(training_df)}")
+    training_df_valid = training_df[valid_mask]
+    print(f"Rows after filtering blank personas: {len(training_df_valid)}")
 
     # Select features and target
-    X = training_df[feature_columns].fillna(0)
-    y = training_df['persona']
+    X = training_df_valid[feature_columns].fillna(0)
+    y = training_df_valid['persona']
+
+    # Save the training data with weights
+    try:
+        training_df.to_csv(weighted_behavioral_output_file, index=False)
+        print(f"Behavioral data with weights saved to: {weighted_behavioral_output_file}")
+    except Exception as e:
+        print(f"Error saving weighted CSV: {e}")
+        raise
 
     return X, y
 

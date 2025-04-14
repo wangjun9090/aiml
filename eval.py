@@ -4,10 +4,10 @@ import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # File paths
-behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v3.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v4.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v3.pkl'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v3.csv'
+model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v4.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v4.csv'
 
 def load_model(model_path):
     try:
@@ -111,7 +111,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     training_df['csnp_signal_strength'] = (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
-    ).clip(upper=5) * 1.5
+    ).clip(upper=5) * 2.0
     additional_features.append('csnp_signal_strength')
 
     if 'ma_dental_benefit' in training_df.columns:
@@ -133,6 +133,19 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0)
     ) * vision_col * 1.5
     additional_features.append('vision_interaction')
+
+    if 'csnp' in training_df.columns and 'ma_drug_coverage' in training_df.columns:
+        training_df['csnp_drug_interaction'] = (
+            training_df['csnp'].fillna(0) * (
+                training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
+            ) - training_df['ma_drug_coverage'].fillna(0) * (
+                training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_drug', 0).fillna(0)
+            )
+        ).clip(lower=0) * 1.5
+    else:
+        training_df['csnp_drug_interaction'] = pd.Series(0, index=training_df.index)
+        print("Warning: 'csnp' or 'ma_drug_coverage' column not found. Using zeros for csnp_drug_interaction.")
+    additional_features.append('csnp_drug_interaction')
 
     all_weighted_features = [f'w_{persona}' for persona in [
         'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
@@ -276,7 +289,7 @@ def evaluate_predictions(model, X, y_true, metadata):
     quality_levels = ['High', 'Medium', 'Low']
     for level in quality_levels:
         level_mask = output_df['quality_level'] == level
-        level_true = y_true_valid[level_mask]
+        level are = y_true_valid[level_mask]
         level_pred = y_pred[level_mask.values]
         print(f"\n{level} Quality Data Results:")
         print(f"Rows: {len(level_true)}")

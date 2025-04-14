@@ -117,11 +117,22 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
 
-    print(f"Feature columns for prediction: {feature_columns}")
+    print(f"Feature columns expected: {feature_columns}")
 
+    # Add missing plan features with zeros
+    for col in raw_plan_features:
+        if col not in training_df.columns:
+            print(f"Warning: '{col}' not found in training_df. Filling with 0.")
+            training_df[col] = 0
+
+    # Verify all feature columns exist
     missing_features = [col for col in feature_columns if col not in training_df.columns]
     if missing_features:
         print(f"Warning: Missing features in training_df: {missing_features}")
+        for col in missing_features:
+            training_df[col] = 0
+
+    print(f"Columns in training_df after filling: {training_df.columns.tolist()}")
 
     filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
     query_cols = [col for col in training_df.columns if col.startswith('query_')]

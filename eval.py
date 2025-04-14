@@ -25,6 +25,7 @@ def load_data(behavioral_path, plan_path):
         plan_df = pd.read_csv(plan_path)
         print(f"Behavioral data loaded: {len(behavioral_df)} rows")
         print(f"Plan data loaded: {len(plan_df)} rows")
+        print(f"Plan_df columns: {plan_df.columns.tolist()}")
         return behavioral_df, plan_df
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -89,8 +90,8 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # Ensure csnp-related columns
-    for col in ['csnp', 'csnp_type', 'ma_drug_coverage']:
+    # Ensure all raw_plan_features exist before feature calculations
+    for col in raw_plan_features + ['csnp_type']:
         if col not in training_df.columns:
             print(f"Warning: '{col}' not found in training_df. Filling with 0.")
             training_df[col] = 0
@@ -115,12 +116,12 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     training_df['dental_interaction'] = (
         training_df.get('query_dental', 0).fillna(0) + training_df.get('filter_dental', 0).fillna(0)
-    ) * training_df['ma_dental_benefit'].fillna(0) * 1.5
+    ) * training_df['ma_dental_benefit'] * 1.5
     additional_features.append('dental_interaction')
 
     training_df['vision_interaction'] = (
         training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0)
-    ) * training_df['ma_vision'].fillna(0) * 1.5
+    ) * training_df['ma_vision'] * 1.5
     additional_features.append('vision_interaction')
 
     training_df['csnp_drug_interaction'] = (
@@ -144,11 +145,6 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
 
     print(f"Feature columns expected: {feature_columns}")
-
-    for col in raw_plan_features:
-        if col not in training_df.columns:
-            print(f"Warning: '{col}' not found in training_df. Filling with 0.")
-            training_df[col] = 0
 
     missing_features = [col for col in feature_columns if col not in training_df.columns]
     if missing_features:
@@ -198,107 +194,77 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     return X, y_true, metadata
 
 def evaluate_predictions(model, X, y_true, metadata):
-    if y_true is None:
-        print("No ground truth 'persona' column found in the data. Predictions will be made without accuracy evaluation.")
-        y_pred_proba = model.predict_proba(X)
-        personas = model.classes_
-        proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
-        y_pred = model.predict(X)
-        
-        output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
-        output_df['predicted_persona'] = y_pred
-        
-        for i in range(len(output_df)):
-            probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
-            ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
-            output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
-        
-        output_df.to_csv(output_file, index=False)
-        print(f"Results saved to {output_file}")
-        return
-
-    y_true_lower = y_true.str.lower()
-    invalid_personas = ['', 'unknown', 'none', 'healthcare', 'fitness', 'hearing']
-    valid_mask = y_true.notna() & (~y_true_lower.isin(invalid_personas))
-    if not valid_mask.all():
-        excluded_count = (~valid_mask).sum()
-        print(f"Warning: Excluding {excluded_count} rows with invalid 'persona' values (blank, NaN, 'unknown', 'none', 'healthcare', 'fitness', 'hearing') from evaluation.")
-        print(f"Sample of excluded personas: {y_true[~valid_mask].head().tolist()}")
-    
-    X_valid = X[valid_mask]
-    y_true_valid = y_true[valid_mask].reset_index(drop=True)
-    metadata_valid = metadata[valid_mask].reset_index(drop=True)
-
-    if len(y_true_valid) == 0:
-        print("ERROR: No valid persona values remain for evaluation.")
-        raise ValueError("Cannot evaluate predictions with no valid ground truth data.")
-
-    print(f"Unique valid personas after filtering: {y_true_valid.unique().tolist()}")
-    print(f"Features in X_valid: {X_valid.columns.tolist()}")
-
-    y_pred_proba = model.predict_proba(X_valid)
+    y_pred_proba = model.predict_proba(X)
     personas = model.classes_
     proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
-    y_pred = model.predict(X_valid)
+    y_pred = model.predict(X)
     
-    output_df = pd.concat([metadata_valid, proba_df], axis=1)
+    output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
     output_df['predicted_persona'] = y_pred
-    output_df['is_correct'] = (output_df['persona'] == output_df['predicted_persona'])
-
+    
     for i in range(len(output_df)):
         probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
         ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
         output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
-
-    full_output_df = metadata.copy()
-    full_output_df['predicted_persona'] = np.nan
-    full_output_df.loc[valid_mask, 'predicted_persona'] = y_pred
-    full_output_df['is_correct'] = np.nan
-    full_output_df.loc[valid_mask, 'is_correct'] = output_df['is_correct']
-    full_output_df = pd.concat([full_output_df, pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas], index=metadata.index[valid_mask])], axis=1)
-    full_output_df['probability_ranking'] = np.nan
-    full_output_df.loc[valid_mask, 'probability_ranking'] = output_df['probability_ranking']
-    full_output_df.to_csv(output_file, index=False)
+    
+    output_df.to_csv(output_file, index=False)
     print(f"Results saved to {output_file}")
 
-    accuracy = accuracy_score(y_true_valid, y_pred)
-    print(f"\nOverall Accuracy (valid personas only): {accuracy * 100:.2f}%")
-    print(f"Rows evaluated: {len(y_true_valid)}")
-    print(f"Correct predictions: {sum(y_pred == y_true_valid)}")
-    print("\nDetailed Classification Report:")
-    print(classification_report(y_true_valid, y_pred))
-    
-    print("\nIndividual Persona Accuracy Rates (Overall):")
-    for persona in sorted(set(y_true_valid)):
-        persona_true = y_true_valid == persona
-        persona_count = sum(persona_true)
-        if persona_count > 0:
-            persona_accuracy = accuracy_score(y_true_valid[persona_true], y_pred[persona_true]) * 100
-            print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
+    if y_true is not None:
+        y_true_lower = y_true.str.lower()
+        invalid_personas = ['', 'unknown', 'none', 'healthcare', 'fitness', 'hearing']
+        valid_mask = y_true.notna() & (~y_true_lower.isin(invalid_personas))
+        if not valid_mask.all():
+            excluded_count = (~valid_mask).sum()
+            print(f"Warning: Excluding {excluded_count} rows with invalid 'persona' values.")
+            print(f"Sample of excluded personas: {y_true[~valid_mask].head().tolist()}")
+        
+        X_valid = X[valid_mask]
+        y_true_valid = y_true[valid_mask].reset_index(drop=True)
+        y_pred_valid = y_pred[valid_mask.values]
+        metadata_valid = metadata[valid_mask].reset_index(drop=True)
 
-    quality_levels = ['High', 'Medium', 'Low']
-    for level in quality_levels:
-        level_mask = output_df['quality_level'] == level
-        level_true = y_true_valid[level_mask]
-        level_pred = y_pred[level_mask.values]
-        print(f"\n{level} Quality Data Results:")
-        print(f"Rows: {len(level_true)}")
-        if len(level_true) > 0:
-            level_accuracy = accuracy_score(level_true, level_pred) * 100
-            print(f"Accuracy: {level_accuracy:.2f}%")
-            print(f"Individual Persona Accuracy Rates ({level}):")
-            for persona in sorted(set(level_true)):
-                persona_true = level_true == persona
+        if len(y_true_valid) > 0:
+            accuracy = accuracy_score(y_true_valid, y_pred_valid)
+            print(f"\nOverall Accuracy (valid personas only): {accuracy * 100:.2f}%")
+            print(f"Rows evaluated: {len(y_true_valid)}")
+            print(f"Correct predictions: {sum(y_pred_valid == y_true_valid)}")
+            print("\nDetailed Classification Report:")
+            print(classification_report(y_true_valid, y_pred_valid))
+            
+            print("\nIndividual Persona Accuracy Rates (Overall):")
+            for persona in sorted(set(y_true_valid)):
+                persona_true = y_true_valid == persona
                 persona_count = sum(persona_true)
                 if persona_count > 0:
-                    persona_accuracy = accuracy_score(level_true[persona_true], level_pred[persona_true]) * 100
+                    persona_accuracy = accuracy_score(y_true_valid[persona_true], y_pred_valid[persona_true]) * 100
                     print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
-        else:
-            print("No records in this quality level.")
 
-    print("\nConfusion Matrix (Overall, valid personas only):")
-    cm = confusion_matrix(y_true_valid, y_pred, labels=list(sorted(set(y_true_valid))))
-    print(pd.DataFrame(cm, index=list(sorted(set(y_true_valid))), columns=list(sorted(set(y_true_valid)))))
+            quality_levels = ['High', 'Medium', 'Low']
+            for level in quality_levels:
+                level_mask = metadata_valid['quality_level'] == level
+                level_true = y_true_valid[level_mask]
+                level_pred = y_pred_valid[level_mask.values]
+                print(f"\n{level} Quality Data Results:")
+                print(f"Rows: {len(level_true)}")
+                if len(level_true) > 0:
+                    level_accuracy = accuracy_score(level_true, level_pred) * 100
+                    print(f"Accuracy: {level_accuracy:.2f}%")
+                    print(f"Individual Persona Accuracy Rates ({level}):")
+                    for persona in sorted(set(level_true)):
+                        persona_true = level_true == persona
+                        persona_count = sum(persona_true)
+                        if persona_count > 0:
+                            persona_accuracy = accuracy_score(level_true[persona_true], level_pred[persona_true]) * 100
+                            print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
+                else:
+                    print("No records in this quality level.")
+
+            print("\nConfusion Matrix (Overall, valid personas only):")
+            cm = confusion_matrix(y_true_valid, y_pred_valid, labels=list(sorted(set(y_true_valid))))
+            print(pd.DataFrame(cm, index=list(sorted(set(y_true_valid))), columns=list(sorted(set(y_true_valid)))))
+        else:
+            print("ERROR: No valid persona values remain for evaluation.")
 
 def main():
     print("Evaluating data with pre-trained Random Forest model...")

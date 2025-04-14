@@ -90,29 +90,53 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ]
 
     additional_features = []
-    training_df['csnp_interaction'] = training_df.get('csnp', 0).fillna(0) * (
+    # Compute csnp_interaction safely
+    if 'csnp' in training_df.columns:
+        csnp_col = training_df['csnp'].fillna(0)
+    else:
+        csnp_col = pd.Series(0, index=training_df.index)
+        print("Warning: 'csnp' column not found. Using zeros for csnp_interaction.")
+    training_df['csnp_interaction'] = csnp_col * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('time_csnp_pages', 0).fillna(0) + training_df.get('accordion_csnp', 0).fillna(0)
     ) * 2
     additional_features.append('csnp_interaction')
 
-    training_df['csnp_type_flag'] = training_df.get('csnp_type', 'N').map({'Y': 1, 'N': 0}).fillna(0).astype(int)
+    # Compute csnp_type_flag
+    if 'csnp_type' in training_df.columns:
+        training_df['csnp_type_flag'] = training_df['csnp_type'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
+    else:
+        training_df['csnp_type_flag'] = 0
+        print("Warning: 'csnp_type' column not found. Setting csnp_type_flag to 0.")
     additional_features.append('csnp_type_flag')
 
+    # Compute csnp_signal_strength
     training_df['csnp_signal_strength'] = (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
     ).clip(upper=5) * 1.5
     additional_features.append('csnp_signal_strength')
 
+    # Compute dental_interaction safely
+    if 'ma_dental_benefit' in training_df.columns:
+        dental_col = training_df['ma_dental_benefit'].fillna(0)
+    else:
+        dental_col = pd.Series(0, index=training_df.index)
+        print("Warning: 'ma_dental_benefit' column not found. Using zeros for dental_interaction.")
     training_df['dental_interaction'] = (
         training_df.get('query_dental', 0).fillna(0) + training_df.get('filter_dental', 0).fillna(0)
-    ) * training_df.get('ma_dental_benefit', 0).fillna(0) * 1.5
+    ) * dental_col * 1.5
     additional_features.append('dental_interaction')
 
+    # Compute vision_interaction safely
+    if 'ma_vision' in training_df.columns:
+        vision_col = training_df['ma_vision'].fillna(0)
+    else:
+        vision_col = pd.Series(0, index=training_df.index)
+        print("Warning: 'ma_vision' column not found. Using zeros for vision_interaction.")
     training_df['vision_interaction'] = (
         training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0)
-    ) * training_df.get('ma_vision', 0).fillna(0) * 1.5
+    ) * vision_col * 1.5
     additional_features.append('vision_interaction')
 
     all_weighted_features = [f'w_{persona}' for persona in [

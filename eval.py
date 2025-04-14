@@ -4,10 +4,10 @@ import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # File paths
-behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v4.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v5.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v4.pkl'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v4.csv'
+model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v5.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v5.csv'
 
 def load_model(model_path):
     try:
@@ -89,23 +89,22 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
+    # Ensure csnp-related columns
+    for col in ['csnp', 'csnp_type', 'ma_drug_coverage']:
+        if col not in training_df.columns:
+            print(f"Warning: '{col}' not found in training_df. Filling with 0.")
+            training_df[col] = 0
+        else:
+            training_df[col] = training_df[col].fillna(0)
+
     additional_features = []
-    if 'csnp' in training_df.columns:
-        csnp_col = training_df['csnp'].fillna(0)
-    else:
-        csnp_col = pd.Series(0, index=training_df.index)
-        print("Warning: 'csnp' column not found. Using zeros for csnp_interaction.")
-    training_df['csnp_interaction'] = csnp_col * (
+    training_df['csnp_interaction'] = training_df['csnp'] * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('time_csnp_pages', 0).fillna(0) + training_df.get('accordion_csnp', 0).fillna(0)
     ) * 2
     additional_features.append('csnp_interaction')
 
-    if 'csnp_type' in training_df.columns:
-        training_df['csnp_type_flag'] = training_df['csnp_type'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
-    else:
-        training_df['csnp_type_flag'] = 0
-        print("Warning: 'csnp_type' column not found. Setting csnp_type_flag to 0.")
+    training_df['csnp_type_flag'] = training_df['csnp_type'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
     additional_features.append('csnp_type_flag')
 
     training_df['csnp_signal_strength'] = (
@@ -114,38 +113,29 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ).clip(upper=5) * 2.0
     additional_features.append('csnp_signal_strength')
 
-    if 'ma_dental_benefit' in training_df.columns:
-        dental_col = training_df['ma_dental_benefit'].fillna(0)
-    else:
-        dental_col = pd.Series(0, index=training_df.index)
-        print("Warning: 'ma_dental_benefit' column not found. Using zeros for dental_interaction.")
     training_df['dental_interaction'] = (
         training_df.get('query_dental', 0).fillna(0) + training_df.get('filter_dental', 0).fillna(0)
-    ) * dental_col * 1.5
+    ) * training_df['ma_dental_benefit'].fillna(0) * 1.5
     additional_features.append('dental_interaction')
 
-    if 'ma_vision' in training_df.columns:
-        vision_col = training_df['ma_vision'].fillna(0)
-    else:
-        vision_col = pd.Series(0, index=training_df.index)
-        print("Warning: 'ma_vision' column not found. Using zeros for vision_interaction.")
     training_df['vision_interaction'] = (
         training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0)
-    ) * vision_col * 1.5
+    ) * training_df['ma_vision'].fillna(0) * 1.5
     additional_features.append('vision_interaction')
 
-    if 'csnp' in training_df.columns and 'ma_drug_coverage' in training_df.columns:
-        training_df['csnp_drug_interaction'] = (
-            training_df['csnp'].fillna(0) * (
-                training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
-            ) - training_df['ma_drug_coverage'].fillna(0) * (
-                training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_drug', 0).fillna(0)
-            )
-        ).clip(lower=0) * 1.5
-    else:
-        training_df['csnp_drug_interaction'] = pd.Series(0, index=training_df.index)
-        print("Warning: 'csnp' or 'ma_drug_coverage' column not found. Using zeros for csnp_drug_interaction.")
+    training_df['csnp_drug_interaction'] = (
+        training_df['csnp'] * (
+            training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
+        ) * 1.5 - training_df['ma_drug_coverage'] * (
+            training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_drug', 0).fillna(0)
+        )
+    ).clip(lower=0) * 2.0
     additional_features.append('csnp_drug_interaction')
+
+    # Debug: Check csnp features
+    high_quality_csnp = training_df[(training_df['quality_level'] == 'High') & (training_df['persona'] == 'csnp')]
+    print(f"Eval: High-quality csnp samples: {len(high_quality_csnp)}")
+    print(f"Eval: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
 
     all_weighted_features = [f'w_{persona}' for persona in [
         'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
@@ -189,7 +179,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
 
-    # Filter out fitness and hearing for evaluation
+    # Filter out fitness and hearing
     valid_mask = (
         training_df['persona'].notna() & 
         (~training_df['persona'].str.lower().isin(['unknown', 'none', 'healthcare', 'fitness', 'hearing']))
@@ -289,7 +279,7 @@ def evaluate_predictions(model, X, y_true, metadata):
     quality_levels = ['High', 'Medium', 'Low']
     for level in quality_levels:
         level_mask = output_df['quality_level'] == level
-        level are = y_true_valid[level_mask]
+        level_true = y_true_valid[level_mask]
         level_pred = y_pred[level_mask.values]
         print(f"\n{level} Quality Data Results:")
         print(f"Rows: {len(level_true)}")

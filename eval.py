@@ -184,7 +184,18 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     print(f"Eval: Non-zero csnp_drug_interaction: {sum(high_quality_csnp['csnp_drug_interaction'] > 0)}")
     print(f"Eval: Non-zero csnp_doctor_interaction: {sum(high_quality_csnp['csnp_doctor_interaction'] > 0)}")
 
+    # Define feature columns (excluding w_* during computation)
     feature_columns = all_behavioral_features + raw_plan_features + additional_features
+
+    # Add dummy w_* features to match training
+    weighted_features = [
+        'w_doctor', 'w_drug', 'w_vision', 'w_dental', 'w_otc', 'w_transportation', 'w_csnp', 'w_dsnp'
+    ]
+    for w_col in weighted_features:
+        training_df[w_col] = 0.0
+
+    # Include w_* in feature_columns for model compatibility
+    feature_columns = feature_columns + weighted_features
 
     print(f"Feature columns expected: {feature_columns}")
 

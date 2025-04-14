@@ -1,14 +1,13 @@
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score  # Added f1_score
-from sklearn.preprocessing import StandardScaler  # Added for normalization
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # File paths
-behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/processed_us_dce_pro_behavioral_features_092024_032025_v7.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v6.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_092024_032025_v7.pkl'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v7.csv'
+model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v6.csv'
 
 def load_model(model_path):
     try:
@@ -25,7 +24,6 @@ def load_data(behavioral_path, plan_path):
         behavioral_df = pd.read_csv(behavioral_path)
         plan_df = pd.read_csv(plan_path)
         print(f"Behavioral data loaded: {len(behavioral_df)} rows")
-        print(f"Behavioral_df columns: {behavioral_df.columns.tolist()}")
         print(f"Plan data loaded: {len(plan_df)} rows")
         print(f"Plan_df columns: {plan_df.columns.tolist()}")
         return behavioral_df, plan_df
@@ -57,22 +55,6 @@ def normalize_persona(df):
             new_rows.append(row_copy)
     return pd.DataFrame(new_rows)
 
-def assign_quality_level(row, filter_cols, query_cols):
-    has_plan_id = pd.notna(row['plan_id'])
-    has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
-                 (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
-    has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
-    has_queries = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in query_cols)
-    
-    if has_plan_id and (has_clicks or has_filters):
-        return 'High'
-    elif has_plan_id and not has_clicks and not has_filters and has_queries:
-        return 'Medium'
-    elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
-        return 'Low'
-    else:
-        return 'Medium'
-
 def prepare_evaluation_features(behavioral_df, plan_df):
     behavioral_df = normalize_persona(behavioral_df)
     print(f"Rows after persona normalization: {len(behavioral_df)}")
@@ -88,22 +70,6 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
     training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore')
-
-    # Compute or ensure quality_level
-    filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
-    query_cols = [col for col in training_df.columns if col.startswith('query_')]
-    if 'quality_level' not in training_df.columns:
-        print("Warning: 'quality_level' not found in training_df. Computing it.")
-        training_df['quality_level'] = training_df.apply(
-            lambda row: assign_quality_level(row, filter_cols, query_cols), axis=1
-        )
-    else:
-        null_quality = training_df['quality_level'].isna().sum()
-        if null_quality > 0:
-            print(f"Warning: {null_quality} rows with null 'quality_level'. Recomputing.")
-            training_df['quality_level'] = training_df.apply(
-                lambda row: assign_quality_level(row, filter_cols, query_cols), axis=1
-            )
 
     all_behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
@@ -132,21 +98,11 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         else:
             training_df[col] = training_df[col].fillna(0)
 
-    # Normalize continuous features (NEW)
-    continuous_features = [
-        'time_dental_pages', 'time_transportation_pages', 'time_otc_pages', 'time_drug_pages',
-        'time_provider_pages', 'time_vision_pages', 'time_csnp_pages', 'time_dsnp_pages',
-        'total_session_time', 'num_pages_viewed', 'num_plans_selected', 'num_plans_compared',
-        'dce_click_count', 'pro_click_count'
-    ]
-    scaler = StandardScaler()
-    training_df[continuous_features] = scaler.fit_transform(training_df[continuous_features].fillna(0))
-
     additional_features = []
     training_df['csnp_interaction'] = training_df['csnp'] * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('time_csnp_pages', 0).fillna(0) + training_df.get('accordion_csnp', 0).fillna(0)
-    ) * 3.0
+    ) * 2.5
     additional_features.append('csnp_interaction')
 
     training_df['csnp_type_flag'] = training_df['csnp_type'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
@@ -155,51 +111,38 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     training_df['csnp_signal_strength'] = (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
-    ).clip(upper=5) * 3.0
+    ).clip(upper=5) * 2.5
     additional_features.append('csnp_signal_strength')
 
     training_df['dental_interaction'] = (
         training_df.get('query_dental', 0).fillna(0) + training_df.get('filter_dental', 0).fillna(0)
-    ) * training_df['ma_dental_benefit'] * 2.0
+    ) * training_df['ma_dental_benefit'] * 1.5
     additional_features.append('dental_interaction')
 
     training_df['vision_interaction'] = (
         training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0)
-    ) * training_df['ma_vision'] * 2.0
+    ) * training_df['ma_vision'] * 1.5
     additional_features.append('vision_interaction')
 
     training_df['csnp_drug_interaction'] = (
         training_df['csnp'] * (
             training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
             training_df.get('time_csnp_pages', 0).fillna(0)
-        ) * 2.5 - training_df['ma_drug_coverage'] * (
+        ) * 2.0 - training_df['ma_drug_coverage'] * (
             training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_drug', 0).fillna(0) + 
             training_df.get('time_drug_pages', 0).fillna(0)
         )
-    ).clip(lower=0) * 3.0
+    ).clip(lower=0) * 2.5
     additional_features.append('csnp_drug_interaction')
 
     training_df['csnp_doctor_interaction'] = (
         training_df['csnp'] * (
             training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
-        ) * 2.0 - training_df['ma_provider_network'] * (
+        ) * 1.5 - training_df['ma_provider_network'] * (
             training_df.get('query_provider', 0).fillna(0) + training_df.get('filter_provider', 0).fillna(0)
         )
-    ).clip(lower=0) * 2.0
+    ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
-
-    # New features to match training code (NEW)
-    training_df['dsnp_interaction'] = training_df['dsnp'] * (
-        training_df.get('query_dsnp', 0).fillna(0) + training_df.get('filter_dsnp', 0).fillna(0) + 
-        training_df.get('time_dsnp_pages', 0).fillna(0) + training_df.get('accordion_dsnp', 0).fillna(0)
-    ) * 3.0
-    additional_features.append('dsnp_interaction')
-
-    training_df['vision_signal_strength'] = (
-        training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0) + 
-        training_df.get('accordion_vision', 0).fillna(0) + training_df.get('time_vision_pages', 0).fillna(0)
-    ).clip(upper=5) * 2.0
-    additional_features.append('vision_signal_strength')
 
     # Debug: Check csnp features
     high_quality_csnp = training_df[(training_df['quality_level'] == 'High') & (training_df['persona'] == 'csnp')]
@@ -207,11 +150,12 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     print(f"Eval: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
     print(f"Eval: Non-zero csnp_drug_interaction: {sum(high_quality_csnp['csnp_drug_interaction'] > 0)}")
     print(f"Eval: Non-zero csnp_doctor_interaction: {sum(high_quality_csnp['csnp_doctor_interaction'] > 0)}")
-    # Debug: Check new features (NEW)
-    print(f"Eval: Non-zero dsnp_interaction: {sum(training_df['dsnp_interaction'] > 0)}")
-    print(f"Eval: Non-zero vision_signal_strength: {sum(training_df['vision_signal_strength'] > 0)}")
 
-    feature_columns = all_behavioral_features + raw_plan_features + additional_features
+    all_weighted_features = [f'w_{persona}' for persona in [
+        'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
+    ]]
+
+    feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
 
     print(f"Feature columns expected: {feature_columns}")
 
@@ -223,15 +167,26 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     print(f"Columns in training_df after filling: {training_df.columns.tolist()}")
 
-    # Ensure metadata includes quality_level
-    metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns
-    missing_metadata_cols = [col for col in metadata_columns if col not in training_df.columns]
-    if missing_metadata_cols:
-        print(f"Warning: Missing metadata columns: {missing_metadata_cols}")
-        for col in missing_metadata_cols:
-            training_df[col] = 0
+    filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
+    query_cols = [col for col in training_df.columns if col.startswith('query_')]
 
-    metadata = training_df[metadata_columns]
+    def assign_quality_level(row):
+        has_plan_id = pd.notna(row['plan_id'])
+        has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
+                     (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
+        has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
+        has_queries = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in query_cols)
+        
+        if has_plan_id and (has_clicks or has_filters):
+            return 'High'
+        elif has_plan_id and not has_clicks and not has_filters and has_queries:
+            return 'Medium'
+        elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
+            return 'Low'
+        else:
+            return 'Medium'
+
+    training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
 
     # Filter out fitness and hearing
     valid_mask = (
@@ -239,8 +194,9 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         (~training_df['persona'].str.lower().isin(['unknown', 'none', 'healthcare', 'fitness', 'hearing']))
     )
     training_df = training_df[valid_mask]
-    metadata = metadata[valid_mask]
     print(f"Rows after filtering fitness/hearing: {len(training_df)}")
+
+    metadata = training_df[['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns]
 
     X = training_df[feature_columns].fillna(0)
     y_true = training_df['persona'] if 'persona' in training_df.columns else None
@@ -254,31 +210,7 @@ def evaluate_predictions(model, X, y_true, metadata):
     y_pred_proba = model.predict_proba(X)
     personas = model.classes_
     proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
-    
-    # Threshold tuning for minority classes (NEW)
-    thresholds = {
-        'dental': 0.3,    # Lower to increase recall
-        'vision': 0.3,
-        'dsnp': 0.3,
-        'doctor': 0.4,
-        'drug': 0.4,
-        'csnp': 0.5,
-        'otc': 0.5,
-        'transportation': 0.5
-    }
-    y_pred = []
-    for i in range(len(X)):
-        probs = {p: y_pred_proba[i][j] for j, p in enumerate(personas)}
-        max_prob = max(probs.values())
-        # Choose persona with highest prob, respecting thresholds
-        pred = None
-        for p, prob in probs.items():
-            if prob >= thresholds.get(p, 0.5) and (pred is None or prob > probs[pred]):
-                pred = p
-        if pred is None:
-            pred = max(probs, key=probs.get)  # Fallback to max prob
-        y_pred.append(pred)
-    y_pred = np.array(y_pred)
+    y_pred = model.predict(X)
     
     output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
     output_df['predicted_persona'] = y_pred
@@ -307,9 +239,7 @@ def evaluate_predictions(model, X, y_true, metadata):
 
         if len(y_true_valid) > 0:
             accuracy = accuracy_score(y_true_valid, y_pred_valid)
-            macro_f1 = f1_score(y_true_valid, y_pred_valid, average='macro')  # NEW
             print(f"\nOverall Accuracy (valid personas only): {accuracy * 100:.2f}%")
-            print(f"Macro F1-Score: {macro_f1:.4f}")  # NEW
             print(f"Rows evaluated: {len(y_true_valid)}")
             print(f"Correct predictions: {sum(y_pred_valid == y_true_valid)}")
             print("\nDetailed Classification Report:")

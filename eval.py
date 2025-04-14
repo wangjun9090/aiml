@@ -90,21 +90,24 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ]
 
     additional_features = []
+    # Always compute csnp_interaction, csnp_signal_strength, and csnp_type_flag
     if 'csnp' in training_df.columns:
         training_df['csnp_interaction'] = training_df['csnp'].fillna(0) * (
             training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
             training_df['time_csnp_pages'].fillna(0) + training_df['accordion_csnp'].fillna(0)
         ) * 2
-        additional_features.append('csnp_interaction')
     else:
         training_df['csnp_interaction'] = 0
         print("Warning: 'csnp' column not found. Setting 'csnp_interaction' to 0.")
+    additional_features.append('csnp_interaction')
+
     if 'csnp_type' in training_df.columns:
         training_df['csnp_type_flag'] = (training_df['csnp_type'] == 'Y').astype(int)
-        additional_features.append('csnp_type_flag')
     else:
         training_df['csnp_type_flag'] = 0
         print("Warning: 'csnp_type' column not found. Setting 'csnp_type_flag' to 0.")
+    additional_features.append('csnp_type_flag')
+
     training_df['csnp_signal_strength'] = (
         training_df['query_csnp'].fillna(0) + training_df['filter_csnp'].fillna(0) + 
         training_df['accordion_csnp'].fillna(0) + training_df['time_csnp_pages'].fillna(0)

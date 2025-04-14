@@ -1,3 +1,78 @@
+import pandas as pd
+import numpy as np
+import pickle
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score  # Added f1_score
+from sklearn.preprocessing import StandardScaler  # Added for normalization
+
+# File paths
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/processed_us_dce_pro_behavioral_features_092024_032025_v7.csv'
+plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
+model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_092024_032025_v7.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v7.csv'
+
+def load_model(model_path):
+    try:
+        with open(model_path, 'rb') as f:
+            model = pickle.load(f)
+        print(f"Model loaded from {model_path}")
+        return model
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise
+
+def load_data(behavioral_path, plan_path):
+    try:
+        behavioral_df = pd.read_csv(behavioral_path)
+        plan_df = pd.read_csv(plan_path)
+        print(f"Behavioral data loaded: {len(behavioral_df)} rows")
+        print(f"Behavioral_df columns: {behavioral_df.columns.tolist()}")
+        print(f"Plan data loaded: {len(plan_df)} rows")
+        print(f"Plan_df columns: {plan_df.columns.tolist()}")
+        return behavioral_df, plan_df
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        raise
+
+def normalize_persona(df):
+    new_rows = []
+    for idx, row in df.iterrows():
+        if pd.isna(row['persona']):
+            new_rows.append(row)
+            continue
+        personas = [p.strip().lower() for p in str(row['persona']).split(',')]
+        if 'dsnp' in personas or 'csnp' in personas:
+            first_row = row.copy()
+            first_persona = personas[0]
+            if first_persona in ['unknown', 'none', 'healthcare', '']:
+                first_persona = 'dsnp' if 'dsnp' in personas else 'csnp'
+            first_row['persona'] = first_persona
+            new_rows.append(first_row)
+            second_row = row.copy()
+            second_row['persona'] = 'dsnp' if 'dsnp' in personas else 'csnp'
+            new_rows.append(second_row)
+        else:
+            row_copy = row.copy()
+            first_persona = personas[0]
+            row_copy['persona'] = first_persona
+            new_rows.append(row_copy)
+    return pd.DataFrame(new_rows)
+
+def assign_quality_level(row, filter_cols, query_cols):
+    has_plan_id = pd.notna(row['plan_id'])
+    has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
+                 (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
+    has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
+    has_queries = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in query_cols)
+    
+    if has_plan_id and (has_clicks or has_filters):
+        return 'High'
+    elif has_plan_id and not has_clicks and not has_filters and has_queries:
+        return 'Medium'
+    elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
+        return 'Low'
+    else:
+        return 'Medium'
+
 def prepare_evaluation_features(behavioral_df, plan_df):
     behavioral_df = normalize_persona(behavioral_df)
     print(f"Rows after persona normalization: {len(behavioral_df)}")
@@ -113,7 +188,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ).clip(lower=0) * 2.0
     additional_features.append('csnp_doctor_interaction')
 
-    # New interaction features (NEW)
+    # New features to match training code (NEW)
     training_df['dsnp_interaction'] = training_df['dsnp'] * (
         training_df.get('query_dsnp', 0).fillna(0) + training_df.get('filter_dsnp', 0).fillna(0) + 
         training_df.get('time_dsnp_pages', 0).fillna(0) + training_df.get('accordion_dsnp', 0).fillna(0)
@@ -132,6 +207,9 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     print(f"Eval: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
     print(f"Eval: Non-zero csnp_drug_interaction: {sum(high_quality_csnp['csnp_drug_interaction'] > 0)}")
     print(f"Eval: Non-zero csnp_doctor_interaction: {sum(high_quality_csnp['csnp_doctor_interaction'] > 0)}")
+    # Debug: Check new features (NEW)
+    print(f"Eval: Non-zero dsnp_interaction: {sum(training_df['dsnp_interaction'] > 0)}")
+    print(f"Eval: Non-zero vision_signal_strength: {sum(training_df['vision_signal_strength'] > 0)}")
 
     feature_columns = all_behavioral_features + raw_plan_features + additional_features
 
@@ -171,3 +249,112 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         print(f"Unique personas before filtering: {y_true.unique().tolist()}")
 
     return X, y_true, metadata
+
+def evaluate_predictions(model, X, y_true, metadata):
+    y_pred_proba = model.predict_proba(X)
+    personas = model.classes_
+    proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
+    
+    # Threshold tuning for minority classes (NEW)
+    thresholds = {
+        'dental': 0.3,    # Lower to increase recall
+        'vision': 0.3,
+        'dsnp': 0.3,
+        'doctor': 0.4,
+        'drug': 0.4,
+        'csnp': 0.5,
+        'otc': 0.5,
+        'transportation': 0.5
+    }
+    y_pred = []
+    for i in range(len(X)):
+        probs = {p: y_pred_proba[i][j] for j, p in enumerate(personas)}
+        max_prob = max(probs.values())
+        # Choose persona with highest prob, respecting thresholds
+        pred = None
+        for p, prob in probs.items():
+            if prob >= thresholds.get(p, 0.5) and (pred is None or prob > probs[pred]):
+                pred = p
+        if pred is None:
+            pred = max(probs, key=probs.get)  # Fallback to max prob
+        y_pred.append(pred)
+    y_pred = np.array(y_pred)
+    
+    output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
+    output_df['predicted_persona'] = y_pred
+    
+    for i in range(len(output_df)):
+        probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
+        ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+        output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
+    
+    output_df.to_csv(output_file, index=False)
+    print(f"Results saved to {output_file}")
+
+    if y_true is not None:
+        y_true_lower = y_true.str.lower()
+        invalid_personas = ['', 'unknown', 'none', 'healthcare', 'fitness', 'hearing']
+        valid_mask = y_true.notna() & (~y_true_lower.isin(invalid_personas))
+        if not valid_mask.all():
+            excluded_count = (~valid_mask).sum()
+            print(f"Warning: Excluding {excluded_count} rows with invalid 'persona' values.")
+            print(f"Sample of excluded personas: {y_true[~valid_mask].head().tolist()}")
+        
+        X_valid = X[valid_mask]
+        y_true_valid = y_true[valid_mask].reset_index(drop=True)
+        y_pred_valid = y_pred[valid_mask.values]
+        metadata_valid = metadata[valid_mask].reset_index(drop=True)
+
+        if len(y_true_valid) > 0:
+            accuracy = accuracy_score(y_true_valid, y_pred_valid)
+            macro_f1 = f1_score(y_true_valid, y_pred_valid, average='macro')  # NEW
+            print(f"\nOverall Accuracy (valid personas only): {accuracy * 100:.2f}%")
+            print(f"Macro F1-Score: {macro_f1:.4f}")  # NEW
+            print(f"Rows evaluated: {len(y_true_valid)}")
+            print(f"Correct predictions: {sum(y_pred_valid == y_true_valid)}")
+            print("\nDetailed Classification Report:")
+            print(classification_report(y_true_valid, y_pred_valid))
+            
+            print("\nIndividual Persona Accuracy Rates (Overall):")
+            for persona in sorted(set(y_true_valid)):
+                persona_true = y_true_valid == persona
+                persona_count = sum(persona_true)
+                if persona_count > 0:
+                    persona_accuracy = accuracy_score(y_true_valid[persona_true], y_pred_valid[persona_true]) * 100
+                    print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
+
+            quality_levels = ['High', 'Medium', 'Low']
+            for level in quality_levels:
+                level_mask = metadata_valid['quality_level'] == level
+                level_true = y_true_valid[level_mask]
+                level_pred = y_pred_valid[level_mask.values]
+                print(f"\n{level} Quality Data Results:")
+                print(f"Rows: {len(level_true)}")
+                if len(level_true) > 0:
+                    level_accuracy = accuracy_score(level_true, level_pred) * 100
+                    print(f"Accuracy: {level_accuracy:.2f}%")
+                    print(f"Individual Persona Accuracy Rates ({level}):")
+                    for persona in sorted(set(level_true)):
+                        persona_true = level_true == persona
+                        persona_count = sum(persona_true)
+                        if persona_count > 0:
+                            persona_accuracy = accuracy_score(level_true[persona_true], level_pred[persona_true]) * 100
+                            print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
+                else:
+                    print("No records in this quality level.")
+
+            print("\nConfusion Matrix (Overall, valid personas only):")
+            cm = confusion_matrix(y_true_valid, y_pred_valid, labels=list(sorted(set(y_true_valid))))
+            print(pd.DataFrame(cm, index=list(sorted(set(y_true_valid))), columns=list(sorted(set(y_true_valid)))))
+        else:
+            print("ERROR: No valid persona values remain for evaluation.")
+
+def main():
+    print("Evaluating data with pre-trained Random Forest model...")
+    rf_model = load_model(model_file)
+    behavioral_df, plan_df = load_data(behavioral_file, plan_file)
+    X, y_true, metadata = prepare_evaluation_features(behavioral_df, plan_df)
+    evaluate_predictions(rf_model, X, y_true, metadata)
+
+if __name__ == "__main__":
+    main()

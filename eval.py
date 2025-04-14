@@ -4,10 +4,10 @@ import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # File paths
-behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v2.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v3.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v2.pkl'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v2.csv'
+model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v3.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v3.csv'
 
 def load_model(model_path):
     try:
@@ -90,7 +90,6 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ]
 
     additional_features = []
-    # Compute csnp_interaction safely
     if 'csnp' in training_df.columns:
         csnp_col = training_df['csnp'].fillna(0)
     else:
@@ -102,7 +101,6 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ) * 2
     additional_features.append('csnp_interaction')
 
-    # Compute csnp_type_flag
     if 'csnp_type' in training_df.columns:
         training_df['csnp_type_flag'] = training_df['csnp_type'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
     else:
@@ -110,14 +108,12 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         print("Warning: 'csnp_type' column not found. Setting csnp_type_flag to 0.")
     additional_features.append('csnp_type_flag')
 
-    # Compute csnp_signal_strength
     training_df['csnp_signal_strength'] = (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
     ).clip(upper=5) * 1.5
     additional_features.append('csnp_signal_strength')
 
-    # Compute dental_interaction safely
     if 'ma_dental_benefit' in training_df.columns:
         dental_col = training_df['ma_dental_benefit'].fillna(0)
     else:
@@ -128,7 +124,6 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ) * dental_col * 1.5
     additional_features.append('dental_interaction')
 
-    # Compute vision_interaction safely
     if 'ma_vision' in training_df.columns:
         vision_col = training_df['ma_vision'].fillna(0)
     else:
@@ -140,7 +135,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     additional_features.append('vision_interaction')
 
     all_weighted_features = [f'w_{persona}' for persona in [
-        'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp', 'fitness', 'hearing'
+        'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
     ]]
 
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
@@ -181,6 +176,14 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
 
+    # Filter out fitness and hearing for evaluation
+    valid_mask = (
+        training_df['persona'].notna() & 
+        (~training_df['persona'].str.lower().isin(['unknown', 'none', 'healthcare', 'fitness', 'hearing']))
+    )
+    training_df = training_df[valid_mask]
+    print(f"Rows after filtering fitness/hearing: {len(training_df)}")
+
     metadata = training_df[['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns]
 
     X = training_df[feature_columns].fillna(0)
@@ -212,11 +215,11 @@ def evaluate_predictions(model, X, y_true, metadata):
         return
 
     y_true_lower = y_true.str.lower()
-    invalid_personas = ['', 'unknown', 'none', 'healthcare']
+    invalid_personas = ['', 'unknown', 'none', 'healthcare', 'fitness', 'hearing']
     valid_mask = y_true.notna() & (~y_true_lower.isin(invalid_personas))
     if not valid_mask.all():
         excluded_count = (~valid_mask).sum()
-        print(f"Warning: Excluding {excluded_count} rows with invalid 'persona' values (blank, NaN, 'unknown', 'none', 'healthcare') from evaluation.")
+        print(f"Warning: Excluding {excluded_count} rows with invalid 'persona' values (blank, NaN, 'unknown', 'none', 'healthcare', 'fitness', 'hearing') from evaluation.")
         print(f"Sample of excluded personas: {y_true[~valid_mask].head().tolist()}")
     
     X_valid = X[valid_mask]

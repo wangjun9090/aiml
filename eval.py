@@ -4,10 +4,10 @@ import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # File paths
-behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v5.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v6.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v5.pkl'
-output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v5.csv'
+model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v6.csv'
 
 def load_model(model_path):
     try:
@@ -90,7 +90,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # Ensure all raw_plan_features exist before feature calculations
+    # Ensure all raw_plan_features and csnp_type exist
     for col in raw_plan_features + ['csnp_type']:
         if col not in training_df.columns:
             print(f"Warning: '{col}' not found in training_df. Filling with 0.")
@@ -102,7 +102,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     training_df['csnp_interaction'] = training_df['csnp'] * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('time_csnp_pages', 0).fillna(0) + training_df.get('accordion_csnp', 0).fillna(0)
-    ) * 2
+    ) * 2.5
     additional_features.append('csnp_interaction')
 
     training_df['csnp_type_flag'] = training_df['csnp_type'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
@@ -111,7 +111,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     training_df['csnp_signal_strength'] = (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
-    ).clip(upper=5) * 2.0
+    ).clip(upper=5) * 2.5
     additional_features.append('csnp_signal_strength')
 
     training_df['dental_interaction'] = (
@@ -126,17 +126,30 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     training_df['csnp_drug_interaction'] = (
         training_df['csnp'] * (
-            training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
-        ) * 1.5 - training_df['ma_drug_coverage'] * (
-            training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_drug', 0).fillna(0)
+            training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
+            training_df.get('time_csnp_pages', 0).fillna(0)
+        ) * 2.0 - training_df['ma_drug_coverage'] * (
+            training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_drug', 0).fillna(0) + 
+            training_df.get('time_drug_pages', 0).fillna(0)
         )
-    ).clip(lower=0) * 2.0
+    ).clip(lower=0) * 2.5
     additional_features.append('csnp_drug_interaction')
+
+    training_df['csnp_doctor_interaction'] = (
+        training_df['csnp'] * (
+            training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
+        ) * 1.5 - training_df['ma_provider_network'] * (
+            training_df.get('query_provider', 0).fillna(0) + training_df.get('filter_provider', 0).fillna(0)
+        )
+    ).clip(lower=0) * 1.5
+    additional_features.append('csnp_doctor_interaction')
 
     # Debug: Check csnp features
     high_quality_csnp = training_df[(training_df['quality_level'] == 'High') & (training_df['persona'] == 'csnp')]
     print(f"Eval: High-quality csnp samples: {len(high_quality_csnp)}")
     print(f"Eval: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
+    print(f"Eval: Non-zero csnp_drug_interaction: {sum(high_quality_csnp['csnp_drug_interaction'] > 0)}")
+    print(f"Eval: Non-zero csnp_doctor_interaction: {sum(high_quality_csnp['csnp_doctor_interaction'] > 0)}")
 
     all_weighted_features = [f'w_{persona}' for persona in [
         'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'

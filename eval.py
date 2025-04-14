@@ -98,6 +98,17 @@ def prepare_training_features(behavioral_df, plan_df):
     ).clip(upper=5) * 1.5
     additional_features.append('csnp_signal_strength')
 
+    # Add interaction terms for minority personas
+    training_df['dental_interaction'] = (
+        training_df.get('query_dental', 0).fillna(0) + training_df.get('filter_dental', 0).fillna(0)
+    ) * training_df.get('ma_dental_benefit', 0).fillna(0) * 1.5
+    additional_features.append('dental_interaction')
+
+    training_df['vision_interaction'] = (
+        training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0)
+    ) * training_df.get('ma_vision', 0).fillna(0) * 1.5
+    additional_features.append('vision_interaction')
+
     persona_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
@@ -111,9 +122,9 @@ def prepare_training_features(behavioral_df, plan_df):
         'hearing': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'}
     }
 
-    k1, k3, k4, k7, k8 = 0.1, 0.7, 0.6, 0.25, 0.35  # Increased for queries/filters/clicks
-    k9, k10 = 1.5, 1.3  # Further boosted for csnp
-    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.5, 4.0, 1.0, 1.5
+    k1, k3, k4, k7, k8 = 0.1, 0.8, 0.7, 0.3, 0.4  # Further increased
+    k9, k10 = 1.8, 1.5  # Boosted for csnp
+    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.8, 4.5, 1.0, 1.5
 
     def calculate_persona_weight(row, persona_info, persona, plan_df):
         plan_col = persona_info['plan_col']
@@ -163,36 +174,39 @@ def prepare_training_features(behavioral_df, plan_df):
         has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
                      (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
         if has_filters and has_clicks:
-            behavioral_score += 0.8  # Increased boost
+            behavioral_score += 1.0  # Increased
         elif has_filters or has_clicks:
-            behavioral_score += 0.4
+            behavioral_score += 0.5
         
         if persona == 'doctor':
-            if click_value >= 1.5: behavioral_score += 0.5
-            elif click_value >= 0.5: behavioral_score += 0.25
+            if click_value >= 1.5: behavioral_score += 0.6
+            elif click_value >= 0.5: behavioral_score += 0.3
         elif persona == 'drug':
-            if click_value >= 5: behavioral_score += 0.5
-            elif click_value >= 2: behavioral_score += 0.25
+            if click_value >= 5: behavioral_score += 0.6
+            elif click_value >= 2: behavioral_score += 0.3
         elif persona == 'dental':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.6  # Increased
-            elif signal_count >= 1: behavioral_score += 0.3
-            if row['quality_level'] == 'High': behavioral_score += 0.5  # High-quality boost
+            if signal_count >= 2: behavioral_score += 0.8  # Increased
+            elif signal_count >= 1: behavioral_score += 0.4
+            if row['quality_level'] == 'High': behavioral_score += 0.7  # Increased
+            if row.get('dental_interaction', 0) > 0: behavioral_score += 0.3
         elif persona == 'vision':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 1: behavioral_score += 0.5  # Increased
-            if row['quality_level'] == 'High': behavioral_score += 0.5
+            if signal_count >= 1: behavioral_score += 0.6  # Increased
+            if row['quality_level'] == 'High': behavioral_score += 0.7
+            if row.get('vision_interaction', 0) > 0: behavioral_score += 0.3
         elif persona == 'csnp':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 1.0  # Increased
-            elif signal_count >= 1: behavioral_score += 0.7
-            if row.get('csnp_interaction', 0) > 0: behavioral_score += 0.5
-            if row.get('csnp_type_flag', 0) == 1: behavioral_score += 0.4
-            if row['quality_level'] == 'High': behavioral_score += 0.5
+            if signal_count >= 2: behavioral_score += 1.2  # Increased
+            elif signal_count >= 1: behavioral_score += 0.8
+            if row.get('csnp_interaction', 0) > 0: behavioral_score += 0.6
+            if row.get('csnp_type_flag', 0) == 1: behavioral_score += 0.5
+            if row['quality_level'] == 'High': behavioral_score += 0.7
         elif persona in ['fitness', 'hearing']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 1: behavioral_score += 0.5  # Increased
-            if row['quality_level'] == 'High': behavioral_score += 0.5
+            if signal_count >= 1: behavioral_score += 0.6  # Increased
+            if row['quality_level'] == 'High': behavioral_score += 0.7
+            if persona == 'vision' and row.get('vision_interaction', 0) > 0: behavioral_score += 0.3
         
         adjusted_weight = base_weight + behavioral_score
         
@@ -209,22 +223,22 @@ def prepare_training_features(behavioral_df, plan_df):
                     k1 * pages_viewed +
                     (k8 if p == 'doctor' else k7 if p == 'drug' else 0) * 
                     (row.get(info.get('click_col'), 0) if 'click_col' in info and pd.notna(row.get(info.get('click_col'))) else 0) +
-                    (0.5 if p == 'doctor' and row.get(info.get('click_col', 'pro_click_count'), 0) >= 1.5 else 
-                     0.25 if p == 'doctor' and row.get(info.get('click_col', 'pro_click_count'), 0) >= 0.5 else 
-                     0.5 if p == 'drug' and row.get(info.get('click_col', 'dce_click_count'), 0) >= 5 else 
-                     0.25 if p == 'drug' and row.get(info.get('click_col', 'dce_click_count'), 0) >= 2 else 
-                     0.6 if p == 'dental' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 2 else 
-                     0.3 if p == 'dental' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 
-                     0.5 if p == 'vision' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 
-                     0.5 if p in ['csnp', 'fitness', 'hearing'] and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 0)
+                    (0.6 if p == 'doctor' and row.get(info.get('click_col', 'pro_click_count'), 0) >= 1.5 else 
+                     0.3 if p == 'doctor' and row.get(info.get('click_col', 'pro_click_count'), 0) >= 0.5 else 
+                     0.6 if p == 'drug' and row.get(info.get('click_col', 'dce_click_count'), 0) >= 5 else 
+                     0.3 if p == 'drug' and row.get(info.get('click_col', 'dce_click_count'), 0) >= 2 else 
+                     0.8 if p == 'dental' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 2 else 
+                     0.4 if p == 'dental' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 
+                     0.6 if p == 'vision' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 
+                     0.6 if p in ['csnp', 'fitness', 'hearing'] and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 0)
                 )
                 for p, info in persona_weights.items()
                 if p != row['persona'] and info['plan_col'] in row and pd.notna(row.get(info['plan_col']))
             ]
             max_non_target = max(non_target_weights, default=0)
-            adjusted_weight = max(adjusted_weight, max_non_target + 0.2)
+            adjusted_weight = max(adjusted_weight, max_non_target + 0.25)
         
-        return min(adjusted_weight, 2.5 if persona == 'csnp' else 1.2)
+        return min(adjusted_weight, 3.0 if persona == 'csnp' else 1.5)
 
     print("Calculating persona weights...")
     for persona, info in persona_weights.items():
@@ -232,7 +246,7 @@ def prepare_training_features(behavioral_df, plan_df):
             lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1
         )
 
-    weighted_features = [f'w_{persona}' for persona in persona_weights.keys() if persona != 'csnp']
+    weighted_features = [f'w_{persona}' for persona in persona_weights.keys()]
     weight_sum = training_df[weighted_features].sum(axis=1)
     for wf in weighted_features:
         training_df[wf] = training_df[wf] / weight_sum.where(weight_sum > 0, 1)
@@ -257,7 +271,7 @@ def prepare_training_features(behavioral_df, plan_df):
         high_quality_df = persona_df[persona_df['quality_level'] == 'High']
         if len(high_quality_df) > 0:
             oversampled_high = resample(
-                high_quality_df, replace=True, n_samples=max(100, len(high_quality_df) * 2), random_state=42
+                high_quality_df, replace=True, n_samples=max(150, len(high_quality_df) * 3), random_state=42
             )
             oversampled_dfs.append(oversampled_high)
         oversampled_dfs.append(persona_df[persona_df['quality_level'] != 'High'])
@@ -296,7 +310,7 @@ def save_model(model, output_path):
 
 def main():
     print("Training Random Forest model with weighted features...")
-    behavioral_df, plan_df = load_data(behavioral_file, plan_df)
+    behavioral_df, plan_df = load_data(behavioral_file, plan_file)
     X, y = prepare_training_features(behavioral_df, plan_df)
     rf_model = train_model(X, y)
     save_model(rf_model, model_output_file)

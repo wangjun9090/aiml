@@ -7,8 +7,8 @@ from sklearn.utils import resample
 # File paths
 behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_092024_032025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-model_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v3.pkl'
-weighted_behavioral_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v3.csv'
+model_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v4.pkl'
+weighted_behavioral_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v4.csv'
 
 def load_data(behavioral_path, plan_path):
     try:
@@ -102,7 +102,7 @@ def prepare_training_features(behavioral_df, plan_df):
     training_df['csnp_signal_strength'] = (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
         training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
-    ).clip(upper=5) * 1.5
+    ).clip(upper=5) * 2.0  # Increased scaling
     additional_features.append('csnp_signal_strength')
 
     if 'ma_dental_benefit' in training_df.columns:
@@ -123,6 +123,18 @@ def prepare_training_features(behavioral_df, plan_df):
     ) * vision_col * 1.5
     additional_features.append('vision_interaction')
 
+    if 'csnp' in training_df.columns and 'ma_drug_coverage' in training_df.columns:
+        training_df['csnp_drug_interaction'] = (
+            training_df['csnp'].fillna(0) * (
+                training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
+            ) - training_df['ma_drug_coverage'].fillna(0) * (
+                training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_drug', 0).fillna(0)
+            )
+        ).clip(lower=0) * 1.5
+    else:
+        training_df['csnp_drug_interaction'] = pd.Series(0, index=training_df.index)
+    additional_features.append('csnp_drug_interaction')
+
     persona_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
@@ -135,8 +147,8 @@ def prepare_training_features(behavioral_df, plan_df):
     }
 
     k1, k3, k4, k7, k8 = 0.1, 0.7, 0.6, 0.25, 0.35
-    k9, k10 = 1.5, 1.3
-    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 1.5, 4.0, 1.0, 1.5
+    k9, k10 = 2.0, 1.8  # Increased for csnp
+    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 2.0, 5.0, 1.0, 1.5
 
     def calculate_persona_weight(row, persona_info, persona, plan_df):
         plan_col = persona_info['plan_col']
@@ -208,11 +220,12 @@ def prepare_training_features(behavioral_df, plan_df):
             if row.get('vision_interaction', 0) > 0: behavioral_score += 0.4
         elif persona == 'csnp':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.8
-            elif signal_count >= 1: behavioral_score += 0.5
-            if row.get('csnp_interaction', 0) > 0: behavioral_score += 0.5
-            if row.get('csnp_type_flag', 0) == 1: behavioral_score += 0.4
-            if row['quality_level'] == 'High': behavioral_score += 0.6
+            if signal_count >= 2: behavioral_score += 1.0
+            elif signal_count >= 1: behavioral_score += 0.7
+            if row.get('csnp_interaction', 0) > 0: behavioral_score += 0.7
+            if row.get('csnp_type_flag', 0) == 1: behavioral_score += 0.6
+            if row.get('csnp_drug_interaction', 0) > 0: behavioral_score += 0.5
+            if row['quality_level'] == 'High': behavioral_score += 1.0
         elif persona in ['otc', 'transportation']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.5
@@ -248,7 +261,7 @@ def prepare_training_features(behavioral_df, plan_df):
             max_non_target = max(non_target_weights, default=0)
             adjusted_weight = max(adjusted_weight, max_non_target + 0.2)
         
-        return min(adjusted_weight, 2.5 if persona == 'csnp' else 1.2)
+        return min(adjusted_weight, 3.0 if persona == 'csnp' else 1.2)
 
     print("Calculating persona weights...")
     for persona, info in persona_weights.items():
@@ -284,8 +297,9 @@ def prepare_training_features(behavioral_df, plan_df):
         persona_df = training_df_valid[training_df_valid['persona'] == persona]
         high_quality_df = persona_df[persona_df['quality_level'] == 'High']
         if len(high_quality_df) > 0:
+            n_samples = max(100, len(high_quality_df) * 2) if persona == 'dental' else max(50, len(high_quality_df))
             oversampled_high = resample(
-                high_quality_df, replace=True, n_samples=max(100, len(high_quality_df) * 2), random_state=42
+                high_quality_df, replace=True, n_samples=n_samples, random_state=42
             )
             oversampled_dfs.append(oversampled_high)
         oversampled_dfs.append(persona_df[persona_df['quality_level'] != 'High'])
@@ -306,8 +320,19 @@ def prepare_training_features(behavioral_df, plan_df):
     return X, y
 
 def train_model(X, y):
+    # Custom class weights to boost csnp
+    class_weights = {
+        'csnp': 2.0,
+        'dental': 1.5,
+        'vision': 1.5,
+        'doctor': 1.0,
+        'drug': 0.8,
+        'dsnp': 1.0,
+        'otc': 1.0,
+        'transportation': 1.0
+    }
     rf_model = RandomForestClassifier(
-        n_estimators=100, random_state=42, class_weight='balanced_subsample'
+        n_estimators=100, random_state=42, class_weight=class_weights
     )
     rf_model.fit(X, y)
     print("Random Forest model trained.")

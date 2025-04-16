@@ -1,84 +1,86 @@
 import pandas as pd
 import numpy as np
 import pickle
-import logging
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import pandas_udf, PandasUDFType
+from pyspark.sql.types import DoubleType, StructType, StructField
 
-# Set up logging with INFO level
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Initialize Spark session in Databricks
+spark = SparkSession.builder.appName("PersonaScoring").getOrCreate()
 
-# File paths (adjusted for Databricks environment)
-MODEL_FILE = "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl"
-BEHAVIORAL_FILE = "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv"
-PLAN_FILE = "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv"
+# Hardcoded file paths for Databricks (using /dbfs/ prefix)
+BEHAVIORAL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/new_visitors_behavioral_features_2025.csv'
+PLAN_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
+MODEL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v7.pkl'
+OUTPUT_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/scores/032025/scored_new_visitors_2025.csv'
 
-# Hardcoded userid for testing
-HARDCODED_USERID = "1743637276169V5LFCHK9S9U863J6JJL355C2RDKTHMRU"
-
-def load_data(behavioral_path, plan_path):
-    """Load behavioral and plan data from CSV files."""
+def load_model(model_path):
     try:
-        behavioral_df = pd.read_csv(behavioral_path)
-        plan_df = pd.read_csv(plan_path)
-        logger.info(f"Behavioral data loaded: {len(behavioral_df)} rows")
-        logger.info(f"Plan data loaded: {len(plan_df)} rows")
-
-        # Convert numeric columns to appropriate types
-        numeric_columns = [
-            'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
-            'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
-            'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp', 'accordion_dental',
-            'accordion_transportation', 'accordion_otc', 'accordion_drug', 'accordion_provider',
-            'accordion_vision', 'accordion_csnp', 'accordion_dsnp', 'time_dental_pages',
-            'time_transportation_pages', 'time_otc_pages', 'time_drug_pages', 'time_provider_pages',
-            'time_vision_pages', 'time_csnp_pages', 'time_dsnp_pages', 'rel_time_dental_pages',
-            'rel_time_transportation_pages', 'rel_time_otc_pages', 'rel_time_drug_pages',
-            'rel_time_provider_pages', 'rel_time_vision_pages', 'rel_time_csnp_pages',
-            'rel_time_dsnp_pages', 'total_session_time', 'num_pages_viewed', 'num_plans_selected',
-            'num_plans_compared', 'submitted_application', 'dce_click_count', 'pro_click_count',
-            'ma_otc', 'ma_transportation', 'ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp',
-            'ma_provider_network', 'ma_drug_coverage'
-        ]
-
-        for df in [behavioral_df, plan_df]:
-            for col in numeric_columns:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-        return behavioral_df, plan_df
+        with open(model_path, 'rb') as f:
+            model = pickle.load(f)
+        print(f"Model loaded from {model_path}")
+        return model
     except Exception as e:
-        logger.error(f"Error loading data: {e}")
+        print(f"Error loading model: {e}")
         raise
 
-def assign_quality_level(row, filter_cols, query_cols):
-    has_plan_id = pd.notna(row['plan_id'])
-    has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
-                 (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
-    has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
-    has_queries = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in query_cols)
-    
-    if has_plan_id and (has_clicks or has_filters):
-        return 'High'
-    elif has_plan_id and not has_clicks and not has_filters and has_queries:
-        return 'Medium'
-    elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
-        return 'Low'
-    else:
-        return 'Medium'
+def load_data(behavioral_path, plan_path):
+    try:
+        # Load data using Spark, then convert to Pandas for compatibility with existing logic
+        behavioral_df = spark.read.csv(behavioral_path, header=True, inferSchema=True).toPandas()
+        plan_df = spark.read.csv(plan_path, header=True, inferSchema=True).toPandas()
+        print(f"Behavioral data loaded: {len(behavioral_df)} rows")
+        print(f"Plan data loaded: {len(plan_df)} rows")
+        print(f"Plan_df columns: {plan_df.columns.tolist()}")
+        return behavioral_df, plan_df
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        raise
+
+def normalize_persona(df):
+    """Normalize personas by splitting rows with multiple personas (e.g., 'csnp,dsnp') into separate rows."""
+    new_rows = []
+    for idx, row in df.iterrows():
+        if pd.isna(row['persona']):
+            new_rows.append(row)
+            continue
+        personas = [p.strip().lower() for p in str(row['persona']).split(',')]
+        if 'dsnp' in personas or 'csnp' in personas:
+            first_row = row.copy()
+            first_persona = personas[0]
+            if first_persona in ['unknown', 'none', 'healthcare', '']:
+                first_persona = 'dsnp' if 'dsnp' in personas else 'csnp'
+            first_row['persona'] = first_persona
+            new_rows.append(first_row)
+            second_row = row.copy()
+            second_row['persona'] = 'dsnp' if 'dsnp' in personas else 'csnp'
+            new_rows.append(second_row)
+        else:
+            row_copy = row.copy()
+            first_persona = personas[0]
+            row_copy['persona'] = first_persona
+            new_rows.append(row_copy)
+    return pd.DataFrame(new_rows)
 
 def prepare_features(behavioral_df, plan_df):
-    """Prepare features and assign quality levels for scoring, joining with plan_df."""
+    # Normalize personas
+    behavioral_df = normalize_persona(behavioral_df)
+    print(f"Rows after persona normalization: {len(behavioral_df)}")
+
+    # Merge behavioral and plan data
     df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
         on=['zip', 'plan_id'],
         suffixes=('_beh', '_plan')
     )
-    logger.info(f"Rows after merge with plan data: {len(df)}")
+    print(f"Rows after merge: {len(df)}")
+    print("Columns after merge:", df.columns.tolist())
 
     df['state'] = df['state_beh'].fillna(df['state_plan'])
     df = df.drop(columns=['state_beh', 'state_plan'], errors='ignore')
 
+    # Define feature lists
     all_behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
         'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
@@ -101,7 +103,7 @@ def prepare_features(behavioral_df, plan_df):
     # Ensure all raw_plan_features and csnp_type exist
     for col in raw_plan_features + ['csnp_type']:
         if col not in df.columns:
-            logger.warning(f"'{col}' not found in df. Filling with 0.")
+            print(f"Warning: '{col}' not found in df. Filling with 0.")
             df[col] = 0
         else:
             df[col] = df[col].fillna(0)
@@ -109,10 +111,26 @@ def prepare_features(behavioral_df, plan_df):
     # Compute quality level
     filter_cols = [col for col in df.columns if col.startswith('filter_')]
     query_cols = [col for col in df.columns if col.startswith('query_')]
-    df['quality_level'] = df.apply(
-        lambda row: assign_quality_level(row, filter_cols, query_cols), axis=1
-    )
 
+    def assign_quality_level(row):
+        has_plan_id = pd.notna(row['plan_id'])
+        has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
+                     (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
+        has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
+        has_queries = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in query_cols)
+        
+        if has_plan_id and (has_clicks or has_filters):
+            return 'High'
+        elif has_plan_id and not has_clicks and not has_filters and has_queries:
+            return 'Medium'
+        elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
+            return 'Low'
+        else:
+            return 'Medium'
+
+    df['quality_level'] = df.apply(assign_quality_level, axis=1)
+
+    # Compute additional features
     additional_features = []
     df['csnp_interaction'] = df['csnp'] * (
         df.get('query_csnp', 0).fillna(0) + df.get('filter_csnp', 0).fillna(0) + 
@@ -159,6 +177,14 @@ def prepare_features(behavioral_df, plan_df):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
+    # Debug: Check csnp features
+    high_quality_csnp = df[(df['quality_level'] == 'High') & (df['persona'] == 'csnp')]
+    print(f"Scoring: High-quality csnp samples: {len(high_quality_csnp)}")
+    print(f"Scoring: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
+    print(f"Scoring: Non-zero csnp_drug_interaction: {sum(high_quality_csnp['csnp_drug_interaction'] > 0)}")
+    print(f"Scoring: Non-zero csnp_doctor_interaction: {sum(high_quality_csnp['csnp_doctor_interaction'] > 0)}")
+
+    # Define persona weights for weighted features
     persona_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
@@ -173,6 +199,42 @@ def prepare_features(behavioral_df, plan_df):
     k1, k3, k4, k7, k8 = 0.1, 0.7, 0.6, 0.25, 0.35
     k9, k10 = 2.2, 2.0
     W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 2.5, 6.0, 1.0, 1.5
+
+    # Convert plan_df to Spark DataFrame for broadcasting (optimization for large datasets)
+    plan_df_spark = spark.createDataFrame(plan_df)
+
+    # Compute weighted features using Spark Pandas UDF for scalability
+    def calculate_persona_weight_udf(persona, persona_info):
+        @pandas_udf(DoubleType(), PandasUDFType.SCALAR)
+        def udf_func(
+            plan_id, zip_code, csnp_type, dsnp_type, num_pages_viewed, compared_plan_ids, num_plans_compared,
+            query_col, filter_col, click_col, plan_col, quality_level, dental_interaction, vision_interaction,
+            csnp_interaction, csnp_type_flag, csnp_drug_interaction, csnp_doctor_interaction, persona_col
+        ):
+            # Create a Pandas Series for each input column
+            df = pd.DataFrame({
+                'plan_id': plan_id,
+                'zip': zip_code,
+                'csnp_type': csnp_type,
+                'dsnp_type': dsnp_type,
+                'num_pages_viewed': num_pages_viewed,
+                'compared_plan_ids': compared_plan_ids,
+                'num_plans_compared': num_plans_compared,
+                persona_info['query_col']: query_col,
+                persona_info['filter_col']: filter_col,
+                persona_info.get('click_col', 'click_dummy'): click_col,
+                persona_info['plan_col']: plan_col,
+                'quality_level': quality_level,
+                'dental_interaction': dental_interaction,
+                'vision_interaction': vision_interaction,
+                'csnp_interaction': csnp_interaction,
+                'csnp_type_flag': csnp_type_flag,
+                'csnp_drug_interaction': csnp_drug_interaction,
+                'csnp_doctor_interaction': csnp_doctor_interaction,
+                'persona': persona_col
+            })
+            return df.apply(lambda row: calculate_persona_weight(row, persona_info, persona, plan_df), axis=1)
+        return udf_func
 
     def calculate_persona_weight(row, persona_info, persona, plan_df):
         plan_col = persona_info['plan_col']
@@ -257,89 +319,130 @@ def prepare_features(behavioral_df, plan_df):
             if row['quality_level'] == 'High': behavioral_score += 0.5
         
         adjusted_weight = base_weight + behavioral_score
+
+        if 'persona' in row and persona == row['persona']:
+            non_target_weights = [
+                min(row.get(info['plan_col'], 0), 0.5) * (
+                    W_CSNP_HIGH if p == 'csnp' and row.get('csnp_type', 'N') == 'Y' else
+                    W_CSNP_BASE if p == 'csnp' else
+                    W_DSNP_HIGH if p == 'dsnp' and row.get('dsnp_type', 'N') == 'Y' else
+                    W_DSNP_BASE if p == 'dsnp' else 1.0
+                ) + (
+                    k3 * (row.get(info['query_col'], 0) if pd.notna(row.get(info['query_col'])) else 0) +
+                    k4 * (row.get(info['filter_col'], 0) if pd.notna(row.get(info['filter_col'])) else 0) +
+                    k1 * pages_viewed +
+                    (k8 if p == 'doctor' else k7 if p == 'drug' else 0) * 
+                    (row.get(info.get('click_col'), 0) if 'click_col' in info and pd.notna(row.get(info.get('click_col'))) else 0) +
+                    (0.5 if p == 'doctor' and row.get(info.get('click_col', 'pro_click_count'), 0) >= 1.5 else 
+                     0.25 if p == 'doctor' and row.get(info.get('click_col', 'pro_click_count'), 0) >= 0.5 else 
+                     0.5 if p == 'drug' and row.get(info.get('click_col', 'dce_click_count'), 0) >= 5 else 
+                     0.25 if p == 'drug' and row.get(info.get('click_col', 'dce_click_count'), 0) >= 2 else 
+                     0.7 if p == 'dental' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 2 else 
+                     0.4 if p == 'dental' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 
+                     0.6 if p == 'vision' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 
+                     0.5 if p in ['csnp', 'otc', 'transportation'] and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 0)
+                )
+                for p, info in persona_weights.items()
+                if p != row['persona'] and info['plan_col'] in row and pd.notna(row.get(info['plan_col']))
+            ]
+            max_non_target = max(non_target_weights, default=0)
+            adjusted_weight = max(adjusted_weight, max_non_target + 0.2)
+        
         return min(adjusted_weight, 3.5 if persona == 'csnp' else 1.2)
 
-    logger.info("Calculating persona weights...")
+    # Convert df to Spark DataFrame to parallelize weight computation
+    df_spark = spark.createDataFrame(df)
+
+    # Compute weighted features for each persona using Pandas UDF
+    print("Calculating persona weights using Spark Pandas UDF...")
     for persona, info in persona_weights.items():
-        df[f'w_{persona}'] = df.apply(
-            lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1
+        click_col = info.get('click_col', 'click_dummy')  # Dummy column if click_col is not present
+        if click_col not in df_spark.columns:
+            df_spark = df_spark.withColumn(click_col, pd.Series([0] * df_spark.count()).astype(float))
+        udf = calculate_persona_weight_udf(persona, info)
+        df_spark = df_spark.withColumn(
+            f'w_{persona}',
+            udf(
+                df_spark['plan_id'], df_spark['zip'], df_spark['csnp_type'], df_spark['dsnp_type'],
+                df_spark['num_pages_viewed'], df_spark['compared_plan_ids'], df_spark['num_plans_compared'],
+                df_spark[info['query_col']], df_spark[info['filter_col']], df_spark[click_col],
+                df_spark[info['plan_col']], df_spark['quality_level'], df_spark['dental_interaction'],
+                df_spark['vision_interaction'], df_spark['csnp_interaction'], df_spark['csnp_type_flag'],
+                df_spark['csnp_drug_interaction'], df_spark['csnp_doctor_interaction'], df_spark['persona']
+            )
         )
 
+    # Convert back to Pandas for final feature preparation
+    df = df_spark.toPandas()
+
+    # Normalize weighted features
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys()]
     weight_sum = df[weighted_features].sum(axis=1)
     for wf in weighted_features:
         df[wf] = df[wf] / weight_sum.where(weight_sum > 0, 1)
 
-    feature_columns = all_behavioral_features + raw_plan_features + additional_features + [f'w_{persona}' for persona in persona_weights.keys()]
-    
+    print(f"Weighted features added: {weighted_features}")
+    print("Sample weights:")
+    print(df[weighted_features].head())
+
+    # Define all feature columns expected by the model
+    all_weighted_features = [f'w_{persona}' for persona in [
+        'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
+    ]]
+    feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
+
+    print(f"Feature columns expected: {feature_columns}")
+
+    # Check for missing features and fill with 0
+    missing_features = [col for col in feature_columns if col not in df.columns]
+    if missing_features:
+        print(f"Warning: Missing features in df: {missing_features}")
+        for col in missing_features:
+            df[col] = 0
+
+    print(f"Columns in df after filling: {df.columns.tolist()}")
+
+    # Prepare features for prediction
     X = df[feature_columns].fillna(0)
-    metadata = df[['userid']]
-    metadata['quality_level'] = df['quality_level']
+    metadata = df[['userid', 'zip', 'plan_id', 'quality_level'] + feature_columns]
+
     return X, metadata
 
 def score_data(model, X, metadata):
-    """Score the data and return results with quality level and top 3 persona rankings."""
+    # Predict probabilities and labels
     y_pred_proba = model.predict_proba(X)
     personas = model.classes_
     proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
+    y_pred = model.predict(X)
+    
+    # Combine metadata with predictions
     output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
+    output_df['predicted_persona'] = y_pred
+    
+    # Add probability ranking
+    for i in range(len(output_df)):
+        probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
+        ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+        output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
+    
+    # Save results to DBFS
+    output_df_spark = spark.createDataFrame(output_df)
+    output_df_spark.write.mode('overwrite').csv(OUTPUT_FILE, header=True)
+    print(f"Scoring results saved to {OUTPUT_FILE}")
 
-    def get_top_3_ranking(row):
-        probs = {p: row[f'prob_{p}'] for p in personas}
-        top_3 = sorted(probs.items(), key=lambda x: x[1], reverse=True)[:3]
-        return {persona: round(prob, 4) for persona, prob in top_3}
-
-    output_df['prediction_scores'] = output_df.apply(get_top_3_ranking, axis=1)
-    final_df = output_df[['userid', 'quality_level', 'prediction_scores']]
-    return final_df
+    # Print prediction distribution
+    print("\nDistribution of predicted personas:")
+    print(output_df['predicted_persona'].value_counts())
 
 def main():
-    """Main function to load data, model, and score for the hardcoded userid."""
-    try:
-        # Load the model
-        with open(MODEL_FILE, 'rb') as f:
-            model = pickle.load(f)
-        logger.info(f"Model loaded from {MODEL_FILE}")
-
-        # Load data
-        behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
-
-        # Filter for the hardcoded userid
-        userid = HARDCODED_USERID
-        behavioral_df = behavioral_df[behavioral_df['userid'] == userid]
-        if behavioral_df.empty:
-            logger.error(f"No behavioral data found for userid: {userid}")
-            return {"error": f"No behavioral data found for userid: {userid}"}
-
-        zip_plan_pairs = behavioral_df[['zip', 'plan_id']].drop_duplicates()
-        plan_df = plan_df[plan_df.set_index(['zip', 'plan_id']).index.isin(zip_plan_pairs.set_index(['zip', 'plan_id']).index)]
-
-        logger.info(f"Behavioral data rows for {userid}: {len(behavioral_df)}")
-        logger.info(f"Plan data rows for {userid}: {len(plan_df)}")
-
-        # Prepare features and score
-        X, metadata = prepare_features(behavioral_df, plan_df)
-        scored_df = score_data(model, X, metadata)
-
-        # Format the result
-        result = []
-        for _, row in scored_df.iterrows():
-            output = {
-                'userid': row['userid'],
-                'quality_level': row['quality_level'],
-                'prediction_scores': row['prediction_scores']
-            }
-            if row['quality_level'] == 'Low':
-                output['message'] = 'prediction result might not be accurate due to low behavioral data quality'
-            result.append(output)
-
-        return {'scored_results': result}
-
-    except Exception as e:
-        logger.error(f"Error during scoring: {str(e)}")
-        return {"error": f"Error during scoring: {str(e)}"}
+    print("Scoring new visitor data with pre-trained Random Forest model...")
+    rf_model = load_model(MODEL_FILE)
+    behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
+    X, metadata = prepare_features(behavioral_df, plan_df)
+    score_data(rf_model, X, metadata)
 
 if __name__ == "__main__":
-    # Run the scoring and print the result
-    result = main()
-    print(result)
+    main()
+
+# Stop the Spark session
+spark.stop()

@@ -7,10 +7,10 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# File paths (adjust these paths to match your Databricks environment)
-MODEL_FILE = "/dbfs/path/to/rf_model_persona_with_weights_092024_032025_v6.pkl"
-BEHAVIORAL_FILE = "/dbfs/path/to/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv"
-PLAN_FILE = "/dbfs/path/to/plan_derivation_by_zip.csv"
+# File paths (adjusted for Databricks environment)
+MODEL_FILE = "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl"
+BEHAVIORAL_FILE = "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv"
+PLAN_FILE = "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv"
 
 # Hardcoded userid for testing
 HARDCODED_USERID = "1743637276169V5LFCHK9S9U863J6JJL355C2RDKTHMRU"

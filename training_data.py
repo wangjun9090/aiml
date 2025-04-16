@@ -3,11 +3,12 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 import pickle
 from sklearn.utils import resample
+from sklearn.model_selection import cross_val_score
 
 # File paths
-behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_092024_032025.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-model_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl'
+model_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v7.pkl'
 weighted_behavioral_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v6.csv'
 
 def load_data(behavioral_path, plan_path):
@@ -21,6 +22,31 @@ def load_data(behavioral_path, plan_path):
     except Exception as e:
         print(f"Error loading data: {e}")
         raise
+
+def normalize_persona(df):
+    """Normalize personas by splitting rows with multiple personas (e.g., 'csnp,dsnp') into separate rows."""
+    new_rows = []
+    for idx, row in df.iterrows():
+        if pd.isna(row['persona']):
+            new_rows.append(row)
+            continue
+        personas = [p.strip().lower() for p in str(row['persona']).split(',')]
+        if 'dsnp' in personas or 'csnp' in personas:
+            first_row = row.copy()
+            first_persona = personas[0]
+            if first_persona in ['unknown', 'none', 'healthcare', '']:
+                first_persona = 'dsnp' if 'dsnp' in personas else 'csnp'
+            first_row['persona'] = first_persona
+            new_rows.append(first_row)
+            second_row = row.copy()
+            second_row['persona'] = 'dsnp' if 'dsnp' in personas else 'csnp'
+            new_rows.append(second_row)
+        else:
+            row_copy = row.copy()
+            first_persona = personas[0]
+            row_copy['persona'] = first_persona
+            new_rows.append(row_copy)
+    return pd.DataFrame(new_rows)
 
 def assign_quality_level(row, filter_cols, query_cols):
     has_plan_id = pd.notna(row['plan_id'])
@@ -39,6 +65,10 @@ def assign_quality_level(row, filter_cols, query_cols):
         return 'Medium'
 
 def prepare_training_features(behavioral_df, plan_df):
+    # Normalize personas to match evaluation script
+    behavioral_df = normalize_persona(behavioral_df)
+    print(f"Rows after persona normalization: {len(behavioral_df)}")
+
     training_df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
@@ -267,6 +297,12 @@ def prepare_training_features(behavioral_df, plan_df):
         
         return min(adjusted_weight, 3.5 if persona == 'csnp' else 1.2)
 
+    # For scalability: Consider parallelizing this operation for large datasets
+    # Example: Use pandaparallel for parallel_apply
+    # from pandaparallel import pandaparallel
+    # pandaparallel.initialize()
+    # df[f'w_{persona}'] = df.parallel_apply(lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1)
+
     print("Calculating persona weights...")
     for persona, info in persona_weights.items():
         training_df[f'w_{persona}'] = training_df.apply(
@@ -293,15 +329,15 @@ def prepare_training_features(behavioral_df, plan_df):
     training_df_valid = training_df[valid_mask]
     print(f"Rows after filtering invalid personas and fitness/hearing: {len(training_df_valid)}")
 
-    # Downsample low-quality data
+    # Downsample low-quality data, but keep more samples
     low_quality_df = training_df_valid[training_df_valid['quality_level'] == 'Low']
-    if len(low_quality_df) > 800:
+    if len(low_quality_df) > 2000:  # Increased from 800 to 2000
         low_quality_df = resample(
-            low_quality_df, replace=False, n_samples=800, random_state=42
+            low_quality_df, replace=False, n_samples=2000, random_state=42
         )
         print(f"Downsampled low-quality data to: {len(low_quality_df)}")
 
-    # Oversample high-quality csnp, dental, vision
+    # Oversample high-quality csnp, dental, vision with increased targets
     minority_personas = ['csnp', 'dental', 'vision']
     oversampled_dfs = [training_df_valid[~training_df_valid['persona'].isin(minority_personas)]]
     
@@ -309,7 +345,8 @@ def prepare_training_features(behavioral_df, plan_df):
         persona_df = training_df_valid[training_df_valid['persona'] == persona]
         high_quality_df = persona_df[persona_df['quality_level'] == 'High']
         if len(high_quality_df) > 0:
-            n_samples = max(200, len(high_quality_df) * 3) if persona == 'csnp' else max(100, len(high_quality_df) * 2) if persona == 'dental' else max(50, len(high_quality_df))
+            # Increased targets: csnp to 1000, dental to 500, vision to 200
+            n_samples = max(1000, len(high_quality_df) * 3) if persona == 'csnp' else max(500, len(high_quality_df) * 2) if persona == 'dental' else max(200, len(high_quality_df) * 2)
             oversampled_high = resample(
                 high_quality_df, replace=True, n_samples=n_samples, random_state=42
             )
@@ -319,12 +356,16 @@ def prepare_training_features(behavioral_df, plan_df):
     training_df_oversampled = pd.concat(oversampled_dfs + [low_quality_df], ignore_index=True)
     print(f"Rows after oversampling high-quality csnp/dental/vision and downsampling low-quality: {len(training_df_oversampled)}")
 
+    # Print class distribution after oversampling
+    print("Class distribution after oversampling:")
+    print(training_df_oversampled['persona'].value_counts())
+
     X = training_df_oversampled[feature_columns].fillna(0)
     y = training_df_oversampled['persona']
 
-    # Assign sample weights
+    # Assign sample weights with increased emphasis on high-quality data
     sample_weights = training_df_oversampled['quality_level'].map({
-        'High': 2.0,
+        'High': 3.0,  # Increased from 2.0
         'Medium': 1.0,
         'Low': 0.5
     })
@@ -339,12 +380,13 @@ def prepare_training_features(behavioral_df, plan_df):
     return X, y, sample_weights
 
 def train_model(X, y, sample_weights):
+    # Adjusted class weights to better address imbalance
     class_weights = {
-        'csnp': 3.0,
-        'dental': 1.5,
-        'vision': 1.5,
+        'csnp': 5.0,      # Increased from 3.0
+        'dental': 3.0,    # Increased from 1.5
+        'vision': 3.0,    # Increased from 1.5
         'doctor': 1.0,
-        'drug': 0.5,
+        'drug': 1.0,      # Increased from 0.5
         'dsnp': 1.0,
         'otc': 1.0,
         'transportation': 1.0
@@ -352,8 +394,23 @@ def train_model(X, y, sample_weights):
     rf_model = RandomForestClassifier(
         n_estimators=100, random_state=42, class_weight=class_weights
     )
+    # Perform cross-validation to assess model performance
+    scores = cross_val_score(rf_model, X, y, cv=5, scoring='accuracy', fit_params={'sample_weight': sample_weights})
+    print(f"Cross-validation accuracy scores: {scores}")
+    print(f"Average CV accuracy: {scores.mean():.2f} (+/- {scores.std() * 2:.2f})")
+    
+    # Train the final model on the entire dataset
     rf_model.fit(X, y, sample_weight=sample_weights)
     print("Random Forest model trained.")
+    
+    # Feature importance analysis
+    feature_importances = pd.DataFrame({
+        'feature': X.columns,
+        'importance': rf_model.feature_importances_
+    }).sort_values(by='importance', ascending=False)
+    print("\nTop 10 Feature Importances:")
+    print(feature_importances.head(10))
+    
     return rf_model
 
 def save_model(model, output_path):

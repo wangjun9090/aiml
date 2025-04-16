@@ -4,11 +4,10 @@ import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # File paths
-behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/weighted_us_dce_pro_behavioral_features_092024_032025_v6.csv'
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
 plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl'
 output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v6.csv'
-summary_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/summary_eval_results_092024_032025_v6.csv'  # New file for summary
 
 def load_model(model_path):
     try:
@@ -91,6 +90,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
+    # Ensure all raw_plan_features and csnp_type exist
     for col in raw_plan_features + ['csnp_type']:
         if col not in training_df.columns:
             print(f"Warning: '{col}' not found in training_df. Filling with 0.")
@@ -98,6 +98,30 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         else:
             training_df[col] = training_df[col].fillna(0)
 
+    # Define filter and query columns for quality level calculation
+    filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
+    query_cols = [col for col in training_df.columns if col.startswith('query_')]
+
+    # Compute quality_level before using it
+    def assign_quality_level(row):
+        has_plan_id = pd.notna(row['plan_id'])
+        has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
+                     (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
+        has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
+        has_queries = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in query_cols)
+        
+        if has_plan_id and (has_clicks or has_filters):
+            return 'High'
+        elif has_plan_id and not has_clicks and not has_filters and has_queries:
+            return 'Medium'
+        elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
+            return 'Low'
+        else:
+            return 'Medium'
+
+    training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
+
+    # Now compute additional features
     additional_features = []
     training_df['csnp_interaction'] = training_df['csnp'] * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
@@ -144,6 +168,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
+    # Debug: Check csnp features (now safe to use quality_level)
     high_quality_csnp = training_df[(training_df['quality_level'] == 'High') & (training_df['persona'] == 'csnp')]
     print(f"Eval: High-quality csnp samples: {len(high_quality_csnp)}")
     print(f"Eval: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
@@ -166,27 +191,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     print(f"Columns in training_df after filling: {training_df.columns.tolist()}")
 
-    filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
-    query_cols = [col for col in training_df.columns if col.startswith('query_')]
-
-    def assign_quality_level(row):
-        has_plan_id = pd.notna(row['plan_id'])
-        has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
-                     (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
-        has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
-        has_queries = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in query_cols)
-        
-        if has_plan_id and (has_clicks or has_filters):
-            return 'High'
-        elif has_plan_id and not has_clicks and not has_filters and has_queries:
-            return 'Medium'
-        elif not has_plan_id and not has_clicks and not has_filters and not has_queries:
-            return 'Low'
-        else:
-            return 'Medium'
-
-    training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
-
+    # Filter out fitness and hearing
     valid_mask = (
         training_df['persona'].notna() & 
         (~training_df['persona'].str.lower().isin(['unknown', 'none', 'healthcare', 'fitness', 'hearing']))
@@ -219,7 +224,7 @@ def evaluate_predictions(model, X, y_true, metadata):
         output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
     
     output_df.to_csv(output_file, index=False)
-    print(f"Detailed results saved to {output_file}")
+    print(f"Results saved to {output_file}")
 
     if y_true is not None:
         y_true_lower = y_true.str.lower()
@@ -251,54 +256,25 @@ def evaluate_predictions(model, X, y_true, metadata):
                     persona_accuracy = accuracy_score(y_true_valid[persona_true], y_pred_valid[persona_true]) * 100
                     print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
 
-            # Prepare summary table
             quality_levels = ['High', 'Medium', 'Low']
-            personas_list = ['drug', 'dsnp', 'dental', 'csnp', 'doctor', 'vision']
-            summary_data = []
-            total_rows = len(y_true_valid)
-
-            for level in quality_levels + ['Overall']:
-                if level == 'Overall':
-                    level_true = y_true_valid
-                    level_pred = y_pred_valid
-                    level_metadata = metadata_valid
+            for level in quality_levels:
+                level_mask = metadata_valid['quality_level'] == level
+                level_true = y_true_valid[level_mask]
+                level_pred = y_pred_valid[level_mask.values]
+                print(f"\n{level} Quality Data Results:")
+                print(f"Rows: {len(level_true)}")
+                if len(level_true) > 0:
+                    level_accuracy = accuracy_score(level_true, level_pred) * 100
+                    print(f"Accuracy: {level_accuracy:.2f}%")
+                    print(f"Individual Persona Accuracy Rates ({level}):")
+                    for persona in sorted(set(level_true)):
+                        persona_true = level_true == persona
+                        persona_count = sum(persona_true)
+                        if persona_count > 0:
+                            persona_accuracy = accuracy_score(level_true[persona_true], level_pred[persona_true]) * 100
+                            print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
                 else:
-                    level_mask = metadata_valid['quality_level'] == level
-                    level_true = y_true_valid[level_mask]
-                    level_pred = y_pred_valid[level_mask.values]
-                    level_metadata = metadata_valid[level_mask]
-
-                row_count = len(level_true)
-                percent_rows = (row_count / total_rows * 100) if total_rows > 0 else 0
-                level_accuracy = accuracy_score(level_true, level_pred) * 100 if row_count > 0 else 0
-
-                persona_metrics = {}
-                for persona in personas_list:
-                    persona_true = level_true == persona
-                    persona_count = sum(persona_true)
-                    if persona_count > 0:
-                        persona_accuracy = accuracy_score(level_true[persona_true], level_pred[persona_true]) * 100
-                        persona_metrics[persona] = f"{persona_accuracy:.2f}% ({persona_count})"
-                    else:
-                        persona_metrics[persona] = "0.00% (0)"
-
-                summary_row = {
-                    'Quality Level': level,
-                    'Rows': row_count,
-                    '% of Total Rows': f"{percent_rows:.2f}%",
-                    'Accuracy': f"{level_accuracy:.2f}%",
-                    'Drug': persona_metrics['drug'],
-                    'DSNP': persona_metrics['dsnp'],
-                    'Dental': persona_metrics['dental'],
-                    'CSNP': persona_metrics['csnp'],
-                    'Doctor': persona_metrics['doctor'],
-                    'Vision': persona_metrics['vision']
-                }
-                summary_data.append(summary_row)
-
-            summary_df = pd.DataFrame(summary_data)
-            summary_df.to_csv(summary_output_file, index=False)
-            print(f"Summary results saved to {summary_output_file}")
+                    print("No records in this quality level.")
 
             print("\nConfusion Matrix (Overall, valid personas only):")
             cm = confusion_matrix(y_true_valid, y_pred_valid, labels=list(sorted(set(y_true_valid))))

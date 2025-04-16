@@ -21,6 +21,8 @@ def load_model(model_path):
 
 def load_data(behavioral_path, plan_path):
     try:
+        # Load data using Pandas
+        # Note: For larger datasets, consider using Spark (spark.read.csv) as in score.py
         behavioral_df = pd.read_csv(behavioral_path)
         plan_df = pd.read_csv(plan_path)
         print(f"Behavioral data loaded: {len(behavioral_df)} rows")
@@ -344,3 +346,81 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     X = training_df[feature_columns].fillna(0)
     y_true = training_df['persona'] if 'persona' in training_df.columns else None
+
+    if y_true is not None:
+        print(f"Unique personas before filtering: {y_true.unique().tolist()}")
+
+    return X, y_true, metadata
+
+def evaluate_model(model, X, y_true, metadata):
+    # Predict probabilities and labels
+    y_pred_proba = model.predict_proba(X)
+    personas = model.classes_
+    proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
+    y_pred = model.predict(X)
+
+    # Combine metadata with predictions
+    output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
+    output_df['predicted_persona'] = y_pred
+
+    # Add probability ranking
+    for i in range(len(output_df)):
+        probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
+        ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+        output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
+
+    # Compute overall metrics
+    overall_accuracy = accuracy_score(y_true, y_pred)
+    print(f"\nOverall Accuracy: {overall_accuracy * 100:.2f}%")
+
+    # Per-persona accuracy
+    print("\nIndividual Persona Accuracy Rates (Overall):")
+    for persona in personas:
+        mask = y_true == persona
+        if mask.sum() > 0:
+            persona_accuracy = accuracy_score(y_true[mask], y_pred[mask])
+            print(f"Accuracy for '{persona}': {persona_accuracy * 100:.2f}% (Count: {mask.sum()})")
+
+    # Breakdown by quality level
+    for quality in ['High', 'Medium', 'Low']:
+        mask = output_df['quality_level'] == quality
+        if mask.sum() > 0:
+            y_true_quality = y_true[mask]
+            y_pred_quality = y_pred[mask]
+            accuracy = accuracy_score(y_true_quality, y_pred_quality)
+            print(f"\n{quality} Quality Data Results:")
+            print(f"Rows: {mask.sum()}")
+            print(f"Accuracy: {accuracy * 100:.2f}%")
+            print(f"Individual Persona Accuracy Rates ({quality}):")
+            for persona in personas:
+                persona_mask = y_true_quality == persona
+                if persona_mask.sum() > 0:
+                    persona_accuracy = accuracy_score(y_true_quality[persona_mask], y_pred_quality[persona_mask])
+                    print(f"Accuracy for '{persona}': {persona_accuracy * 100:.2f}% (Count: {persona_mask.sum()})")
+
+    # Confusion matrix
+    cm = confusion_matrix(y_true, y_pred, labels=personas)
+    cm_df = pd.DataFrame(cm, index=personas, columns=personas)
+    print("\nConfusion Matrix (Overall, valid personas only):")
+    print(cm_df)
+
+    # Classification report
+    print("\nClassification Report:")
+    print(classification_report(y_true, y_pred, target_names=personas))
+
+    # Save evaluation results to DBFS
+    output_df.to_csv(OUTPUT_FILE, index=False)
+    print(f"\nEvaluation results saved to {OUTPUT_FILE}")
+
+def main():
+    print("Evaluating Random Forest model...")
+    model = load_model(MODEL_FILE)
+    behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
+    X, y_true, metadata = prepare_evaluation_features(behavioral_df, plan_df)
+    if y_true is not None:
+        evaluate_model(model, X, y_true, metadata)
+    else:
+        print("No ground truth labels available for evaluation.")
+
+if __name__ == "__main__":
+    main()

@@ -6,7 +6,8 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 # Hardcoded file paths for Databricks (using /dbfs/ prefix)
 BEHAVIORAL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
 PLAN_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-MODEL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl'
+MODEL_FILE = '/dbfs/Workspace/Us
+ers/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl'
 OUTPUT_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/032025/eval_results_092024_032025_v6.csv'
 
 def load_model(model_path):
@@ -21,8 +22,6 @@ def load_model(model_path):
 
 def load_data(behavioral_path, plan_path):
     try:
-        # Load data using Pandas
-        # Note: For larger datasets, consider using Spark (spark.read.csv) as in score.py
         behavioral_df = pd.read_csv(behavioral_path)
         plan_df = pd.read_csv(plan_path)
         print(f"Behavioral data loaded: {len(behavioral_df)} rows")
@@ -56,23 +55,25 @@ def normalize_persona(df):
             first_persona = personas[0]
             row_copy['persona'] = first_persona
             new_rows.append(row_copy)
-    return pd.DataFrame(new_rows)
+    return pd.DataFrame(new_rows).reset_index(drop=True)
 
 def prepare_evaluation_features(behavioral_df, plan_df):
+    # Normalize personas and reset index
     behavioral_df = normalize_persona(behavioral_df)
     print(f"Rows after persona normalization: {len(behavioral_df)}")
 
+    # Merge behavioral and plan data, reset index to avoid misalignment
     training_df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
         on=['zip', 'plan_id'],
         suffixes=('_beh', '_plan')
-    )
+    ).reset_index(drop=True)
     print(f"Rows after merge: {len(training_df)}")
     print("Columns after merge:", training_df.columns.tolist())
 
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
-    training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore')
+    training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore').reset_index(drop=True)
 
     all_behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
@@ -119,7 +120,9 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         else:
             return 'Medium'
 
+    # Reset index after applying quality level
     training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
+    training_df = training_df.reset_index(drop=True)
 
     additional_features = []
     training_df['csnp_interaction'] = training_df['csnp'] * (
@@ -167,6 +170,9 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
+    # Reset index after adding interaction features
+    training_df = training_df.reset_index(drop=True)
+
     high_quality_csnp = training_df[(training_df['quality_level'] == 'High') & (training_df['persona'] == 'csnp')]
     print(f"Eval: High-quality csnp samples: {len(high_quality_csnp)}")
     print(f"Eval: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
@@ -184,9 +190,10 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp'}
     }
 
-    k1, k3, k4, k7, k8 = 0.1, 0.7, 0.6, 0.25, 0.35
-    k9, k10 = 2.2, 2.0
-    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 2.5, 6.0, 1.0, 1.5
+    # Updated constants
+    k1, k3, k4, k7, k8 = 0.15, 0.8, 0.7, 0.3, 0.4  # Adjusted to emphasize behavioral features
+    k9, k10 = 2.5, 2.3  # Adjusted to boost csnp signals
+    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 3.0, 7.0, 1.2, 1.8  # Adjusted to prioritize csnp and dsnp
 
     def calculate_persona_weight(row, persona_info, persona, plan_df):
         plan_col = persona_info['plan_col']
@@ -302,17 +309,12 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         
         return min(adjusted_weight, 3.5 if persona == 'csnp' else 1.2)
 
-    # For scalability: Consider parallelizing this operation for large datasets
-    # Example: Use pandaparallel for parallel_apply
-    # from pandaparallel import pandaparallel
-    # pandaparallel.initialize()
-    # training_df[f'w_{persona}'] = training_df.parallel_apply(lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1)
-
     print("Calculating persona weights...")
     for persona, info in persona_weights.items():
-        training_df[f'w_{persona}'] = training_df.apply(
+        training_df[f HISTORICAL'w_{persona}'] = training_df.apply(
             lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1
         )
+    training_df = training_df.reset_index(drop=True)
 
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys()]
     weight_sum = training_df[weighted_features].sum(axis=1)
@@ -335,11 +337,15 @@ def prepare_evaluation_features(behavioral_df, plan_df):
 
     print(f"Columns in training_df after filling: {training_df.columns.tolist()}")
 
+    # Ensure indices are aligned for filtering
+    training_df = training_df.reset_index(drop=True)
     valid_mask = (
         training_df['persona'].notna() & 
         (~training_df['persona'].str.lower().isin(['unknown', 'none', 'healthcare', 'fitness', 'hearing']))
     )
-    training_df = training_df[valid_mask]
+    print(f"Number of valid rows before filtering: {len(training_df)}")
+    print(f"Number of True values in valid_mask: {valid_mask.sum()}")
+    training_df = training_df.loc[valid_mask].reset_index(drop=True)
     print(f"Rows after filtering fitness/hearing: {len(training_df)}")
 
     metadata = training_df[['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns]
@@ -348,7 +354,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     y_true = training_df['persona'] if 'persona' in training_df.columns else None
 
     if y_true is not None:
-        print(f"Unique personas before filtering: {y_true.unique().tolist()}")
+        print(f"Unique personas after filtering: {y_true.unique().tolist()}")
 
     return X, y_true, metadata
 

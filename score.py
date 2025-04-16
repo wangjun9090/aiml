@@ -3,16 +3,19 @@ import numpy as np
 import pickle
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import pandas_udf, PandasUDFType
-from pyspark.sql.types import DoubleType, StructType, StructField
+from pyspark.sql.types import DoubleType
 
 # Initialize Spark session in Databricks
-spark = SparkSession.builder.appName("PersonaScoring").getOrCreate()
+spark = SparkSession.builder.appName("PersonaScoringTest").getOrCreate()
 
 # Hardcoded file paths for Databricks (using /dbfs/ prefix)
-BEHAVIORAL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/new_visitors_behavioral_features_2025.csv'
+BEHAVIORAL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/test_visitors_behavioral_features_2025.csv'
 PLAN_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-MODEL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v7.pkl'
-OUTPUT_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/scores/032025/scored_new_visitors_2025.csv'
+MODEL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl'
+OUTPUT_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/scores/032025/test_scored_visitors_2025.csv'
+
+# Hardcode a specific userid for testing (set to None to process all userids)
+HARDCODED_USERID = "test_user_001"  # Change to a specific userid for testing, or set to None to process all
 
 def load_model(model_path):
     try:
@@ -26,9 +29,25 @@ def load_model(model_path):
 
 def load_data(behavioral_path, plan_path):
     try:
-        # Load data using Spark, then convert to Pandas for compatibility with existing logic
-        behavioral_df = spark.read.csv(behavioral_path, header=True, inferSchema=True).toPandas()
-        plan_df = spark.read.csv(plan_path, header=True, inferSchema=True).toPandas()
+        # Load data using Spark
+        behavioral_df_spark = spark.read.csv(behavioral_path, header=True, inferSchema=True)
+        plan_df_spark = spark.read.csv(plan_path, header=True, inferSchema=True)
+
+        # Check if 'userid' column exists
+        if 'userid' not in behavioral_df_spark.columns:
+            raise ValueError("The 'userid' column is missing from the behavioral data. Please ensure the input data includes a 'userid' column.")
+
+        # Filter for the hardcoded userid if specified
+        if HARDCODED_USERID is not None:
+            print(f"Filtering data for hardcoded userid: {HARDCODED_USERID}")
+            behavioral_df_spark = behavioral_df_spark.filter(behavioral_df_spark.userid == HARDCODED_USERID)
+            if behavioral_df_spark.count() == 0:
+                raise ValueError(f"No data found for userid: {HARDCODED_USERID}")
+
+        # Convert to Pandas for compatibility with existing logic
+        behavioral_df = behavioral_df_spark.toPandas()
+        plan_df = plan_df_spark.toPandas()
+        
         print(f"Behavioral data loaded: {len(behavioral_df)} rows")
         print(f"Plan data loaded: {len(plan_df)} rows")
         print(f"Plan_df columns: {plan_df.columns.tolist()}")
@@ -60,25 +79,25 @@ def normalize_persona(df):
             first_persona = personas[0]
             row_copy['persona'] = first_persona
             new_rows.append(row_copy)
-    return pd.DataFrame(new_rows)
+    return pd.DataFrame(new_rows).reset_index(drop=True)
 
 def prepare_features(behavioral_df, plan_df):
-    # Normalize personas
+    # Normalize personas and reset index
     behavioral_df = normalize_persona(behavioral_df)
     print(f"Rows after persona normalization: {len(behavioral_df)}")
 
-    # Merge behavioral and plan data
+    # Merge behavioral and plan data, reset index to avoid misalignment
     df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
         on=['zip', 'plan_id'],
         suffixes=('_beh', '_plan')
-    )
+    ).reset_index(drop=True)
     print(f"Rows after merge: {len(df)}")
     print("Columns after merge:", df.columns.tolist())
 
     df['state'] = df['state_beh'].fillna(df['state_plan'])
-    df = df.drop(columns=['state_beh', 'state_plan'], errors='ignore')
+    df = df.drop(columns=['state_beh', 'state_plan'], errors='ignore').reset_index(drop=True)
 
     # Define feature lists
     all_behavioral_features = [
@@ -129,6 +148,7 @@ def prepare_features(behavioral_df, plan_df):
             return 'Medium'
 
     df['quality_level'] = df.apply(assign_quality_level, axis=1)
+    df = df.reset_index(drop=True)
 
     # Compute additional features
     additional_features = []
@@ -177,6 +197,8 @@ def prepare_features(behavioral_df, plan_df):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
+    df = df.reset_index(drop=True)
+
     # Debug: Check csnp features
     high_quality_csnp = df[(df['quality_level'] == 'High') & (df['persona'] == 'csnp')]
     print(f"Scoring: High-quality csnp samples: {len(high_quality_csnp)}")
@@ -196,9 +218,10 @@ def prepare_features(behavioral_df, plan_df):
         'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp'}
     }
 
-    k1, k3, k4, k7, k8 = 0.1, 0.7, 0.6, 0.25, 0.35
-    k9, k10 = 2.2, 2.0
-    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 2.5, 6.0, 1.0, 1.5
+    # Use the updated constants from the evaluation script
+    k1, k3, k4, k7, k8 = 0.15, 0.8, 0.7, 0.3, 0.4
+    k9, k10 = 2.5, 2.3
+    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 3.0, 7.0, 1.2, 1.8
 
     # Convert plan_df to Spark DataFrame for broadcasting (optimization for large datasets)
     plan_df_spark = spark.createDataFrame(plan_df)
@@ -211,7 +234,7 @@ def prepare_features(behavioral_df, plan_df):
             query_col, filter_col, click_col, plan_col, quality_level, dental_interaction, vision_interaction,
             csnp_interaction, csnp_type_flag, csnp_drug_interaction, csnp_doctor_interaction, persona_col
         ):
-            # Create a Pandas Series for each input column
+            # Create a Pandas DataFrame for the input columns
             df = pd.DataFrame({
                 'plan_id': plan_id,
                 'zip': zip_code,
@@ -356,7 +379,7 @@ def prepare_features(behavioral_df, plan_df):
     # Compute weighted features for each persona using Pandas UDF
     print("Calculating persona weights using Spark Pandas UDF...")
     for persona, info in persona_weights.items():
-        click_col = info.get('click_col', 'click_dummy')  # Dummy column if click_col is not present
+        click_col = info.get('click_col', 'click_dummy')
         if click_col not in df_spark.columns:
             df_spark = df_spark.withColumn(click_col, pd.Series([0] * df_spark.count()).astype(float))
         udf = calculate_persona_weight_udf(persona, info)
@@ -402,7 +425,7 @@ def prepare_features(behavioral_df, plan_df):
 
     print(f"Columns in df after filling: {df.columns.tolist()}")
 
-    # Prepare features for prediction
+    # Prepare features for prediction, ensuring 'userid' is included in metadata
     X = df[feature_columns].fillna(0)
     metadata = df[['userid', 'zip', 'plan_id', 'quality_level'] + feature_columns]
 
@@ -434,8 +457,12 @@ def score_data(model, X, metadata):
     print("\nDistribution of predicted personas:")
     print(output_df['predicted_persona'].value_counts())
 
+    # Print a sample of user IDs with their predicted personas for verification
+    print("\nSample of user IDs with predicted personas:")
+    print(output_df[['userid', 'predicted_persona']].head())
+
 def main():
-    print("Scoring new visitor data with pre-trained Random Forest model...")
+    print("Scoring test visitor data with pre-trained Random Forest model...")
     rf_model = load_model(MODEL_FILE)
     behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
     X, metadata = prepare_features(behavioral_df, plan_df)

@@ -1,18 +1,12 @@
 import pandas as pd
 import numpy as np
 import pickle
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import pandas_udf, PandasUDFType
-from pyspark.sql.types import DoubleType
 
-# Initialize Spark session in Databricks
-spark = SparkSession.builder.appName("PersonaScoringTest").getOrCreate()
-
-# Hardcoded file paths for Databricks (using /dbfs/ prefix)
-BEHAVIORAL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/test_visitors_behavioral_features_2025.csv'
-PLAN_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-MODEL_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v6.pkl'
-OUTPUT_FILE = '/dbfs/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/scores/032025/test_scored_visitors_2025.csv'
+# Hardcoded file paths for Databricks (using /Workspace/ prefix as provided)
+BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
+PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
+MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/rf_model_persona_with_weights_092024_032025_v7.pkl'
+OUTPUT_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/scores/032025/test_scored_visitors_2025.csv'
 
 # Hardcode a specific userid for testing (set to None to process all userids)
 HARDCODED_USERID = "test_user_001"  # Change to a specific userid for testing, or set to None to process all
@@ -29,25 +23,21 @@ def load_model(model_path):
 
 def load_data(behavioral_path, plan_path):
     try:
-        # Load data using Spark
-        behavioral_df_spark = spark.read.csv(behavioral_path, header=True, inferSchema=True)
-        plan_df_spark = spark.read.csv(plan_path, header=True, inferSchema=True)
+        # Load data using Pandas
+        behavioral_df = pd.read_csv(behavioral_path)
+        plan_df = pd.read_csv(plan_path)
 
         # Check if 'userid' column exists
-        if 'userid' not in behavioral_df_spark.columns:
+        if 'userid' not in behavioral_df.columns:
             raise ValueError("The 'userid' column is missing from the behavioral data. Please ensure the input data includes a 'userid' column.")
 
         # Filter for the hardcoded userid if specified
         if HARDCODED_USERID is not None:
             print(f"Filtering data for hardcoded userid: {HARDCODED_USERID}")
-            behavioral_df_spark = behavioral_df_spark.filter(behavioral_df_spark.userid == HARDCODED_USERID)
-            if behavioral_df_spark.count() == 0:
+            behavioral_df = behavioral_df[behavioral_df['userid'] == HARDCODED_USERID]
+            if len(behavioral_df) == 0:
                 raise ValueError(f"No data found for userid: {HARDCODED_USERID}")
 
-        # Convert to Pandas for compatibility with existing logic
-        behavioral_df = behavioral_df_spark.toPandas()
-        plan_df = plan_df_spark.toPandas()
-        
         print(f"Behavioral data loaded: {len(behavioral_df)} rows")
         print(f"Plan data loaded: {len(plan_df)} rows")
         print(f"Plan_df columns: {plan_df.columns.tolist()}")
@@ -223,42 +213,6 @@ def prepare_features(behavioral_df, plan_df):
     k9, k10 = 2.5, 2.3
     W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 3.0, 7.0, 1.2, 1.8
 
-    # Convert plan_df to Spark DataFrame for broadcasting (optimization for large datasets)
-    plan_df_spark = spark.createDataFrame(plan_df)
-
-    # Compute weighted features using Spark Pandas UDF for scalability
-    def calculate_persona_weight_udf(persona, persona_info):
-        @pandas_udf(DoubleType(), PandasUDFType.SCALAR)
-        def udf_func(
-            plan_id, zip_code, csnp_type, dsnp_type, num_pages_viewed, compared_plan_ids, num_plans_compared,
-            query_col, filter_col, click_col, plan_col, quality_level, dental_interaction, vision_interaction,
-            csnp_interaction, csnp_type_flag, csnp_drug_interaction, csnp_doctor_interaction, persona_col
-        ):
-            # Create a Pandas DataFrame for the input columns
-            df = pd.DataFrame({
-                'plan_id': plan_id,
-                'zip': zip_code,
-                'csnp_type': csnp_type,
-                'dsnp_type': dsnp_type,
-                'num_pages_viewed': num_pages_viewed,
-                'compared_plan_ids': compared_plan_ids,
-                'num_plans_compared': num_plans_compared,
-                persona_info['query_col']: query_col,
-                persona_info['filter_col']: filter_col,
-                persona_info.get('click_col', 'click_dummy'): click_col,
-                persona_info['plan_col']: plan_col,
-                'quality_level': quality_level,
-                'dental_interaction': dental_interaction,
-                'vision_interaction': vision_interaction,
-                'csnp_interaction': csnp_interaction,
-                'csnp_type_flag': csnp_type_flag,
-                'csnp_drug_interaction': csnp_drug_interaction,
-                'csnp_doctor_interaction': csnp_doctor_interaction,
-                'persona': persona_col
-            })
-            return df.apply(lambda row: calculate_persona_weight(row, persona_info, persona, plan_df), axis=1)
-        return udf_func
-
     def calculate_persona_weight(row, persona_info, persona, plan_df):
         plan_col = persona_info['plan_col']
         query_col = persona_info['query_col']
@@ -373,30 +327,15 @@ def prepare_features(behavioral_df, plan_df):
         
         return min(adjusted_weight, 3.5 if persona == 'csnp' else 1.2)
 
-    # Convert df to Spark DataFrame to parallelize weight computation
-    df_spark = spark.createDataFrame(df)
-
-    # Compute weighted features for each persona using Pandas UDF
-    print("Calculating persona weights using Spark Pandas UDF...")
+    # Compute weighted features using Pandas apply
+    print("Calculating persona weights using Pandas apply...")
     for persona, info in persona_weights.items():
         click_col = info.get('click_col', 'click_dummy')
-        if click_col not in df_spark.columns:
-            df_spark = df_spark.withColumn(click_col, pd.Series([0] * df_spark.count()).astype(float))
-        udf = calculate_persona_weight_udf(persona, info)
-        df_spark = df_spark.withColumn(
-            f'w_{persona}',
-            udf(
-                df_spark['plan_id'], df_spark['zip'], df_spark['csnp_type'], df_spark['dsnp_type'],
-                df_spark['num_pages_viewed'], df_spark['compared_plan_ids'], df_spark['num_plans_compared'],
-                df_spark[info['query_col']], df_spark[info['filter_col']], df_spark[click_col],
-                df_spark[info['plan_col']], df_spark['quality_level'], df_spark['dental_interaction'],
-                df_spark['vision_interaction'], df_spark['csnp_interaction'], df_spark['csnp_type_flag'],
-                df_spark['csnp_drug_interaction'], df_spark['csnp_doctor_interaction'], df_spark['persona']
-            )
+        if click_col not in df.columns:
+            df[click_col] = 0
+        df[f'w_{persona}'] = df.apply(
+            lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1
         )
-
-    # Convert back to Pandas for final feature preparation
-    df = df_spark.toPandas()
 
     # Normalize weighted features
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys()]
@@ -448,9 +387,8 @@ def score_data(model, X, metadata):
         ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
         output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
     
-    # Save results to DBFS
-    output_df_spark = spark.createDataFrame(output_df)
-    output_df_spark.write.mode('overwrite').csv(OUTPUT_FILE, header=True)
+    # Save results using Pandas
+    output_df.to_csv(OUTPUT_FILE, index=False)
     print(f"Scoring results saved to {OUTPUT_FILE}")
 
     # Print prediction distribution
@@ -470,6 +408,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Stop the Spark session
-spark.stop()

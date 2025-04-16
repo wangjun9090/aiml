@@ -41,6 +41,13 @@ def load_data(behavioral_path, plan_path):
         print(f"Behavioral data loaded: {len(behavioral_df)} rows")
         print(f"Plan data loaded: {len(plan_df)} rows")
         print(f"Plan_df columns: {plan_df.columns.tolist()}")
+
+        # Debug: Check data types of 'zip' and 'plan_id'
+        print("\nData types in behavioral_df:")
+        print(f"zip: {behavioral_df['zip'].dtype}, plan_id: {behavioral_df['plan_id'].dtype}")
+        print("Data types in plan_df:")
+        print(f"zip: {plan_df['zip'].dtype}, plan_id: {plan_df['plan_id'].dtype}")
+
         return behavioral_df, plan_df
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -75,6 +82,17 @@ def prepare_features(behavioral_df, plan_df):
     # Normalize personas and reset index
     behavioral_df = normalize_persona(behavioral_df)
     print(f"Rows after persona normalization: {len(behavioral_df)}")
+
+    # Ensure 'zip' and 'plan_id' columns have the same data type (string)
+    behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
+    behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).fillna('')
+    plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
+    plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
+
+    # Debug: Verify data types after conversion
+    print("\nData types after conversion:")
+    print(f"behavioral_df - zip: {behavioral_df['zip'].dtype}, plan_id: {behavioral_df['plan_id'].dtype}")
+    print(f"plan_df - zip: {plan_df['zip'].dtype}, plan_id: {plan_df['plan_id'].dtype}")
 
     # Merge behavioral and plan data, reset index to avoid misalignment
     df = behavioral_df.merge(

@@ -1,130 +1,58 @@
 import pandas as pd
 import numpy as np
 import pickle
-import os
-import io
-import json
-import logging
-from azure.cosmos import CosmosClient
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from fastapi.responses import Response
-import uvicorn
 
-# Set up logging with INFO level (temporarily include DEBUG for debugging)
-logging.basicConfig(level=logging.DEBUG)  # Switch back to INFO after debugging
-logger = logging.getLogger(__name__)
+# Hardcoded file paths for Databricks (using /Workspace/ prefix as provided)
+BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
+PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
+MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-0.0.2.pkl'
+OUTPUT_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/scores/032025/test_scored_visitors_2025.csv'
 
-# Global variables
-model = None
-behavioral_df_full = None
-plan_df_full = None
-app_ready = False  # For AKS health check
+# Hardcode a specific userid for testing (set to None to process all userids)
+HARDCODED_USERID = "1743291472555DC78BEM9VVIGH8D5J6II8QFSGI75HIC4"  # Change to a specific userid for testing, or set to None to process all
 
-# File definitions
-MODEL_FILE = "rf_model_persona_with_weights_092024_032025_v7.pkl"
-
-# FastAPI app instance
-app = FastAPI()
-
-# Input schema for the /score endpoint
-class ScoreRequest(BaseModel):
-    userid: str
-
-# Function to load data from Cosmos DB into pandas DataFrame
-def load_data_from_cosmos(container):
-    query = "SELECT * FROM c"
-    items = list(container.query_items(query, enable_cross_partition_query=True))
-    return pd.DataFrame(items)
-
-def init():
-    """Initialize the model and load full datasets."""
-    global model, behavioral_df_full, plan_df_full, app_ready
-    logger.debug("Entering init function")
-
+def load_model(model_path):
     try:
-        # Load model
-        model_path = MODEL_FILE
-        if not os.path.exists(model_path):
-            logger.error(f"Model file not found at {model_path}")
-            raise FileNotFoundError(f"Model file not found at {model_path}")
-
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
-        logger.info(f"Model loaded from {model_path}")
-
-        # Cosmos DB connection
-        endpoint = os.getenv("COSMOS_ENDPOINT")
-        key = os.getenv("COSMOS_KEY")
-        database_name = os.getenv("COSMOS_PERSONA_DB")
-        behavioral_container_name = os.getenv("COSMOS_PERSONA_CONTAINER_BEHAVIOR")
-        plan_container_name = os.getenv("COSMOS_PERSONA_CONTAINER_PLAN")
-
-        if not all([endpoint, key, database_name, behavioral_container_name, plan_container_name]):
-            missing_vars = [var for var, val in [
-                ("COSMOS_ENDPOINT", endpoint),
-                ("COSMOS_KEY", key),
-                ("COSMOS_PERSONA_DB", database_name),
-                ("COSMOS_PERSONA_CONTAINER_BEHAVIOR", behavioral_container_name),
-                ("COSMOS_PERSONA_CONTAINER_PLAN", plan_container_name)
-            ] if not val]
-            logger.error(f"Missing environment variables: {missing_vars}")
-            raise ValueError(f"Missing environment variables: {missing_vars}")
-
-        # Initialize Cosmos DB client
-        try:
-            client = CosmosClient(endpoint, credential=key)
-            logger.info("Successfully connected to Cosmos DB")
-        except Exception as e:
-            logger.error(f"Failed to connect to Cosmos DB: {str(e)}")
-            raise
-
-        database = client.get_database_client(database_name)
-        behavioral_container = database.get_container_client(behavioral_container_name)
-        plan_container = database.get_container_client(plan_container_name)
-
-        # Load data
-        behavioral_df_full = load_data_from_cosmos(behavioral_container)
-        plan_df_full = load_data_from_cosmos(plan_container)
-
-        # Convert numeric columns to appropriate types
-        numeric_columns = [
-            'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
-            'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
-            'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp', 'accordion_dental',
-            'accordion_transportation', 'accordion_otc', 'accordion_drug', 'accordion_provider',
-            'accordion_vision', 'accordion_csnp', 'accordion_dsnp', 'time_dental_pages',
-            'time_transportation_pages', 'time_otc_pages', 'time_drug_pages', 'time_provider_pages',
-            'time_vision_pages', 'time_csnp_pages', 'time_dsnp_pages', 'rel_time_dental_pages',
-            'rel_time_transportation_pages', 'rel_time_otc_pages', 'rel_time_drug_pages',
-            'rel_time_provider_pages', 'rel_time_vision_pages', 'rel_time_csnp_pages',
-            'rel_time_dsnp_pages', 'total_session_time', 'num_pages_viewed', 'num_plans_selected',
-            'num_plans_compared', 'submitted_application', 'dce_click_count', 'pro_click_count',
-            'ma_otc', 'ma_transportation', 'ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp',
-            'ma_provider_network', 'ma_drug_coverage'
-        ]
-
-        for df in [behavioral_df_full, plan_df_full]:
-            for col in numeric_columns:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-        # Ensure 'zip' and 'plan_id' are strings to avoid merge issues
-        for df in [behavioral_df_full, plan_df_full]:
-            df['zip'] = df['zip'].astype(str).fillna('')
-            df['plan_id'] = df['plan_id'].astype(str).fillna('')
-
-        logger.info(f"Behavioral data loaded: {len(behavioral_df_full)} rows")
-        logger.info(f"Plan data loaded: {len(plan_df_full)} rows")
-
-        app_ready = True
-        logger.info("Initialization completed successfully")
-
+        print(f"Model loaded from {model_path}")
+        return model
     except Exception as e:
-        logger.error(f"Error in init: {str(e)}")
-        raise  # Ensure startup fails if init fails
+        print(f"Error loading model: {e}")
+        raise
 
-# Feature preparation and scoring functions (aligned with updated score.py)
+def load_data(behavioral_path, plan_path):
+    try:
+        # Load data using Pandas
+        behavioral_df = pd.read_csv(behavioral_path)
+        plan_df = pd.read_csv(plan_path)
+
+        # Check if 'userid' column exists
+        if 'userid' not in behavioral_df.columns:
+            raise ValueError("The 'userid' column is missing from the behavioral data. Please ensure the input data includes a 'userid' column.")
+
+        # Filter for the hardcoded userid if specified
+        if HARDCODED_USERID is not None:
+            print(f"Filtering data for hardcoded userid: {HARDCODED_USERID}")
+            behavioral_df = behavioral_df[behavioral_df['userid'] == HARDCODED_USERID]
+            if len(behavioral_df) == 0:
+                raise ValueError(f"No data found for userid: {HARDCODED_USERID}")
+
+        print(f"Behavioral data loaded: {len(behavioral_df)} rows")
+        print(f"Plan data loaded: {len(plan_df)} rows")
+        print(f"Plan_df columns: {plan_df.columns.tolist()}")
+
+        # Debug: Check data types of 'zip' and 'plan_id'
+        print("\nData types in behavioral_df:")
+        print(f"zip: {behavioral_df['zip'].dtype}, plan_id: {behavioral_df['plan_id'].dtype}")
+        print("Data types in plan_df:")
+        print(f"zip: {plan_df['zip'].dtype}, plan_id: {plan_df['plan_id'].dtype}")
+
+        return behavioral_df, plan_df
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        raise
+
 def normalize_persona(df):
     """Normalize personas by splitting rows with multiple personas (e.g., 'csnp,dsnp') into separate rows."""
     new_rows = []
@@ -151,25 +79,30 @@ def normalize_persona(df):
     return pd.DataFrame(new_rows).reset_index(drop=True)
 
 def prepare_features(behavioral_df, plan_df):
-    """Prepare features and assign quality levels for scoring, joining with plan_df."""
     # Normalize personas and reset index
     behavioral_df = normalize_persona(behavioral_df)
-    logger.info(f"Rows after persona normalization: {len(behavioral_df)}")
+    print(f"Rows after persona normalization: {len(behavioral_df)}")
 
-    # Ensure 'zip' and 'plan_id' are strings (already handled in init, but reinforcing here)
+    # Ensure 'zip' and 'plan_id' columns have the same data type (string)
     behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
     behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).fillna('')
     plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
     plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
 
-    # Merge behavioral and plan data
+    # Debug: Verify data types after conversion
+    print("\nData types after conversion:")
+    print(f"behavioral_df - zip: {behavioral_df['zip'].dtype}, plan_id: {behavioral_df['plan_id'].dtype}")
+    print(f"plan_df - zip: {plan_df['zip'].dtype}, plan_id: {plan_df['plan_id'].dtype}")
+
+    # Merge behavioral and plan data, reset index to avoid misalignment
     df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
         on=['zip', 'plan_id'],
         suffixes=('_beh', '_plan')
     ).reset_index(drop=True)
-    logger.info(f"Rows after merge with plan data: {len(df)}")
+    print(f"Rows after merge: {len(df)}")
+    print("Columns after merge:", df.columns.tolist())
 
     df['state'] = df['state_beh'].fillna(df['state_plan'])
     df = df.drop(columns=['state_beh', 'state_plan'], errors='ignore').reset_index(drop=True)
@@ -197,7 +130,7 @@ def prepare_features(behavioral_df, plan_df):
     # Ensure all raw_plan_features and csnp_type exist
     for col in raw_plan_features + ['csnp_type']:
         if col not in df.columns:
-            logger.warning(f"'{col}' not found in df. Filling with 0.")
+            print(f"Warning: '{col}' not found in df. Filling with 0.")
             df[col] = 0
         else:
             df[col] = df[col].fillna(0)
@@ -276,10 +209,10 @@ def prepare_features(behavioral_df, plan_df):
 
     # Debug: Check csnp features
     high_quality_csnp = df[(df['quality_level'] == 'High') & (df['persona'] == 'csnp')]
-    logger.info(f"Scoring: High-quality csnp samples: {len(high_quality_csnp)}")
-    logger.info(f"Scoring: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
-    logger.info(f"Scoring: Non-zero csnp_drug_interaction: {sum(high_quality_csnp['csnp_drug_interaction'] > 0)}")
-    logger.info(f"Scoring: Non-zero csnp_doctor_interaction: {sum(high_quality_csnp['csnp_doctor_interaction'] > 0)}")
+    print(f"Scoring: High-quality csnp samples: {len(high_quality_csnp)}")
+    print(f"Scoring: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
+    print(f"Scoring: Non-zero csnp_drug_interaction: {sum(high_quality_csnp['csnp_drug_interaction'] > 0)}")
+    print(f"Scoring: Non-zero csnp_doctor_interaction: {sum(high_quality_csnp['csnp_doctor_interaction'] > 0)}")
 
     # Define persona weights for weighted features
     persona_weights = {
@@ -413,7 +346,7 @@ def prepare_features(behavioral_df, plan_df):
         return min(adjusted_weight, 3.5 if persona == 'csnp' else 1.2)
 
     # Compute weighted features using Pandas apply
-    logger.info("Calculating persona weights using Pandas apply...")
+    print("Calculating persona weights using Pandas apply...")
     for persona, info in persona_weights.items():
         click_col = info.get('click_col', 'click_dummy')
         if click_col not in df.columns:
@@ -428,9 +361,9 @@ def prepare_features(behavioral_df, plan_df):
     for wf in weighted_features:
         df[wf] = df[wf] / weight_sum.where(weight_sum > 0, 1)
 
-    logger.info(f"Weighted features added: {weighted_features}")
-    logger.info("Sample weights:")
-    logger.info(df[weighted_features].head())
+    print(f"Weighted features added: {weighted_features}")
+    print("Sample weights:")
+    print(df[weighted_features].head())
 
     # Define all feature columns expected by the model
     all_weighted_features = [f'w_{persona}' for persona in [
@@ -438,16 +371,16 @@ def prepare_features(behavioral_df, plan_df):
     ]]
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
 
-    logger.info(f"Feature columns expected: {feature_columns}")
+    print(f"Feature columns expected: {feature_columns}")
 
     # Check for missing features and fill with 0
     missing_features = [col for col in feature_columns if col not in df.columns]
     if missing_features:
-        logger.warning(f"Missing features in df: {missing_features}")
+        print(f"Warning: Missing features in df: {missing_features}")
         for col in missing_features:
             df[col] = 0
 
-    logger.info(f"Columns in df after filling: {df.columns.tolist()}")
+    print(f"Columns in df after filling: {df.columns.tolist()}")
 
     # Prepare features for prediction, ensuring 'userid' is included in metadata
     X = df[feature_columns].fillna(0)
@@ -456,7 +389,6 @@ def prepare_features(behavioral_df, plan_df):
     return X, metadata
 
 def score_data(model, X, metadata):
-    """Score the data and return results with quality level and full persona probability rankings."""
     # Predict probabilities and labels
     y_pred_proba = model.predict_proba(X)
     personas = model.classes_
@@ -467,79 +399,31 @@ def score_data(model, X, metadata):
     output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
     output_df['predicted_persona'] = y_pred
     
-    # Add probability ranking (full ranking, not just top 3)
+    # Add top 3 probability ranking
+    output_df['get_top_3_ranking'] = ''
     for i in range(len(output_df)):
         probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
-        ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
-        output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
+        ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)[:3]  # Get top 3
+        output_df.loc[i, 'get_top_3_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
     
-    # Select relevant columns for output
-    final_df = output_df[['userid', 'quality_level', 'predicted_persona', 'probability_ranking']]
+    # Save results using Pandas
+    output_df.to_csv(OUTPUT_FILE, index=False)
+    print(f"Scoring results saved to {OUTPUT_FILE}")
 
-    # Log prediction distribution
-    logger.info("\nDistribution of predicted personas:")
-    logger.info(final_df['predicted_persona'].value_counts())
+    # Print prediction distribution
+    print("\nDistribution of predicted personas:")
+    print(output_df['predicted_persona'].value_counts())
 
-    # Log a sample of user IDs with their predicted personas
-    logger.info("\nSample of user IDs with predicted personas:")
-    logger.info(final_df[['userid', 'predicted_persona']].head())
+    # Print a sample of user IDs with their predicted personas and top 3 rankings
+    print("\nSample of user IDs with predicted personas and top 3 rankings:")
+    print(output_df[['userid', 'predicted_persona', 'get_top_3_ranking']].head())
 
-    return final_df
+def main():
+    print("Scoring test visitor data with pre-trained Random Forest model...")
+    rf_model = load_model(MODEL_FILE)
+    behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
+    X, metadata = prepare_features(behavioral_df, plan_df)
+    score_data(rf_model, X, metadata)
 
-# Define the /score endpoint
-@app.post("/score")
-async def score(request: ScoreRequest):
-    """Score endpoint to process user data and return predictions."""
-    if not app_ready:
-        raise HTTPException(status_code=503, detail="Service is still initializing")
-
-    try:
-        userid = request.userid
-        if not userid:
-            raise HTTPException(status_code=400, detail="Missing 'userid' in request payload")
-
-        behavioral_df = behavioral_df_full[behavioral_df_full['userid'] == userid]
-        if behavioral_df.empty:
-            raise HTTPException(status_code=404, detail=f"No behavioral data found for userid: {userid}")
-
-        zip_plan_pairs = behavioral_df[['zip', 'plan_id']].drop_duplicates()
-        plan_df = plan_df_full[plan_df_full.set_index(['zip', 'plan_id']).index.isin(zip_plan_pairs.set_index(['zip', 'plan_id']).index)]
-
-        logger.info(f"Behavioral data rows for {userid}: {len(behavioral_df)}")
-        logger.info(f"Plan data rows for {userid}: {len(plan_df)}")
-
-        X, metadata = prepare_features(behavioral_df, plan_df)
-        scored_df = score_data(model, X, metadata)
-
-        result = []
-        for _, row in scored_df.iterrows():
-            output = {
-                'userid': row['userid'],
-                'quality_level': row['quality_level'],
-                'predicted_persona': row['predicted_persona'],
-                'probability_ranking': row['probability_ranking']
-            }
-            if row['quality_level'] == 'Low':
-                output['message'] = 'Prediction result might not be accurate due to low behavioral data quality'
-            result.append(output)
-
-        return {'scored_results': result}
-
-    except Exception as e:
-        logger.error(f"Error during scoring: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error during scoring: {str(e)}")
-
-# Health check endpoint for AKS
-@app.get("/actuator/health")
-async def health_check():
-    """Check if the service is up and running."""
-    if not app_ready:
-        raise HTTPException(status_code=503, detail="Service is still initializing")
-    return Response(content="Healthy", status_code=200)
-
-# Main execution
 if __name__ == "__main__":
-    logger.debug("Starting application")
-    init()  # Call init synchronously before running the server
-    logger.debug("Starting Uvicorn server")
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+    main()

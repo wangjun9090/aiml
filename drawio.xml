@@ -1,79 +1,111 @@
-<mxfile host="app.diagrams.net" modified="2025-04-18T03:13:31.916Z" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" etag="fPjX6j7v-tKz9qEdKzF3" version="25.2.3" type="device">
-  <diagram id="rM5A-f7R9jE8-K93jM6K" name="Page-1">
-    <mxGraph model="1" style="default-style=edge;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontFamily=Helvetica;fontColor=#000000;fontSize=12;labelBackgroundColor=#ffffff;labelBorderColor=#000000;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=1;dashed=0;align=center;verticalAlign=middle;opacity=100;shadow=0;comic=0;sketch=0;">
-      <mxCell id="0" style="sketch=0;comic=0;" parent="1" vertex="1">
-        <mxGeometry id="geometry" width="900" height="460" as="geometry" />
-      </mxCell>
-      <mxCell id="1" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=User Data;rounded=0;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="40" y="40" width="100" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="2" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Plan ID or Compared Plans?;shape=rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="220" y="40" width="160" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="3" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Base Weight = Plan value × multiplier;rounded=0;fillColor=#e2f5d3;strokeColor=#76a751;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="440" y="20" width="200" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="4" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Base Weight = 0;rounded=0;fillColor=#e2f5d3;strokeColor=#76a751;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="440" y="100" width="200" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="5" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Behavior Weight: Actions × coeffs + bonuses;rounded=0;fillColor=#e2f5d3;strokeColor=#76a751;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="40" y="180" width="280" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="6" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Adjusted Weight = Base + Behavior;rounded=0;fillColor=#e2f5d3;strokeColor=#76a751;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="360" y="260" width="200" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="7" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Persona Matches?;shape=rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="380" y="340" width="160" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="8" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Ensure ≥ max other + 0.2;rounded=0;fillColor=#e2f5d3;strokeColor=#76a751;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="600" y="320" width="200" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="9" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Cap: 3.5 (CSNP) or 1.2 (Others);rounded=0;fillColor=#e2f5d3;strokeColor=#76a751;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="600" y="400" width="200" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="10" style="sketch=0;comic=0;labelBackgroundColor=#ffffff;html=1;value=Final Weight (e.g., w_csnp);rounded=0;fillColor=#e2f5d3;strokeColor=#76a751;" parent="1" vertex="1">
-        <mxGeometry id="geometry" x="360" y="480" width="200" height="60" as="geometry" />
-      </mxCell>
-      <mxCell id="11" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;" parent="1" source="1" target="2" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-      <mxCell id="12" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;value=Yes;" parent="1" source="2" target="3" edge="1">
-        <mxGeometry id="geometry" x="1" relative="1" as="geometry">
-          <mxPoint x="380" y="70" as="sourcePoint" />
-          <mxPoint x="440" y="50" as="targetPoint" />
-          <mxPoint as="offset" />
-        </mxGeometry>
-      </mxCell>
-      <mxCell id="13" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;value=No;" parent="1" source="2" target="4" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-      <mxCell id="14" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;" parent="1" source="3" target="5" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-      <mxCell id="15" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;" parent="1" source="4" target="5" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-      <mxCell id="16" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;" parent="1" source="5" target="6" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-      <mxCell id="17" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;" parent="1" source="6" target="7" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-      <mxCell id="18" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;value=Yes;" parent="1" source="7" target="8" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-      <mxCell id="19" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;value=No" parent="1" source="7" target="9" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry">
-          <mxPoint x="560" y="370" as="sourcePoint" />
-          <mxPoint x="600" y="430" as="targetPoint" />
-        </mxGeometry>
-      </mxCell>
-      <mxCell id="20" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;" parent="1" source="8" target="9" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-      <mxCell id="21" style="sketch=0;comic=0;html=1;verticalAlign=middle;align=center;labelBackgroundColor=#ffffff;strokeColor=#000000;dashed=0;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;" parent="1" source="9" target="10" edge="1">
-        <mxGeometry id="geometry" relative="1" as="geometry" />
-      </mxCell>
-    </mxGraph>
-  </diagram>
-</mxfile>
+<mxGraphModel dx="800" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <!-- User Data (Start) -->
+    <mxCell id="2" value="User Data" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="400" y="50" width="120" height="60" as="geometry" />
+    </mxCell>
+    <!-- Decision: Plan ID or Compared Plans? -->
+    <mxCell id="3" value="Plan ID or Compared Plans?" style="rhombus;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="400" y="150" width="120" height="80" as="geometry" />
+    </mxCell>
+    <!-- Base Weight = Plan value × multiplier (Yes) -->
+    <mxCell id="4" value="Base Weight = Plan value × multiplier" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="550" y="250" width="140" height="60" as="geometry" />
+    </mxCell>
+    <!-- Base Weight = 0 (No) -->
+    <mxCell id="5" value="Base Weight = 0" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="250" y="250" width="120" height="60" as="geometry" />
+    </mxCell>
+    <!-- Behavior Weight -->
+    <mxCell id="6" value="Behavior Weight: Actions × coeffs + bonuses" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="400" y="350" width="140" height="60" as="geometry" />
+    </mxCell>
+    <!-- Adjusted Weight -->
+    <mxCell id="7" value="Adjusted Weight = Base + Behavior" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="400" y="450" width="140" height="60" as="geometry" />
+    </mxCell>
+    <!-- Decision: Persona Matches? -->
+    <mxCell id="8" value="Persona Matches?" style="rhombus;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="400" y="550" width="120" height="80" as="geometry" />
+    </mxCell>
+    <!-- Ensure ≥ max other + 0.2 (Yes) -->
+    <mxCell id="9" value="Ensure ≥ max other + 0.2" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="550" y="650" width="140" height="60" as="geometry" />
+    </mxCell>
+    <!-- Cap -->
+    <mxCell id="10" value="Cap: 3.5 (csnp) or 1.2 (others)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="400" y="750" width="140" height="60" as="geometry" />
+    </mxCell>
+    <!-- Final Weight -->
+    <mxCell id="11" value="Final Weight (e.g., w_csnp)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="400" y="850" width="120" height="60" as="geometry" />
+    </mxCell>
+    <!-- Arrows -->
+    <!-- User Data to Plan ID Decision -->
+    <mxCell id="12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="2" target="3">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <!-- Plan ID Decision to Base Weight (Yes) -->
+    <mxCell id="13" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="3" target="4">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <!-- Plan ID Decision to Base Weight = 0 (No) -->
+    <mxCell id="14" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="3" target="5">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <!-- Base Weight (Yes) to Behavior Weight -->
+    <mxCell id="15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;entryX=1;entryY=0;" edge="1" parent="1" source="4" target="6">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="620" y="310" />
+          <mxPoint x="540" y="310" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+    <!-- Base Weight = 0 (No) to Behavior Weight -->
+    <mxCell id="16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;entryX=0;entryY=0;" edge="1" parent="1" source="5" target="6">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="310" y="310" />
+          <mxPoint x="400" y="310" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+    <!-- Behavior Weight to Adjusted Weight -->
+    <mxCell id="17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="6" target="7">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <!-- Adjusted Weight to Persona Matches? -->
+    <mxCell id="18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="7" target="8">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <!-- Persona Matches? to Ensure ≥ max other + 0.2 (Yes) -->
+    <mxCell id="19" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="8" target="9">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <!-- Persona Matches? to Cap (No, Skip) -->
+    <mxCell id="20" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0;exitY=0.5;entryX=1;entryY=0;" edge="1" parent="1" source="8" target="10">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="340" y="590" />
+          <mxPoint x="340" y="750" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+    <!-- Ensure ≥ max other + 0.2 to Cap -->
+    <mxCell id="21" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;entryX=0;entryY=0;" edge="1" parent="1" source="9" target="10">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="620" y="710" />
+          <mxPoint x="540" y="710" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+    <!-- Cap to Final Weight -->
+    <mxCell id="22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="10" target="11">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>

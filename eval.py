@@ -1,3 +1,61 @@
+import pandas as pd
+import numpy as np
+import pickle
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
+# File paths
+behavioral_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
+plan_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
+model_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-0.0.2.pkl'
+output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_results_0401_2025_0420_2025_v1.csv'
+summary_output_file = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/summary_eval_results_0401_2025_0420_2025.csv'  # New file for summary
+
+def load_model(model_path):
+    try:
+        with open(model_path, 'rb') as f:
+            model = pickle.load(f)
+        print(f"Model loaded from {model_path}")
+        return model
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise
+
+def load_data(behavioral_path, plan_path):
+    try:
+        behavioral_df = pd.read_csv(behavioral_path)
+        plan_df = pd.read_csv(plan_path)
+        print(f"Behavioral data loaded: {len(behavioral_df)} rows")
+        print(f"Plan data loaded: {len(plan_df)} rows")
+        print(f"Plan_df columns: {plan_df.columns.tolist()}")
+        return behavioral_df, plan_df
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        raise
+
+def normalize_persona(df):
+    new_rows = []
+    for idx, row in df.iterrows():
+        if pd.isna(row['persona']):
+            new_rows.append(row)
+            continue
+        personas = [p.strip().lower() for p in str(row['persona']).split(',')]
+        if 'dsnp' in personas or 'csnp' in personas:
+            first_row = row.copy()
+            first_persona = personas[0]
+            if first_persona in ['unknown', 'none', 'healthcare', '']:
+                first_persona = 'dsnp' if 'dsnp' in personas else 'csnp'
+            first_row['persona'] = first_persona
+            new_rows.append(first_row)
+            second_row = row.copy()
+            second_row['persona'] = 'dsnp' if 'dsnp' in personas else 'csnp'
+            new_rows.append(second_row)
+        else:
+            row_copy = row.copy()
+            first_persona = personas[0]
+            row_copy['persona'] = first_persona
+            new_rows.append(row_copy)
+    return pd.DataFrame(new_rows)
+
 def prepare_evaluation_features(behavioral_df, plan_df):
     behavioral_df = normalize_persona(behavioral_df)
     print(f"Rows after persona normalization: {len(behavioral_df)}")
@@ -33,6 +91,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
+    # Ensure required columns exist
     for col in raw_plan_features + ['csnp_type']:
         if col not in training_df.columns:
             print(f"Warning: '{col}' not found in training_df. Filling with 0.")
@@ -40,11 +99,18 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         else:
             training_df[col] = training_df[col].fillna(0)
 
+    # Check for columns needed in assign_quality_level
+    required_cols = ['plan_id', 'dce_click_count', 'pro_click_count']
+    for col in required_cols:
+        if col not in training_df.columns:
+            print(f"Warning: '{col}' not found in training_df. Filling with 0.")
+            training_df[col] = 0
+
     # Define filter_cols and query_cols for assign_quality_level
     filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
     query_cols = [col for col in training_df.columns if col.startswith('query_')]
 
-    # Assign quality_level before using it
+    # Assign quality_level early
     def assign_quality_level(row):
         has_plan_id = pd.notna(row['plan_id'])
         has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
@@ -62,8 +128,9 @@ def prepare_evaluation_features(behavioral_df, plan_df):
             return 'Medium'
 
     training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
+    print(f"Quality levels assigned: {training_df['quality_level'].value_counts().to_dict()}")
 
-    # Now calculate additional features
+    # Calculate additional features
     additional_features = []
     training_df['csnp_interaction'] = training_df['csnp'] * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
@@ -110,7 +177,7 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
-    # Now filter high_quality_csnp (after quality_level is defined)
+    # Now filter high_quality_csnp
     high_quality_csnp = training_df[(training_df['quality_level'] == 'High') & (training_df['persona'] == 'csnp')]
     print(f"Eval: High-quality csnp samples: {len(high_quality_csnp)}")
     print(f"Eval: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
@@ -149,3 +216,115 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         print(f"Unique personas before filtering: {y_true.unique().tolist()}")
 
     return X, y_true, metadata
+
+def evaluate_predictions(model, X, y_true, metadata):
+    y_pred_proba = model.predict_proba(X)
+    personas = model.classes_
+    proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
+    y_pred = model.predict(X)
+    
+    output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
+    output_df['predicted_persona'] = y_pred
+    
+    for i in range(len(output_df)):
+        probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
+        ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+        output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
+    
+    output_df.to_csv(output_file, index=False)
+    print(f"Detailed results saved to {output_file}")
+
+    if y_true is not None:
+        y_true_lower = y_true.str.lower()
+        invalid_personas = ['', 'unknown', 'none', 'healthcare', 'fitness', 'hearing']
+ adjuvant_mask = y_true.notna() & (~y_true_lower.isin(invalid_personas))
+        if not valid_mask.all():
+            excluded_count = (~valid_mask).sum()
+            print(f"Warning: Excluding {excluded_count} rows with invalid 'persona' values.")
+            print(f"Sample of excluded personas: {y_true[~valid_mask].head().tolist()}")
+        
+        X_valid = X[valid_mask]
+        y_true_valid = y_true[valid_mask].reset_index(drop=True)
+        y_pred_valid = y_pred[valid_mask.values]
+        metadata_valid = metadata[valid_mask].reset_index(drop=True)
+
+        if len(y_true_valid) > 0:
+            accuracy = accuracy_score(y_true_valid, y_pred_valid)
+            print(f"\nOverall Accuracy (valid personas only): {accuracy * 100:.2f}%")
+            print(f"Rows evaluated: {len(y_true_valid)}")
+            print(f"Correct predictions: {sum(y_pred_valid == y_true_valid)}")
+            print("\nDetailed Classification Report:")
+            print(classification_report(y_true_valid, y_pred_valid))
+            
+            print("\nIndividual Persona Accuracy Rates (Overall):")
+            for persona in sorted(set(y_true_valid)):
+                persona_true = y_true_valid == persona
+                persona_count = sum(persona_true)
+                if persona_count > 0:
+                    persona_accuracy = accuracy_score(y_true_valid[persona_true], y_pred_valid[persona_true]) * 100
+                    print(f"Accuracy for '{persona}': {persona_accuracy:.2f}% (Count: {persona_count})")
+
+            # Prepare summary table
+            quality_levels = ['High', 'Medium', 'Low']
+            personas_list = ['drug', 'dsnp', 'dental', 'csnp', 'doctor', 'vision']
+            summary_data = []
+            total_rows = len(y_true_valid)
+
+            for level in quality_levels + ['Overall']:
+                if level == 'Overall':
+                    level_true = y_true_valid
+                    level_pred = y_pred_valid
+                    level_metadata = metadata_valid
+                else:
+                    level_mask = metadata_valid['quality_level'] == level
+                    level_true = y_true_valid[level_mask]
+                    level_pred = y_pred_valid[level_mask.values]
+                    level_metadata = metadata_valid[level_mask]
+
+                row_count = len(level_true)
+                percent_rows = (row_count / total_rows * 100) if total_rows > 0 else 0
+                level_accuracy = accuracy_score(level_true, level_pred) * 100 if row_count > 0 else 0
+
+                persona_metrics = {}
+                for persona in personas_list:
+                    persona_true = level_true == persona
+                    persona_count = sum(persona_true)
+                    if persona_count > 0:
+                        persona_accuracy = accuracy_score(level_true[persona_true], y_pred_valid[persona_true]) * 100
+                        persona_metrics[persona] = f"{persona_accuracy:.2f}% ({persona_count})"
+                    else:
+                        persona_metrics[persona] = "0.00% (0)"
+
+                summary_row = {
+                    'Quality Level': level,
+                    'Rows': row_count,
+                    '% of Total Rows': f"{percent_rows:.2f}%",
+                    'Accuracy': f"{level_accuracy:.2f}%",
+                    'Drug': persona_metrics['drug'],
+                    'DSNP': persona_metrics['dsnp'],
+                    'Dental': persona_metrics['dental'],
+                    'CSNP': persona_metrics['csnp'],
+                    'Doctor': persona_metrics['doctor'],
+                    'Vision': persona_metrics['vision']
+                }
+                summary_data.append(summary_row)
+
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_csv(summary_output_file, index=False)
+            print(f"Summary results saved to {summary_output_file}")
+
+            print("\nConfusion Matrix (Overall, valid personas only):")
+            cm = confusion_matrix(y_true_valid, y_pred_valid, labels=list(sorted(set(y_true_valid))))
+            print(pd.DataFrame(cm, index=list(sorted(set(y_true_valid))), columns=list(sorted(set(y_true_valid)))))
+        else:
+            print("ERROR: No valid persona values remain for evaluation.")
+
+def main():
+    print("Evaluating data with pre-trained Random Forest model...")
+    rf_model = load_model(model_file)
+    behavioral_df, plan_df = load_data(behavioral_file, plan_file)
+    X, y_true, metadata = prepare_evaluation_features(behavioral_df, plan_df)
+    evaluate_predictions(rf_model, X, y_true, metadata)
+
+if __name__ == "__main__":
+    main()

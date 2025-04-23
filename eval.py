@@ -135,9 +135,20 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     training_df = training_df.reset_index(drop=True)
 
     additional_features = []
+    
+    # Helper function to safely get a column as a Series
+    def get_column_safe(df, col, default_value=0):
+        if col in df.columns:
+            return df[col].fillna(0)
+        print(f"Warning: '{col}' not found in training_df. Using default value {default_value}.")
+        return pd.Series(default_value, index=df.index)
+
+    # Calculate additional features with safe column access
     training_df['csnp_interaction'] = training_df['csnp'] * (
-        training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
-        training_df.get('time_csnp_pages', 0).fillna(0) + training_df.get('accordion_csnp', 0).fillna(0)
+        get_column_safe(training_df, 'query_csnp') + 
+        get_column_safe(training_df, 'filter_csnp') + 
+        get_column_safe(training_df, 'time_csnp_pages') + 
+        get_column_safe(training_df, 'accordion_csnp')
     ) * 2.5
     additional_features.append('csnp_interaction')
 
@@ -145,37 +156,45 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     additional_features.append('csnp_type_flag')
 
     training_df['csnp_signal_strength'] = (
-        training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
-        training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
+        get_column_safe(training_df, 'query_csnp') + 
+        get_column_safe(training_df, 'filter_csnp') + 
+        get_column_safe(training_df, 'accordion_csnp') + 
+        get_column_safe(training_df, 'time_csnp_pages')
     ).clip(upper=5) * 2.5
     additional_features.append('csnp_signal_strength')
 
     training_df['dental_interaction'] = (
-        training_df.get('query_dental', 0).fillna(0) + training_df.get('filter_dental', 0).fillna(0)
+        get_column_safe(training_df, 'query_dental') + 
+        get_column_safe(training_df, 'filter_dental')
     ) * training_df['ma_dental_benefit'] * 1.5
     additional_features.append('dental_interaction')
 
     training_df['vision_interaction'] = (
-        training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0)
+        get_column_safe(training_df, 'query_vision') + 
+        get_column_safe(training_df, 'filter_vision')
     ) * training_df['ma_vision'] * 1.5
     additional_features.append('vision_interaction')
 
     training_df['csnp_drug_interaction'] = (
         training_df['csnp'] * (
-            training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
-            training_df.get('time_csnp_pages', 0).fillna(0)
+            get_column_safe(training_df, 'query_csnp') + 
+            get_column_safe(training_df, 'filter_csnp') + 
+            get_column_safe(training_df, 'time_csnp_pages')
         ) * 2.0 - training_df['ma_drug_coverage'] * (
-            training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_d-drug', 0).fillna(0) + 
-            training_df.get('time_drug_pages', 0).fillna(0)
+            get_column_safe(training_df, 'query_drug') + 
+            get_column_safe(training_df, 'filter_drug') + 
+            get_column_safe(training_df, 'time_drug_pages')
         )
     ).clip(lower=0) * 2.5
     additional_features.append('csnp_drug_interaction')
 
     training_df['csnp_doctor_interaction'] = (
         training_df['csnp'] * (
-            training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
+            get_column_safe(training_df, 'query_csnp') + 
+            get_column_safe(training_df, 'filter_csnp')
         ) * 1.5 - training_df['ma_provider_network'] * (
-            training_df.get('query_provider', 0).fillna(0) + training_df.get('filter_provider', 0).fillna(0)
+            get_column_safe(training_df, 'query_provider') + 
+            get_column_safe(training_df, 'filter_provider')
         )
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')

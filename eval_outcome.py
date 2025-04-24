@@ -19,7 +19,7 @@ def load_output_file(file_path):
         raise
 
 def compute_evaluation_outcomes(df):
-    """Compute accuracy, correction rate (binary), and confidence results."""
+    """Compute per-record accuracy_rate (binary), summary accuracy, and confidence results."""
     # Ensure required columns exist
     required_cols = ['persona', 'predicted_persona', 'confidence_score', 'probability_ranking']
     weight_cols = [col for col in df.columns if col.startswith('w_')]  # e.g., w_csnp, w_dental
@@ -27,8 +27,8 @@ def compute_evaluation_outcomes(df):
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # Compute per-record correction rate (1 if predicted_persona == persona, 0 otherwise)
-    df['correction_rate'] = (df['predicted_persona'] == df['persona']).astype(int)
+    # Compute per-record accuracy_rate (1 if predicted_persona == persona, 0 otherwise)
+    df['accuracy_rate'] = (df['predicted_persona'] == df['persona']).astype(int)
 
     # Compute overall accuracy
     overall_accuracy = accuracy_score(df['persona'], df['predicted_persona'])
@@ -40,40 +40,47 @@ def compute_evaluation_outcomes(df):
     for persona in personas:
         mask = df['persona'] == persona
         count = mask.sum()
-        matches = df['correction_rate'][mask].sum()
+        matches = df['accuracy_rate'][mask].sum()
         accuracy = accuracy_score(df['persona'][mask], df['predicted_persona'][mask]) if count > 0 else 0.0
-        match_rate_pct = f"{accuracy * 100:.2f}%"  # Format as XX.XX%
         avg_confidence = df['confidence_score'][mask].mean() if count > 0 else 0.0
         persona_metrics.append({
             'persona': persona,
             'total_records': count,
             'matches': matches,
             'accuracy_rate': round(accuracy, 2),  # 2 decimal places
-            'match_rate_pct': match_rate_pct,  # XX.XX% format
             'avg_confidence': round(avg_confidence, 2)  # 2 decimal places
         })
         print(f"Persona '{persona}':")
         print(f"  Total Records: {count}")
         print(f"  Matches: {matches}")
         print(f"  Accuracy Rate: {accuracy * 100:.2f}%")
-        print(f"  Match Rate %: {match_rate_pct}")
         print(f"  Average Confidence: {avg_confidence:.2f}")
 
     # Overall metrics
     overall_metrics = {
         'persona': 'Overall',
         'total_records': len(df),
-        'matches': df['correction_rate'].sum(),
+        'matches': df['accuracy_rate'].sum(),
         'accuracy_rate': round(overall_accuracy, 2),  # 2 decimal places
-        'match_rate_pct': f"{overall_accuracy * 100:.2f}%",  # XX.XX% format
         'avg_confidence': round(df['confidence_score'].mean(), 2)  # 2 decimal places
     }
     print("\nOverall Metrics:")
     print(f"  Total Records: {overall_metrics['total_records']}")
     print(f"  Matches: {overall_metrics['matches']}")
     print(f"  Accuracy Rate: {overall_metrics['accuracy_rate'] * 100:.2f}%")
-    print(f"  Match Rate %: {overall_metrics['match_rate_pct']}")
     print(f"  Average Confidence: {overall_metrics['avg_confidence']:.2f}")
+
+    # Confidence analysis for correct vs. incorrect predictions
+    print("\nConfidence Analysis by Correctness:")
+    for persona in personas:
+        mask = df['persona'] == persona
+        correct_mask = mask & (df['accuracy_rate'] == 1)
+        incorrect_mask = mask & (df['accuracy_rate'] == 0)
+        correct_conf = df['confidence_score'][correct_mask].mean() if correct_mask.sum() > 0 else 0.0
+        incorrect_conf = df['confidence_score'][incorrect_mask].mean() if incorrect_mask.sum() > 0 else 0.0
+        print(f"Persona '{persona}':")
+        print(f"  Avg Confidence (Correct): {correct_conf:.2f} (Count: {correct_mask.sum()})")
+        print(f"  Avg Confidence (Incorrect): {incorrect_conf:.2f} (Count: {incorrect_mask.sum()})")
 
     # Create summary DataFrame
     summary_df = pd.DataFrame(persona_metrics + [overall_metrics])
@@ -92,7 +99,7 @@ def compute_evaluation_outcomes(df):
     output_cols = [
         'userid', 'zip', 'plan_id', 'persona', 'predicted_persona'
     ] + weight_cols + [
-        'probability_ranking', 'confidence_score', 'correction_rate', 'overall_accuracy'
+        'probability_ranking', 'confidence_score', 'accuracy_rate', 'overall_accuracy'
     ]
     available_cols = [col for col in output_cols if col in df.columns]
     output_df = df[available_cols].copy()

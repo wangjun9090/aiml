@@ -185,14 +185,14 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
 
     # Define persona weights for weighted features
     persona_weights = {
-        'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
-        'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
-        'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'},
-        'dental': {'plan_col': 'ma_dental_benefit', 'query_col': 'query_dental', 'filter_col': 'filter_dental'},
-        'otc': {'plan_col': 'ma_otc', 'query_col': 'query_otc', 'filter_col': 'filter_otc'},
-        'transportation': {'plan_col': 'ma_transportation', 'query_col': 'query_transportation', 'filter_col': 'filter_transportation'},
-        'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp'},
-        'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp'}
+        'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count', 'interaction_col': None},
+        'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count', 'interaction_col': None},
+        'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'interaction_col': 'vision_interaction'},
+        'dental': {'plan_col': 'ma_dental_benefit', 'query_col': 'query_dental', 'filter_col': 'filter_dental', 'interaction_col': 'dental_interaction'},
+        'otc': {'plan_col': 'ma_otc', 'query_col': 'query_otc', 'filter_col': 'filter_otc', 'interaction_col': None},
+        'transportation': {'plan_col': 'ma_transportation', 'query_col': 'query_transportation', 'filter_col': 'filter_transportation', 'interaction_col': None},
+        'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp', 'interaction_col': 'csnp_interaction'},
+        'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp', 'interaction_col': None}
     }
 
     # Constants
@@ -205,6 +205,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         query_col = persona_info['query_col']
         filter_col = persona_info['filter_col']
         click_col = persona_info.get('click_col', None)
+        interaction_col = persona_info.get('interaction_col', None)
         
         # Compute base weight from plan features
         if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
@@ -233,18 +234,27 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         else:
             base_weight = 0
         
-        # Compute behavioral score
+        # Compute generic behavioral score
         pages_viewed = min(row.get('num_pages_viewed', 0), 3) if pd.notna(row.get('num_pages_viewed')) else 0
         query_value = row.get(query_col, 0) if pd.notna(row.get(query_col)) else 0
         filter_value = row.get(filter_col, 0) if pd.notna(row.get(filter_col)) else 0
         click_value = row.get(click_col, 0) if click_col and click_col in row and pd.notna(row.get(click_col)) else 0
+        interaction_value = row.get(interaction_col, 0) if interaction_col and pd.notna(row.get(interaction_col)) else 0
         
         query_coeff = k9 if persona == 'csnp' else k3
         filter_coeff = k10 if persona == 'csnp' else k4
-        click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
+        click_coefficient = k8 if click_col == 'pro_click_count' else k7 if click_col == 'dce_click_count' else 0
+        interaction_coeff = 1.0 if interaction_col else 0
         
-        behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
+        behavioral_score = (
+            query_coeff * query_value +
+            filter_coeff * filter_value +
+            k1 * pages_viewed +
+            click_coefficient * click_value +
+            interaction_coeff * interaction_value
+        )
         
+        # Generic behavioral adjustments
         has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
         has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
                      (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
@@ -253,37 +263,11 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         elif has_filters or has_clicks:
             behavioral_score += 0.4
         
-        # Persona-specific behavioral adjustments
-        if persona == 'doctor':
-            if click_value >= 1.5: behavioral_score += 0.5
-            elif click_value >= 0.5: behavioral_score += 0.25
-        elif persona == 'drug':
-            if click_value >= 5: behavioral_score += 0.5
-            elif click_value >= 2: behavioral_score += 0.25
-        elif persona == 'dental':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 0.7
-            elif signal_count >= 1: behavioral_score += 0.4
-            if row['quality_level'] == 'High': behavioral_score += 0.6
-            if row.get('dental_interaction', 0) > 0: behavioral_score += 0.4
-        elif persona == 'vision':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 1: behavioral_score += 0.6
-            if row['quality_level'] == 'High': behavioral_score += 0.6
-            if row.get('vision_interaction', 0) > 0: behavioral_score += 0.4
-        elif persona == 'csnp':
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 2: behavioral_score += 1.2
-            elif signal_count >= 1: behavioral_score += 0.8
-            if row.get('csnp_interaction', 0) > 0: behavioral_score += 1.2
-            if row.get('csnp_type_flag', 0) == 1: behavioral_score += 1.0
-            if row.get('csnp_drug_interaction', 0) > 0: behavioral_score += 0.8
-            if row.get('csnp_doctor_interaction', 0) > 0: behavioral_score += 0.6
-            if row['quality_level'] == 'High': behavioral_score += 1.5
-        elif persona in ['otc', 'transportation']:
-            signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-            if signal_count >= 1: behavioral_score += 0.5
-            if row['quality_level'] == 'High': behavioral_score += 0.5
+        # Quality-level adjustment
+        if row['quality_level'] == 'High':
+            behavioral_score += 0.5
+        elif row['quality_level'] == 'Medium':
+            behavioral_score += 0.2
         
         adjusted_weight = base_weight + behavioral_score
         return min(adjusted_weight, 3.5 if persona == 'csnp' else 1.2)
@@ -439,7 +423,7 @@ def evaluate_model(model, X, y_true, metadata):
         correct_mask = mask & (output_df['accuracy_rate'] == 1)
         incorrect_mask = mask & (output_df['accuracy_rate'] == 0)
         correct_conf = output_df['confidence_score'][correct_mask].mean() if correct_mask.sum() > 0 else 0.0
-        incorrect_conf = output_df['confusion_matrix'].mean() if incorrect_mask.sum() > 0 else 0.0
+        incorrect_conf = output_df['confidence_score'][incorrect_mask].mean() if incorrect_mask.sum() > 0 else 0.0
         print(f"Persona '{persona}':")
         print(f"  Avg Confidence (Correct): {correct_conf:.2f} (Count: {correct_mask.sum()})")
         print(f"  Avg Confidence (Incorrect): {incorrect_conf:.2f} (Count: {incorrect_mask.sum()})")

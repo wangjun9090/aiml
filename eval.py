@@ -26,6 +26,7 @@ def load_data(behavioral_path, plan_path):
         plan_df = pd.read_csv(plan_path)
         print(f"Behavioral data loaded: {len(behavioral_df)} rows")
         print(f"Plan data loaded: {len(plan_df)} rows")
+        print(f"Behavioral_df columns: {behavioral_df.columns.tolist()}")
         print(f"Plan_df columns: {plan_df.columns.tolist()}")
         return behavioral_df, plan_df
     except Exception as e:
@@ -33,7 +34,7 @@ def load_data(behavioral_path, plan_path):
         raise
 
 def normalize_persona(df):
-    """Normalize personas by splitting rows with multiple personas (e.g., 'csnp,dsnp') into separate rows."""
+    """Normalize personas for evaluation (split multiple personas into separate rows)."""
     new_rows = []
     for idx, row in df.iterrows():
         if pd.isna(row['persona']):
@@ -58,11 +59,17 @@ def normalize_persona(df):
     return pd.DataFrame(new_rows).reset_index(drop=True)
 
 def prepare_evaluation_features(behavioral_df, plan_df, model):
-    # Normalize personas and reset index
+    # Normalize personas for evaluation (to prepare y_true)
     behavioral_df = normalize_persona(behavioral_df)
     print(f"Rows after persona normalization: {len(behavioral_df)}")
 
-    # Merge behavioral and plan data, reset index to avoid misalignment
+    # Ensure 'zip' and 'plan_id' columns have the same data type (string)
+    behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
+    behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).fillna('')
+    plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
+    plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
+
+    # Merge behavioral and plan data
     training_df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
@@ -75,6 +82,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
     training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore').reset_index(drop=True)
 
+    # Define feature lists
     all_behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
         'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
@@ -94,6 +102,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
+    # Ensure all raw_plan_features and csnp_type exist
     for col in raw_plan_features + ['csnp_type']:
         if col not in training_df.columns:
             print(f"Warning: '{col}' not found in training_df. Filling with 0.")
@@ -101,11 +110,12 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         else:
             training_df[col] = training_df[col].fillna(0)
 
+    # Compute quality level
     filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
     query_cols = [col for col in training_df.columns if col.startswith('query_')]
 
     def assign_quality_level(row):
-        has_plan_id = pd.notna(row['plan_id'])
+        has_plan_id = pd.notna(row['plan_id']) and row['plan_id'] != ''
         has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
                      (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
         has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
@@ -120,15 +130,11 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         else:
             return 'Medium'
 
-    # Apply quality level and verify
     training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
     print(f"Columns after adding quality_level: {training_df.columns.tolist()}")
-    if 'quality_level' not in training_df.columns:
-        raise ValueError("quality_level column was not created successfully")
-
-    # Reset index after applying quality level
     training_df = training_df.reset_index(drop=True)
 
+    # Compute additional features
     additional_features = []
     training_df['csnp_interaction'] = training_df['csnp'] * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
@@ -175,15 +181,9 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
-    # Reset index after adding interaction features
     training_df = training_df.reset_index(drop=True)
 
-    high_quality_csnp = training_df[(training_df['quality_level'] == 'High') & (training_df['persona'] == 'csnp')]
-    print(f"Eval: High-quality csnp samples: {len(high_quality_csnp)}")
-    print(f"Eval: Non-zero csnp_interaction: {sum(high_quality_csnp['csnp_interaction'] > 0)}")
-    print(f"Eval: Non-zero csnp_drug_interaction: {sum(high_quality_csnp['csnp_drug_interaction'] > 0)}")
-    print(f"Eval: Non-zero csnp_doctor_interaction: {sum(high_quality_csnp['csnp_doctor_interaction'] > 0)}")
-
+    # Define persona weights for weighted features
     persona_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count'},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count'},
@@ -195,10 +195,10 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp'}
     }
 
-    # Updated constants
-    k1, k3, k4, k7, k8 = 0.15, 0.8, 0.7, 0.3, 0.4  # Adjusted to emphasize behavioral features
-    k9, k10 = 2.5, 2.3  # Adjusted to boost csnp signals
-    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 3.0, 7.0, 1.2, 1.8  # Adjusted to prioritize csnp and dsnp
+    # Constants
+    k1, k3, k4, k7, k8 = 0.15, 0.8, 0.7, 0.3, 0.4
+    k9, k10 = 2.5, 2.3
+    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 3.0, 7.0, 1.2, 1.8
 
     def calculate_persona_weight(row, persona_info, persona, plan_df):
         plan_col = persona_info['plan_col']
@@ -206,6 +206,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         filter_col = persona_info['filter_col']
         click_col = persona_info.get('click_col', None)
         
+        # Compute base weight from plan features
         if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
             base_weight = min(row[plan_col], 0.7 if persona == 'csnp' else 0.5)
             if persona == 'csnp' and row.get('csnp_type', 'N') == 'Y':
@@ -232,6 +233,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         else:
             base_weight = 0
         
+        # Compute behavioral score
         pages_viewed = min(row.get('num_pages_viewed', 0), 3) if pd.notna(row.get('num_pages_viewed')) else 0
         query_value = row.get(query_col, 0) if pd.notna(row.get(query_col)) else 0
         filter_value = row.get(filter_col, 0) if pd.notna(row.get(filter_col)) else 0
@@ -251,6 +253,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         elif has_filters or has_clicks:
             behavioral_score += 0.4
         
+        # Persona-specific behavioral adjustments
         if persona == 'doctor':
             if click_value >= 1.5: behavioral_score += 0.5
             elif click_value >= 0.5: behavioral_score += 0.25
@@ -261,12 +264,12 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 2: behavioral_score += 0.7
             elif signal_count >= 1: behavioral_score += 0.4
-            if 'quality_level' in row and row['quality_level'] == 'High': behavioral_score += 0.6
+            if row['quality_level'] == 'High': behavioral_score += 0.6
             if row.get('dental_interaction', 0) > 0: behavioral_score += 0.4
         elif persona == 'vision':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.6
-            if 'quality_level' in row and row['quality_level'] == 'High': behavioral_score += 0.6
+            if row['quality_level'] == 'High': behavioral_score += 0.6
             if row.get('vision_interaction', 0) > 0: behavioral_score += 0.4
         elif persona == 'csnp':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
@@ -276,64 +279,44 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
             if row.get('csnp_type_flag', 0) == 1: behavioral_score += 1.0
             if row.get('csnp_drug_interaction', 0) > 0: behavioral_score += 0.8
             if row.get('csnp_doctor_interaction', 0) > 0: behavioral_score += 0.6
-            if 'quality_level' in row and row['quality_level'] == 'High': behavioral_score += 1.5
+            if row['quality_level'] == 'High': behavioral_score += 1.5
         elif persona in ['otc', 'transportation']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.5
-            if 'quality_level' in row and row['quality_level'] == 'High': behavioral_score += 0.5
+            if row['quality_level'] == 'High': behavioral_score += 0.5
         
         adjusted_weight = base_weight + behavioral_score
-
-        if 'persona' in row and persona == row['persona']:
-            non_target_weights = [
-                min(row.get(info['plan_col'], 0), 0.5) * (
-                    W_CSNP_HIGH if p == 'csnp' and row.get('csnp_type', 'N') == 'Y' else
-                    W_CSNP_BASE if p == 'csnp' else
-                    W_DSNP_HIGH if p == 'dsnp' and row.get('dsnp_type', 'N') == 'Y' else
-                    W_DSNP_BASE if p == 'dsnp' else 1.0
-                ) + (
-                    k3 * (row.get(info['query_col'], 0) if pd.notna(row.get(info['query_col'])) else 0) +
-                    k4 * (row.get(info['filter_col'], 0) if pd.notna(row.get(info['filter_col'])) else 0) +
-                    k1 * pages_viewed +
-                    (k8 if p == 'doctor' else k7 if p == 'drug' else 0) * 
-                    (row.get(info.get('click_col'), 0) if 'click_col' in info and pd.notna(row.get(info.get('click_col'))) else 0) +
-                    (0.5 if p == 'doctor' and row.get(info.get('click_col', 'pro_click_count'), 0) >= 1.5 else 
-                     0.25 if p == 'doctor' and row.get(info.get('click_col', 'pro_click_count'), 0) >= 0.5 else 
-                     0.5 if p == 'drug' and row.get(info.get('click_col', 'dce_click_count'), 0) >= 5 else 
-                     0.25 if p == 'drug' and row.get(info.get('click_col', 'dce_click_count'), 0) >= 2 else 
-                     0.7 if p == 'dental' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 2 else 
-                     0.4 if p == 'dental' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 
-                     0.6 if p == 'vision' and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 
-                     0.5 if p in ['csnp', 'otc', 'transportation'] and sum([1 for val in [row.get(info['query_col'], 0), row.get(info['filter_col'], 0), pages_viewed] if val > 0]) >= 1 else 0)
-                )
-                for p, info in persona_weights.items()
-                if p != row['persona'] and info['plan_col'] in row and pd.notna(row.get(info['plan_col']))
-            ]
-            max_non_target = max(non_target_weights, default=0)
-            adjusted_weight = max(adjusted_weight, max_non_target + 0.2)
-        
         return min(adjusted_weight, 3.5 if persona == 'csnp' else 1.2)
 
+    # Compute weighted features
     print("Calculating persona weights...")
     for persona, info in persona_weights.items():
+        click_col = info.get('click_col', 'click_dummy')
+        if click_col not in training_df.columns:
+            training_df[click_col] = 0
         training_df[f'w_{persona}'] = training_df.apply(
             lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1
         )
-    training_df = training_df.reset_index(drop=True)
 
+    # Normalize weighted features
     weighted_features = [f'w_{persona}' for persona in persona_weights.keys()]
     weight_sum = training_df[weighted_features].sum(axis=1)
     for wf in weighted_features:
         training_df[wf] = training_df[wf] / weight_sum.where(weight_sum > 0, 1)
 
+    print(f"Weighted features added: {weighted_features}")
+    print("Sample weights:")
+    print(training_df[weighted_features].head())
+
+    # Define all feature columns expected by the model
     all_weighted_features = [f'w_{persona}' for persona in [
         'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
     ]]
-
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
 
     print(f"Feature columns expected: {feature_columns}")
 
+    # Check for missing features and fill with 0
     missing_features = [col for col in feature_columns if col not in training_df.columns]
     if missing_features:
         print(f"Warning: Missing features in training_df: {missing_features}")
@@ -342,7 +325,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
 
     print(f"Columns in training_df after filling: {training_df.columns.tolist()}")
 
-    # Ensure indices are aligned for filtering
+    # Filter valid personas
     training_df = training_df.reset_index(drop=True)
     valid_mask = (
         training_df['persona'].notna() & 
@@ -351,36 +334,24 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     print(f"Number of valid rows before filtering: {len(training_df)}")
     print(f"Number of True values in valid_mask: {valid_mask.sum()}")
     training_df = training_df.loc[valid_mask].reset_index(drop=True)
-    print(f"Rows after filtering fitness/hearing: {len(training_df)}")
-    print(f"Columns after filtering: {training_df.columns.tolist()}")
+    print(f"Rows after filtering invalid personas: {len(training_df)}")
 
-    # Verify quality_level is present
-    if 'quality_level' not in training_df.columns:
-        print("Warning: quality_level missing after filtering. Reapplying assign_quality_level.")
-        training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
-
-    # Filter to only include personas in model.classes_
+    # Filter to include only personas in model.classes_
     model_classes = set(model.classes_)
-    all_personas = set(training_df['persona'].dropna().unique())
-    invalid_personas = all_personas - model_classes
-    if invalid_personas:
-        print(f"Warning: Found personas in y_true not in model.classes_: {invalid_personas}")
-        print(f"Model classes: {model_classes}")
-        print(f"All personas in data: {all_personas}")
     valid_persona_mask = training_df['persona'].isin(model_classes)
     training_df = training_df.loc[valid_persona_mask].reset_index(drop=True)
     print(f"Rows after filtering for model classes: {len(training_df)}")
 
+    # Prepare features and metadata
     metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns
     available_columns = [col for col in metadata_columns if col in training_df.columns]
     metadata = training_df[available_columns]
     print(f"Metadata columns: {metadata.columns.tolist()}")
 
     X = training_df[feature_columns].fillna(0)
-    y_true = training_df['persona'] if 'persona' in training_df.columns else None
+    y_true = training_df['persona']
 
-    if y_true is not None:
-        print(f"Unique personas after filtering: {y_true.unique().tolist()}")
+    print(f"Unique personas after filtering: {y_true.unique().tolist()}")
 
     return X, y_true, metadata
 
@@ -405,94 +376,99 @@ def evaluate_model(model, X, y_true, metadata):
         predicted_persona = output_df.loc[i, 'predicted_persona']
         output_df.loc[i, 'confidence_score'] = probs[predicted_persona]
 
+    # Compute per-record accuracy_rate (binary)
+    output_df['accuracy_rate'] = (output_df['predicted_persona'] == output_df['persona']).astype(int)
+
     # Compute overall accuracy
     overall_accuracy = accuracy_score(y_true, y_pred)
     print(f"\nOverall Accuracy: {overall_accuracy * 100:.2f}%")
 
-    # Compute per-persona correction rates
-    print("\nPer-Persona Correction Rates:")
-    persona_correction_rates = {}
-    persona_counts = {}
-    for persona in personas:
-        mask = y_true == persona
-        persona_counts[persona] = mask.sum()
-        if mask.sum() > 0:
-            persona_accuracy = accuracy_score(y_true[mask], y_pred[mask])
-            persona_correction_rates[persona] = persona_accuracy
-            print(f"Correction Rate for '{persona}': {persona_accuracy * 100:.2f}% (Count: {mask.sum()})")
-        else:
-            persona_correction_rates[persona] = 0.0
-            print(f"Correction Rate for '{persona}': N/A (Count: 0)")
+    # Compute per-persona metrics
+    print("\nPer-Persona Metrics:")
+    persona_metrics = []
+    for persona in sorted(personas):
+        mask = output_df['persona'] == persona
+        count = mask.sum()
+        matches = output_df['accuracy_rate'][mask].sum()
+        accuracy = accuracy_score(output_df['persona'][mask], output_df['predicted_persona'][mask]) if count > 0 else 0.0
+        avg_confidence = output_df['confidence_score'][mask].mean() if count > 0 else 0.0
+        low_conf_correct = ((output_df['accuracy_rate'] == 1) & (output_df['confidence_score'] < 0.7) & mask).sum()
+        very_low_conf_correct = ((output_df['accuracy_rate'] == 1) & (output_df['confidence_score'] < 0.5) & mask).sum()
+        persona_metrics.append({
+            'persona': persona,
+            'total_records': count,
+            'matches': matches,
+            'accuracy_rate': round(accuracy, 2),
+            'avg_confidence': round(avg_confidence, 2)
+        })
+        print(f"Persona '{persona}':")
+        print(f"  Total Records: {count}")
+        print(f"  Matches: {matches}")
+        print(f"  Accuracy Rate: {accuracy * 100:.2f}%")
+        print(f"  Average Confidence: {avg_confidence:.2f}")
+        print(f"  Correct Predictions with Low Confidence (< 0.7): {low_conf_correct} ({low_conf_correct/matches*100:.2f}% of matches)")
+        print(f"  Correct Predictions with Very Low Confidence (< 0.5): {very_low_conf_correct} ({very_low_conf_correct/matches*100:.2f}% of matches)")
+        # Vision-specific diagnostics
+        if persona == 'vision':
+            print("\nDetailed Vision Records:")
+            vision_df = output_df[mask][['userid', 'persona', 'predicted_persona', 'confidence_score', 'accuracy_rate', 'probability_ranking', 'w_vision', 'query_vision', 'filter_vision', 'vision_interaction']]
+            print(vision_df.to_string(index=False))
 
-    # Compute correction rates by quality level
-    print("\nCorrection Rates by Quality Level:")
-    quality_correction_rates = {}
-    quality_counts = {}
-    if 'quality_level' in output_df.columns:
-        for quality in ['High', 'Medium', 'Low']:
-            mask = output_df['quality_level'] == quality
-            quality_counts[quality] = mask.sum()
-            if mask.sum() > 0:
-                y_true_quality = y_true[mask]
-                y_pred_quality = y_pred[mask]
-                quality_accuracy = accuracy_score(y_true_quality, y_pred_quality)
-                quality_correction_rates[quality] = quality_accuracy
-                print(f"{quality} Quality Correction Rate: {quality_accuracy * 100:.2f}% (Count: {mask.sum()})")
-                print(f"Individual Persona Correction Rates ({quality}):")
-                for persona in personas:
-                    persona_mask = y_true_quality == persona
-                    if persona_mask.sum() > 0:
-                        persona_accuracy = accuracy_score(y_true_quality[persona_mask], y_pred_quality[persona_mask])
-                        print(f"Correction Rate for '{persona}': {persona_accuracy * 100:.2f}% (Count: {persona_mask.sum()})")
-            else:
-                quality_correction_rates[quality] = 0.0
-                quality_counts[quality] = 0
-                print(f"{quality} Quality Correction Rate: N/A (Count: 0)")
-    else:
-        print("Warning: 'quality_level' column missing in output_df. Skipping quality-level analysis.")
-        for quality in ['High', 'Medium', 'Low']:
-            quality_correction_rates[quality] = 0.0
-            quality_counts[quality] = 0
+    # Overall metrics
+    overall_metrics = {
+        'persona': 'Overall',
+        'total_records': len(output_df),
+        'matches': output_df['accuracy_rate'].sum(),
+        'accuracy_rate': round(overall_accuracy, 2),
+        'avg_confidence': round(output_df['confidence_score'].mean(), 2)
+    }
+    low_conf_correct_overall = ((output_df['accuracy_rate'] == 1) & (output_df['confidence_score'] < 0.7)).sum()
+    very_low_conf_correct_overall = ((output_df['accuracy_rate'] == 1) & (output_df['confidence_score'] < 0.5)).sum()
+    print("\nOverall Metrics:")
+    print(f"  Total Records: {overall_metrics['total_records']}")
+    print(f"  Matches: {overall_metrics['matches']}")
+    print(f"  Accuracy Rate: {overall_metrics['accuracy_rate'] * 100:.2f}%")
+    print(f"  Average Confidence: {overall_metrics['avg_confidence']:.2f}")
+    print(f"  Correct Predictions with Low Confidence (< 0.7): {low_conf_correct_overall} ({low_conf_correct_overall/overall_metrics['matches']*100:.2f}% of matches)")
+    print(f"  Correct Predictions with Very Low Confidence (< 0.5): {very_low_conf_correct_overall} ({very_low_conf_correct_overall/overall_metrics['matches']*100:.2f}% of matches)")
 
-    # Compute top-2 accuracy
+    # Confidence analysis by correctness
+    print("\nConfidence Analysis by Correctness:")
+    for persona in sorted(personas):
+        mask = output_df['persona'] == persona
+        correct_mask = mask & (output_df['accuracy_rate'] == 1)
+        incorrect_mask = mask & (output_df['accuracy_rate'] == 0)
+        correct_conf = output_df['confidence_score'][correct_mask].mean() if correct_mask.sum() > 0 else 0.0
+        incorrect_conf = output_df['confusion_matrix'].mean() if incorrect_mask.sum() > 0 else 0.0
+        print(f"Persona '{persona}':")
+        print(f"  Avg Confidence (Correct): {correct_conf:.2f} (Count: {correct_mask.sum()})")
+        print(f"  Avg Confidence (Incorrect): {incorrect_conf:.2f} (Count: {incorrect_mask.sum()})")
+
+    # Top-2 accuracy
     top_2_accuracy = top_k_accuracy_score(y_true, y_pred_proba, k=2, labels=personas)
-    print(f"\nTop-2 Correction Rate: {top_2_accuracy * 100:.2f}%")
+    print(f"\nTop-2 Accuracy: {top_2_accuracy * 100:.2f}%")
 
     # Confusion matrix
     cm = confusion_matrix(y_true, y_pred, labels=personas)
     cm_df = pd.DataFrame(cm, index=personas, columns=personas)
-    print("\nConfusion Matrix (Overall, valid personas only):")
+    print("\nConfusion Matrix:")
     print(cm_df)
 
     # Classification report
     print("\nClassification Report:")
     print(classification_report(y_true, y_pred, labels=personas, target_names=personas))
 
-    # Add metrics to output dataframe
-    output_df['overall_accuracy'] = overall_accuracy
-    output_df['persona_correction_rates'] = '; '.join([f"{p}: {persona_correction_rates[p]:.4f}" for p in personas])
-    for quality in ['High', 'Medium', 'Low']:
-        output_df[f'{quality.lower()}_quality_correction_rate'] = quality_correction_rates.get(quality, 0.0)
-    output_df['top_2_accuracy'] = top_2_accuracy
-
-    # Create summary evaluation output
-    summary_data = {
-        'overall_accuracy': overall_accuracy,
-        'top_2_accuracy': top_2_accuracy,
-        'persona_correction_rates': '; '.join([f"{p}: {persona_correction_rates[p]:.4f}" for p in personas]),
-    }
-    for persona in personas:
-        summary_data[f'{persona}_correction_rate'] = persona_correction_rates[persona]
-        summary_data[f'{persona}_count'] = persona_counts[persona]
-    for quality in ['High', 'Medium', 'Low']:
-        summary_data[f'{quality.lower()}_quality_correction_rate'] = quality_correction_rates.get(quality, 0.0)
-        summary_data[f'{quality.lower()}_quality_count'] = quality_counts.get(quality, 0)
-    
-    summary_df = pd.DataFrame([summary_data])
+    # Create summary DataFrame
+    summary_data = persona_metrics + [overall_metrics]
+    summary_df = pd.DataFrame(summary_data)
     summary_df.to_csv(SUMMARY_FILE, index=False)
     print(f"\nSummary evaluation results saved to {SUMMARY_FILE}")
 
-    # Save detailed evaluation results to DBFS
+    # Add overall metrics to output_df
+    output_df['overall_accuracy'] = overall_accuracy
+    output_df['top_2_accuracy'] = top_2_accuracy
+
+    # Save detailed results
     output_df.to_csv(OUTPUT_FILE, index=False)
     print(f"\nDetailed evaluation results saved to {OUTPUT_FILE}")
 

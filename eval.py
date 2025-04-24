@@ -6,7 +6,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 # Hardcoded file paths for Databricks
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-0.0.3.pkl'  # Updated model
+MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-0.0.3.pkl'
 OUTPUT_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_results_0401_2025_0420_2025.csv'
 SUMMARY_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_summary_0401_2025_0420_2025.csv'
 
@@ -15,6 +15,7 @@ def load_model(model_path):
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
         print(f"Model loaded from {model_path}")
+        print(f"Model classes: {model.classes_}")
         return model
     except Exception as e:
         print(f"Error loading model: {e}")
@@ -28,6 +29,7 @@ def load_data(behavioral_path, plan_path):
         print(f"Plan data loaded: {len(plan_df)} rows")
         print(f"Behavioral_df columns: {behavioral_df.columns.tolist()}")
         print(f"Plan_df columns: {plan_df.columns.tolist()}")
+        print(f"Unique personas in behavioral_df: {behavioral_df['persona'].unique().tolist()}")
         return behavioral_df, plan_df
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -38,9 +40,14 @@ def normalize_persona(df):
     new_rows = []
     for idx, row in df.iterrows():
         if pd.isna(row['persona']):
+            print(f"Warning: NaN persona at index {idx}")
             new_rows.append(row)
             continue
         personas = [p.strip().lower() for p in str(row['persona']).split(',')]
+        if not personas or personas[0] == '':
+            print(f"Warning: Empty persona at index {idx}")
+            new_rows.append(row)
+            continue
         if 'dsnp' in personas or 'csnp' in personas:
             first_row = row.copy()
             first_persona = personas[0]
@@ -53,15 +60,16 @@ def normalize_persona(df):
             new_rows.append(second_row)
         else:
             row_copy = row.copy()
-            first_persona = personas[0]
-            row_copy['persona'] = first_persona
+            row_copy['persona'] = personas[0]
             new_rows.append(row_copy)
-    return pd.DataFrame(new_rows).reset_index(drop=True)
+    normalized_df = pd.DataFrame(new_rows).reset_index(drop=True)
+    print(f"Rows after persona normalization: {len(normalized_df)}")
+    print(f"Unique personas after normalization: {normalized_df['persona'].unique().tolist()}")
+    return normalized_df
 
 def prepare_evaluation_features(behavioral_df, plan_df, model):
     # Normalize personas for evaluation (to prepare y_true)
     behavioral_df = normalize_persona(behavioral_df)
-    print(f"Rows after persona normalization: {len(behavioral_df)}")
 
     # Ensure 'zip' and 'plan_id' columns have the same data type (string)
     behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
@@ -349,12 +357,23 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     print(f"Number of True values in valid_mask: {valid_mask.sum()}")
     training_df = training_df.loc[valid_mask].reset_index(drop=True)
     print(f"Rows after filtering invalid personas: {len(training_df)}")
+    print(f"Unique personas after valid filter: {training_df['persona'].unique().tolist()}")
 
     # Filter to include only personas in model.classes_
     model_classes = set(model.classes_)
     valid_persona_mask = training_df['persona'].isin(model_classes)
+    print(f"Model classes: {model_classes}")
+    print(f"Number of rows matching model classes: {valid_persona_mask.sum()}")
     training_df = training_df.loc[valid_persona_mask].reset_index(drop=True)
     print(f"Rows after filtering for model classes: {len(training_df)}")
+    print(f"Unique personas after model classes filter: {training_df['persona'].unique().tolist()}")
+
+    # Check if training_df is empty
+    if len(training_df) == 0:
+        print("Error: No valid data remains after filtering. Check persona values and model classes.")
+        print(f"Behavioral_df personas: {behavioral_df['persona'].unique().tolist()}")
+        print(f"Model classes: {model_classes}")
+        return None, None, None
 
     # Prepare features and metadata
     metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns
@@ -365,11 +384,16 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     X = training_df[feature_columns].fillna(0)
     y_true = training_df['persona']
 
-    print(f"Unique personas after filtering: {y_true.unique().tolist()}")
+    print(f"Shape of X: {X.shape}")
+    print(f"Unique personas in y_true: {y_true.unique().tolist()}")
 
     return X, y_true, metadata
 
 def evaluate_model(model, X, y_true, metadata):
+    if X is None or y_true is None or len(X) == 0:
+        print("Cannot evaluate model: No valid data provided.")
+        return None
+
     # Predict probabilities and labels
     y_pred_proba = model.predict_proba(X)
     personas = model.classes_
@@ -529,10 +553,10 @@ def main():
     model = load_model(MODEL_FILE)
     behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
     X, y_true, metadata = prepare_evaluation_features(behavioral_df, plan_df, model)
-    if y_true is not None:
+    if X is not None and y_true is not None:
         evaluate_model(model, X, y_true, metadata)
     else:
-        print("No ground truth labels available for evaluation.")
+        print("No ground truth labels or valid data available for evaluation.")
 
 if __name__ == "__main__":
     main()

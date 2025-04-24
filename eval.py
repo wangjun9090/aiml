@@ -36,17 +36,15 @@ def load_data(behavioral_path, plan_path):
         raise
 
 def normalize_persona(df):
-    """Normalize personas for evaluation (split multiple personas into separate rows)."""
+    """Normalize personas for ground truth evaluation (split multiple personas into separate rows)."""
     new_rows = []
     for idx, row in df.iterrows():
         if pd.isna(row['persona']):
             print(f"Warning: NaN persona at index {idx}")
-            new_rows.append(row)
-            continue
+            continue  # Skip rows with NaN persona for evaluation
         personas = [p.strip().lower() for p in str(row['persona']).split(',')]
         if not personas or personas[0] == '':
             print(f"Warning: Empty persona at index {idx}")
-            new_rows.append(row)
             continue
         if 'dsnp' in personas or 'csnp' in personas:
             first_row = row.copy()
@@ -68,17 +66,17 @@ def normalize_persona(df):
     return normalized_df
 
 def prepare_evaluation_features(behavioral_df, plan_df, model):
-    # Normalize personas for evaluation (to prepare y_true)
-    behavioral_df = normalize_persona(behavioral_df)
+    # Keep original behavioral_df for feature engineering (no persona filtering)
+    feature_df = behavioral_df.copy()
 
     # Ensure 'zip' and 'plan_id' columns have the same data type (string)
-    behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
-    behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).fillna('')
+    feature_df['zip'] = feature_df['zip'].astype(str).fillna('')
+    feature_df['plan_id'] = feature_df['plan_id'].astype(str).fillna('')
     plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
     plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
 
     # Merge behavioral and plan data
-    training_df = behavioral_df.merge(
+    training_df = feature_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
         on=['zip', 'plan_id'],
@@ -86,6 +84,12 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     ).reset_index(drop=True)
     print(f"Rows after merge: {len(training_df)}")
     print("Columns after merge:", training_df.columns.tolist())
+
+    if len(training_df) == 0:
+        print("Error: Merge resulted in empty DataFrame. Check zip/plan_id compatibility.")
+        print(f"Behavioral_df zip/plan_id sample: {feature_df[['zip', 'plan_id']].head().to_string()}")
+        print(f"Plan_df zip/plan_id sample: {plan_df[['zip', 'plan_id']].head().to_string()}")
+        return None, None, None
 
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
     training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore').reset_index(drop=True)
@@ -142,7 +146,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     print(f"Columns after adding quality_level: {training_df.columns.tolist()}")
     training_df = training_df.reset_index(drop=True)
 
-    # Compute additional features
+    # Compute additional features (persona-agnostic)
     additional_features = []
     training_df['csnp_interaction'] = training_df['csnp'] * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
@@ -189,7 +193,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
-    # New persona-specific signal features
+    # New persona-agnostic signal features
     training_df['vision_signal'] = (
         training_df['query_vision'].fillna(0) +
         training_df['filter_vision'].fillna(0) +
@@ -214,8 +218,8 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
 
     training_df = training_df.reset_index(drop=True)
 
-    # Define persona weights for weighted features
-    persona_weights = {
+    # Define feature weights for weighted features (persona-agnostic)
+    feature_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count', 'interaction_col': None},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count', 'interaction_col': None},
         'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'interaction_col': 'vision_interaction'},
@@ -226,40 +230,35 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp', 'interaction_col': None}
     }
 
-    # Constants
+    # Constants (generic, not persona-specific)
     k1, k3, k4, k7, k8 = 0.15, 0.8, 0.7, 0.3, 0.4
     k9, k10 = 2.5, 2.3
-    W_CSNP_BASE, W_CSNP_HIGH, W_DSNP_BASE, W_DSNP_HIGH = 3.0, 7.0, 1.2, 1.8
+    W_BASE, W_HIGH = 1.5, 3.0
 
-    def calculate_persona_weight(row, persona_info, persona, plan_df):
-        plan_col = persona_info['plan_col']
-        query_col = persona_info['query_col']
-        filter_col = persona_info['filter_col']
-        click_col = persona_info.get('click_col', None)
-        interaction_col = persona_info.get('interaction_col', None)
+    def calculate_feature_weight(row, feature_info, plan_df):
+        plan_col = feature_info['plan_col']
+        query_col = feature_info['query_col']
+        filter_col = feature_info['filter_col']
+        click_col = feature_info.get('click_col', None)
+        interaction_col = feature_info.get('interaction_col', None)
         
-        # Compute base weight from plan features
+        # Compute base weight from plan features (persona-agnostic)
         if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
-            base_weight = min(row[plan_col], 0.7 if persona == 'csnp' else 0.5)
-            if persona == 'csnp' and row.get('csnp_type', 'N') == 'Y':
-                base_weight *= W_CSNP_HIGH
-            elif persona == 'csnp':
-                base_weight *= W_CSNP_BASE
-            elif persona == 'dsnp' and row.get('dsnp_type', 'N') == 'Y':
-                base_weight *= W_DSNP_HIGH
-            elif persona == 'dsnp':
-                base_weight *= W_DSNP_BASE
+            base_weight = min(row[plan_col], 0.5)
+            if plan_col in ['csnp', 'dsnp'] and row.get('csnp_type', 'N') == 'Y':
+                base_weight *= W_HIGH
+            else:
+                base_weight *= W_BASE
         elif pd.notna(row.get('compared_plan_ids')) and isinstance(row['compared_plan_ids'], str) and row.get('num_plans_compared', 0) > 0:
             compared_ids = row['compared_plan_ids'].split(',')
             compared_plans = plan_df[plan_df['plan_id'].isin(compared_ids) & (plan_df['zip'] == row['zip'])]
             if not compared_plans.empty and plan_col in compared_plans.columns:
-                base_weight = min(compared_plans[plan_col].mean(), 0.7 if persona == 'csnp' else 0.5)
-                if persona == 'csnp' and 'csnp_type' in compared_plans.columns:
-                    csnp_type_y_ratio = (compared_plans['csnp_type'] == 'Y').mean()
-                    base_weight *= (W_CSNP_BASE + (W_CSNP_HIGH - W_CSNP_BASE) * csnp_type_y_ratio)
-                elif persona == 'dsnp' and 'dsnp_type' in compared_plans.columns:
-                    dsnp_type_y_ratio = (compared_plans['dsnp_type'] == 'Y').mean()
-                    base_weight *= (W_DSNP_BASE + (W_DSNP_HIGH - W_DSNP_BASE) * dsnp_type_y_ratio)
+                base_weight = min(compared_plans[plan_col].mean(), 0.5)
+                if plan_col in ['csnp', 'dsnp'] and 'csnp_type' in compared_plans.columns:
+                    type_y_ratio = (compared_plans['csnp_type'] == 'Y').mean()
+                    base_weight *= (W_BASE + (W_HIGH - W_BASE) * type_y_ratio)
+                else:
+                    base_weight *= W_BASE
             else:
                 base_weight = 0
         else:
@@ -272,10 +271,10 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         click_value = row.get(click_col, 0) if click_col and click_col in row and pd.notna(row.get(click_col)) else 0
         interaction_value = row.get(interaction_col, 0) if interaction_col and pd.notna(row.get(interaction_col)) else 0
         
-        query_coeff = k9 if persona == 'csnp' else k3
-        filter_coeff = k10 if persona == 'csnp' else k4
+        query_coeff = k9 if 'csnp' in query_col else k3
+        filter_coeff = k10 if 'csnp' in filter_col else k4
         click_coefficient = k8 if click_col == 'pro_click_count' else k7 if click_col == 'dce_click_count' else 0
-        interaction_coeff = 1.5 if interaction_col in ['vision_interaction', 'dental_interaction', 'csnp_interaction'] else 1.0
+        interaction_coeff = 1.5 if interaction_col and 'interaction' in interaction_col else 1.0
         
         behavioral_score = (
             query_coeff * query_value +
@@ -307,20 +306,20 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
             behavioral_score += 0.2
         
         adjusted_weight = base_weight + behavioral_score
-        return min(adjusted_weight, 3.5 if persona == 'csnp' else 1.2)
+        return min(adjusted_weight, 1.2)
 
     # Compute weighted features
-    print("Calculating persona weights...")
-    for persona, info in persona_weights.items():
+    print("Calculating feature weights...")
+    for feature, info in feature_weights.items():
         click_col = info.get('click_col', 'click_dummy')
         if click_col not in training_df.columns:
             training_df[click_col] = 0
-        training_df[f'w_{persona}'] = training_df.apply(
-            lambda row: calculate_persona_weight(row, info, persona, plan_df), axis=1
+        training_df[f'w_{feature}'] = training_df.apply(
+            lambda row: calculate_feature_weight(row, info, plan_df), axis=1
         )
 
     # Normalize weighted features
-    weighted_features = [f'w_{persona}' for persona in persona_weights.keys()]
+    weighted_features = [f'w_{feature}' for feature in feature_weights.keys()]
     weight_sum = training_df[weighted_features].sum(axis=1)
     for wf in weighted_features:
         training_df[wf] = training_df[wf] / weight_sum.where(weight_sum > 0, 1)
@@ -331,7 +330,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     print(training_df[weighted_features].head())
 
     # Define all feature columns expected by the model
-    all_weighted_features = [f'w_{persona}' for persona in [
+    all_weighted_features = [f'w_{feature}' for feature in [
         'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
     ]]
     feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
@@ -347,32 +346,29 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
 
     print(f"Columns in training_df after filling: {training_df.columns.tolist()}")
 
-    # Filter valid personas
-    training_df = training_df.reset_index(drop=True)
-    valid_mask = (
-        training_df['persona'].notna() & 
-        (~training_df['persona'].str.lower().isin(['unknown', 'none', 'healthcare', 'fitness', 'hearing']))
-    )
-    print(f"Number of valid rows before filtering: {len(training_df)}")
-    print(f"Number of True values in valid_mask: {valid_mask.sum()}")
-    training_df = training_df.loc[valid_mask].reset_index(drop=True)
-    print(f"Rows after filtering invalid personas: {len(training_df)}")
-    print(f"Unique personas after valid filter: {training_df['persona'].unique().tolist()}")
-
-    # Filter to include only personas in model.classes_
+    # Prepare ground truth using persona column
+    ground_truth_df = normalize_persona(behavioral_df)
+    # Filter ground truth to match model classes
     model_classes = set(model.classes_)
-    valid_persona_mask = training_df['persona'].isin(model_classes)
-    print(f"Model classes: {model_classes}")
-    print(f"Number of rows matching model classes: {valid_persona_mask.sum()}")
-    training_df = training_df.loc[valid_persona_mask].reset_index(drop=True)
-    print(f"Rows after filtering for model classes: {len(training_df)}")
-    print(f"Unique personas after model classes filter: {training_df['persona'].unique().tolist()}")
+    valid_ground_truth = ground_truth_df[ground_truth_df['persona'].isin(model_classes)].reset_index(drop=True)
+    print(f"Rows in valid ground truth: {len(valid_ground_truth)}")
+    print(f"Unique personas in ground truth: {valid_ground_truth['persona'].unique().tolist()}")
 
-    # Check if training_df is empty
-    if len(training_df) == 0:
-        print("Error: No valid data remains after filtering. Check persona values and model classes.")
-        print(f"Behavioral_df personas: {behavioral_df['persona'].unique().tolist()}")
+    if len(valid_ground_truth) == 0:
+        print("Error: No valid ground truth personas match model classes.")
         print(f"Model classes: {model_classes}")
+        return None, None, None
+
+    # Align feature_df with ground_truth_df using userid, zip, plan_id
+    training_df = training_df.merge(
+        valid_ground_truth[['userid', 'zip', 'plan_id', 'persona']],
+        how='inner',
+        on=['userid', 'zip', 'plan_id']
+    ).reset_index(drop=True)
+    print(f"Rows after aligning with ground truth: {len(training_df)}")
+
+    if len(training_df) == 0:
+        print("Error: No data remains after aligning with ground truth. Check userid/zip/plan_id compatibility.")
         return None, None, None
 
     # Prepare features and metadata
@@ -414,7 +410,7 @@ def evaluate_model(model, X, y_true, metadata):
         predicted_persona = output_df.loc[i, 'predicted_persona']
         output_df.loc[i, 'confidence_score'] = probs[predicted_persona]
 
-    # Compute per-record accuracy_rate (binary)
+    # Compute per-record accuracy_rate
     output_df['accuracy_rate'] = (output_df['predicted_persona'] == output_df['persona']).astype(int)
 
     # Compute overall accuracy
@@ -460,7 +456,7 @@ def evaluate_model(model, X, y_true, metadata):
                 cols.append('csnp_interaction')
                 cols.append('csnp_specific_signal')
             persona_df = output_df[mask][cols]
-            print(persona_df.to_string(index=False))
+            print(persona_df.head().to_string(index=False))
 
     # Overall metrics
     overall_metrics = {
@@ -556,7 +552,7 @@ def main():
     if X is not None and y_true is not None:
         evaluate_model(model, X, y_true, metadata)
     else:
-        print("No ground truth labels or valid data available for evaluation.")
+        print("No valid data or ground truth available for evaluation.")
 
 if __name__ == "__main__":
     main()

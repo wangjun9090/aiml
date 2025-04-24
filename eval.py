@@ -2,23 +2,38 @@ import pandas as pd
 import numpy as np
 import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, top_k_accuracy_score
+from sklearn.preprocessing import LabelEncoder
 
 # Hardcoded file paths for Databricks
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-0.0.3.pkl'
+LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder.pkl'  # New
 OUTPUT_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_results_0401_2025_0420_2025.csv'
 SUMMARY_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_summary_0401_2025_0420_2025.csv'
 
-def load_model(model_path):
+def load_model_and_encoder(model_path, encoder_path):
     try:
         with open(model_path, 'rb') as f:
             model = pickle.load(f)
         print(f"Model loaded from {model_path}")
         print(f"Model classes: {model.classes_}")
-        return model
+        
+        try:
+            with open(encoder_path, 'rb') as f:
+                le = pickle.load(f)
+            print(f"Label encoder loaded from {encoder_path}")
+            print(f"Label encoder classes: {le.classes_}")
+        except FileNotFoundError:
+            print(f"Warning: Label encoder file {encoder_path} not found. Using default persona mapping.")
+            # Default mapping based on expected personas
+            le = LabelEncoder()
+            le.classes_ = np.array(['csnp', 'dental', 'doctor', 'drug', 'dsnp', 'vision'])
+            print(f"Default label encoder classes: {le.classes_}")
+        
+        return model, le
     except Exception as e:
-        print(f"Error loading model: {e}")
+        print(f"Error loading model or encoder: {e}")
         raise
 
 def load_data(behavioral_path, plan_path):
@@ -41,7 +56,7 @@ def normalize_persona(df):
     for idx, row in df.iterrows():
         if pd.isna(row['persona']):
             print(f"Warning: NaN persona at index {idx}")
-            continue  # Skip rows with NaN persona for evaluation
+            continue
         personas = [p.strip().lower() for p in str(row['persona']).split(',')]
         if not personas or personas[0] == '':
             print(f"Warning: Empty persona at index {idx}")
@@ -65,17 +80,14 @@ def normalize_persona(df):
     print(f"Unique personas after normalization: {normalized_df['persona'].unique().tolist()}")
     return normalized_df
 
-def prepare_evaluation_features(behavioral_df, plan_df, model):
-    # Keep original behavioral_df for feature engineering (no persona filtering)
+def prepare_evaluation_features(behavioral_df, plan_df, model, le):
     feature_df = behavioral_df.copy()
 
-    # Ensure 'zip' and 'plan_id' columns have the same data type (string)
     feature_df['zip'] = feature_df['zip'].astype(str).fillna('')
     feature_df['plan_id'] = feature_df['plan_id'].astype(str).fillna('')
     plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
     plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
 
-    # Merge behavioral and plan data
     training_df = feature_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left',
@@ -94,7 +106,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
     training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore').reset_index(drop=True)
 
-    # Define feature lists
     all_behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider', 'query_vision',
         'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation', 'filter_otc', 'filter_drug',
@@ -114,7 +125,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         'ma_provider_network', 'ma_drug_coverage'
     ]
 
-    # Ensure all raw_plan_features and csnp_type exist
     for col in raw_plan_features + ['csnp_type']:
         if col not in training_df.columns:
             print(f"Warning: '{col}' not found in training_df. Filling with 0.")
@@ -122,7 +132,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         else:
             training_df[col] = training_df[col].fillna(0)
 
-    # Compute quality level
     filter_cols = [col for col in training_df.columns if col.startswith('filter_')]
     query_cols = [col for col in training_df.columns if col.startswith('query_')]
 
@@ -146,7 +155,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     print(f"Columns after adding quality_level: {training_df.columns.tolist()}")
     training_df = training_df.reset_index(drop=True)
 
-    # Compute additional features (persona-agnostic)
     additional_features = []
     training_df['csnp_interaction'] = training_df['csnp'] * (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
@@ -193,7 +201,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
-    # New persona-agnostic signal features
     training_df['vision_signal'] = (
         training_df['query_vision'].fillna(0) +
         training_df['filter_vision'].fillna(0) +
@@ -218,7 +225,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
 
     training_df = training_df.reset_index(drop=True)
 
-    # Define feature weights for weighted features (persona-agnostic)
     feature_weights = {
         'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'pro_click_count', 'interaction_col': None},
         'drug': {'plan_col': 'ma_drug_coverage', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'dce_click_count', 'interaction_col': None},
@@ -230,7 +236,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp', 'interaction_col': None}
     }
 
-    # Constants (generic, not persona-specific)
     k1, k3, k4, k7, k8 = 0.15, 0.8, 0.7, 0.3, 0.4
     k9, k10 = 2.5, 2.3
     W_BASE, W_HIGH = 1.5, 3.0
@@ -242,7 +247,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         click_col = feature_info.get('click_col', None)
         interaction_col = feature_info.get('interaction_col', None)
         
-        # Compute base weight from plan features (persona-agnostic)
         if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
             base_weight = min(row[plan_col], 0.5)
             if plan_col in ['csnp', 'dsnp'] and row.get('csnp_type', 'N') == 'Y':
@@ -264,7 +268,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         else:
             base_weight = 0
         
-        # Compute generic behavioral score
         pages_viewed = min(row.get('num_pages_viewed', 0), 3) if pd.notna(row.get('num_pages_viewed')) else 0
         query_value = row.get(query_col, 0) if pd.notna(row.get(query_col)) else 0
         filter_value = row.get(filter_col, 0) if pd.notna(row.get(filter_col)) else 0
@@ -284,7 +287,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
             interaction_coeff * interaction_value
         )
         
-        # Generic behavioral adjustments
         has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
         has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
                      (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
@@ -299,7 +301,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         elif has_filters or has_clicks:
             behavioral_score += 0.4
         
-        # Quality-level adjustment
         if row['quality_level'] == 'High':
             behavioral_score += 0.5
         elif row['quality_level'] == 'Medium':
@@ -308,7 +309,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         adjusted_weight = base_weight + behavioral_score
         return min(adjusted_weight, 1.2)
 
-    # Compute weighted features
     print("Calculating feature weights...")
     for feature, info in feature_weights.items():
         click_col = info.get('click_col', 'click_dummy')
@@ -318,7 +318,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
             lambda row: calculate_feature_weight(row, info, plan_df), axis=1
         )
 
-    # Normalize weighted features
     weighted_features = [f'w_{feature}' for feature in feature_weights.keys()]
     weight_sum = training_df[weighted_features].sum(axis=1)
     for wf in weighted_features:
@@ -329,7 +328,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     print("Sample weights:")
     print(training_df[weighted_features].head())
 
-    # Define all feature columns expected by the model
     all_weighted_features = [f'w_{feature}' for feature in [
         'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
     ]]
@@ -337,7 +335,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
 
     print(f"Feature columns expected: {feature_columns}")
 
-    # Check for missing features and fill with 0
     missing_features = [col for col in feature_columns if col not in training_df.columns]
     if missing_features:
         print(f"Warning: Missing features in training_df: {missing_features}")
@@ -348,20 +345,26 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
 
     # Prepare ground truth using persona column
     ground_truth_df = normalize_persona(behavioral_df)
-    # Filter ground truth to match model classes
-    model_classes = set(model.classes_)
-    valid_ground_truth = ground_truth_df[ground_truth_df['persona'].isin(model_classes)].reset_index(drop=True)
+    # Encode ground truth personas
+    valid_personas = [p for p in ground_truth_df['persona'].unique() if p in le.classes_]
+    print(f"Valid personas for encoding: {valid_personas}")
+    valid_ground_truth = ground_truth_df[ground_truth_df['persona'].isin(valid_personas)].reset_index(drop=True)
     print(f"Rows in valid ground truth: {len(valid_ground_truth)}")
     print(f"Unique personas in ground truth: {valid_ground_truth['persona'].unique().tolist()}")
 
     if len(valid_ground_truth) == 0:
-        print("Error: No valid ground truth personas match model classes.")
-        print(f"Model classes: {model_classes}")
+        print("Error: No valid ground truth personas match label encoder classes.")
+        print(f"Label encoder classes: {le.classes_}")
         return None, None, None
+
+    # Encode y_true
+    y_true = le.transform(valid_ground_truth['persona'])
+    valid_ground_truth['persona_encoded'] = y_true
+    print(f"Encoded ground truth personas: {valid_ground_truth['persona_encoded'].unique().tolist()}")
 
     # Align feature_df with ground_truth_df using userid, zip, plan_id
     training_df = training_df.merge(
-        valid_ground_truth[['userid', 'zip', 'plan_id', 'persona']],
+        valid_ground_truth[['userid', 'zip', 'plan_id', 'persona', 'persona_encoded']],
         how='inner',
         on=['userid', 'zip', 'plan_id']
     ).reset_index(drop=True)
@@ -372,33 +375,38 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         return None, None, None
 
     # Prepare features and metadata
-    metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns
+    metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'persona_encoded', 'quality_level'] + feature_columns
     available_columns = [col for col in metadata_columns if col in training_df.columns]
     metadata = training_df[available_columns]
     print(f"Metadata columns: {metadata.columns.tolist()}")
 
     X = training_df[feature_columns].fillna(0)
-    y_true = training_df['persona']
+    y_true = training_df['persona_encoded']
 
     print(f"Shape of X: {X.shape}")
-    print(f"Unique personas in y_true: {y_true.unique().tolist()}")
+    print(f"Unique encoded personas in y_true: {y_true.unique().tolist()}")
 
-    return X, y_true, metadata
+    return X, y_true, metadata, le
 
-def evaluate_model(model, X, y_true, metadata):
+def evaluate_model(model, X, y_true, metadata, le):
     if X is None or y_true is None or len(X) == 0:
         print("Cannot evaluate model: No valid data provided.")
         return None
 
     # Predict probabilities and labels
     y_pred_proba = model.predict_proba(X)
-    personas = model.classes_
-    proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
     y_pred = model.predict(X)
+
+    # Decode predictions and ground truth back to string personas
+    personas = le.inverse_transform(model.classes_)
+    proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
+    y_pred_str = le.inverse_transform(y_pred)
+    y_true_str = le.inverse_transform(y_true)
 
     # Combine metadata with predictions
     output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
-    output_df['predicted_persona'] = y_pred
+    output_df['predicted_persona'] = y_pred_str
+    output_df['persona'] = y_true_str  # Update persona to string labels
 
     # Add probability ranking and confidence score
     output_df['probability_ranking'] = ''
@@ -442,7 +450,6 @@ def evaluate_model(model, X, y_true, metadata):
         print(f"  Average Confidence: {avg_confidence:.2f}")
         print(f"  Correct Predictions with Low Confidence (< 0.7): {low_conf_correct} ({low_conf_correct/matches*100:.2f}% of matches)" if matches > 0 else "  Correct Predictions with Low Confidence (< 0.7): N/A")
         print(f"  Correct Predictions with Very Low Confidence (< 0.5): {very_low_conf_correct} ({very_low_conf_correct/matches*100:.2f}% of matches)" if matches > 0 else "  Correct Predictions with Very Low Confidence (< 0.5): N/A")
-        # Diagnostics for vision, csnp, dental
         if persona in ['vision', 'csnp', 'dental']:
             print(f"\nDetailed {persona.capitalize()} Records:")
             cols = ['userid', 'persona', 'predicted_persona', 'confidence_score', 'accuracy_rate', 'probability_ranking', f'w_{persona}', f'query_{persona}', f'filter_{persona}']
@@ -515,18 +522,18 @@ def evaluate_model(model, X, y_true, metadata):
         print(persona_mis[cols].head().to_string(index=False))
 
     # Top-2 accuracy
-    top_2_accuracy = top_k_accuracy_score(y_true, y_pred_proba, k=2, labels=personas)
+    top_2_accuracy = top_k_accuracy_score(y_true, y_pred_proba, k=2, labels=model.classes_)
     print(f"\nTop-2 Accuracy: {top_2_accuracy * 100:.2f}%")
 
     # Confusion matrix
-    cm = confusion_matrix(y_true, y_pred, labels=personas)
+    cm = confusion_matrix(y_true, y_pred, labels=model.classes_)
     cm_df = pd.DataFrame(cm, index=personas, columns=personas)
     print("\nConfusion Matrix:")
     print(cm_df)
 
     # Classification report
     print("\nClassification Report:")
-    print(classification_report(y_true, y_pred, labels=personas, target_names=personas))
+    print(classification_report(y_true_str, y_pred_str, labels=personas, target_names=personas))
 
     # Create summary DataFrame
     summary_data = persona_metrics + [overall_metrics]
@@ -546,11 +553,11 @@ def evaluate_model(model, X, y_true, metadata):
 
 def main():
     print("Evaluating Random Forest model...")
-    model = load_model(MODEL_FILE)
+    model, le = load_model_and_encoder(MODEL_FILE, LABEL_ENCODER_FILE)
     behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
-    X, y_true, metadata = prepare_evaluation_features(behavioral_df, plan_df, model)
+    X, y_true, metadata, le = prepare_evaluation_features(behavioral_df, plan_df, model, le)
     if X is not None and y_true is not None:
-        evaluate_model(model, X, y_true, metadata)
+        evaluate_model(model, X, y_true, metadata, le)
     else:
         print("No valid data or ground truth available for evaluation.")
 

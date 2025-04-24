@@ -181,6 +181,29 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     ).clip(lower=0) * 1.5
     additional_features.append('csnp_doctor_interaction')
 
+    # New persona-specific signal features
+    training_df['vision_signal'] = (
+        training_df['query_vision'].fillna(0) +
+        training_df['filter_vision'].fillna(0) +
+        training_df['time_vision_pages'].fillna(0).clip(upper=5)
+    ) * 2.0
+    additional_features.append('vision_signal')
+
+    training_df['dental_signal'] = (
+        training_df['query_dental'].fillna(0) +
+        training_df['filter_dental'].fillna(0) +
+        training_df['time_dental_pages'].fillna(0).clip(upper=5)
+    ) * 2.0
+    additional_features.append('dental_signal')
+
+    training_df['csnp_specific_signal'] = (
+        training_df['query_csnp'].fillna(0) +
+        training_df['filter_csnp'].fillna(0) +
+        training_df['csnp_drug_interaction'].fillna(0) +
+        training_df['csnp_doctor_interaction'].fillna(0)
+    ).clip(upper=5) * 3.0
+    additional_features.append('csnp_specific_signal')
+
     training_df = training_df.reset_index(drop=True)
 
     # Define persona weights for weighted features
@@ -244,7 +267,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         query_coeff = k9 if persona == 'csnp' else k3
         filter_coeff = k10 if persona == 'csnp' else k4
         click_coefficient = k8 if click_col == 'pro_click_count' else k7 if click_col == 'dce_click_count' else 0
-        interaction_coeff = 1.0 if interaction_col else 0
+        interaction_coeff = 1.5 if interaction_col in ['vision_interaction', 'dental_interaction', 'csnp_interaction'] else 1.0
         
         behavioral_score = (
             query_coeff * query_value +
@@ -258,6 +281,12 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
         has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
         has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
                      (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
+        signal_count = sum([1 for val in [query_value, filter_value, pages_viewed, interaction_value] if val > 0])
+        if signal_count >= 3:
+            behavioral_score += 0.8
+        elif signal_count >= 2:
+            behavioral_score += 0.5
+        
         if has_filters and has_clicks:
             behavioral_score += 0.8
         elif has_filters or has_clicks:
@@ -287,6 +316,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model):
     weight_sum = training_df[weighted_features].sum(axis=1)
     for wf in weighted_features:
         training_df[wf] = training_df[wf] / weight_sum.where(weight_sum > 0, 1)
+        training_df[wf] = training_df[wf].clip(upper=1.0)
 
     print(f"Weighted features added: {weighted_features}")
     print("Sample weights:")
@@ -390,13 +420,23 @@ def evaluate_model(model, X, y_true, metadata):
         print(f"  Matches: {matches}")
         print(f"  Accuracy Rate: {accuracy * 100:.2f}%")
         print(f"  Average Confidence: {avg_confidence:.2f}")
-        print(f"  Correct Predictions with Low Confidence (< 0.7): {low_conf_correct} ({low_conf_correct/matches*100:.2f}% of matches)")
-        print(f"  Correct Predictions with Very Low Confidence (< 0.5): {very_low_conf_correct} ({very_low_conf_correct/matches*100:.2f}% of matches)")
-        # Vision-specific diagnostics
-        if persona == 'vision':
-            print("\nDetailed Vision Records:")
-            vision_df = output_df[mask][['userid', 'persona', 'predicted_persona', 'confidence_score', 'accuracy_rate', 'probability_ranking', 'w_vision', 'query_vision', 'filter_vision', 'vision_interaction']]
-            print(vision_df.to_string(index=False))
+        print(f"  Correct Predictions with Low Confidence (< 0.7): {low_conf_correct} ({low_conf_correct/matches*100:.2f}% of matches)" if matches > 0 else "  Correct Predictions with Low Confidence (< 0.7): N/A")
+        print(f"  Correct Predictions with Very Low Confidence (< 0.5): {very_low_conf_correct} ({very_low_conf_correct/matches*100:.2f}% of matches)" if matches > 0 else "  Correct Predictions with Very Low Confidence (< 0.5): N/A")
+        # Diagnostics for vision, csnp, dental
+        if persona in ['vision', 'csnp', 'dental']:
+            print(f"\nDetailed {persona.capitalize()} Records:")
+            cols = ['userid', 'persona', 'predicted_persona', 'confidence_score', 'accuracy_rate', 'probability_ranking', f'w_{persona}', f'query_{persona}', f'filter_{persona}']
+            if persona == 'vision':
+                cols.append('vision_interaction')
+                cols.append('vision_signal')
+            elif persona == 'dental':
+                cols.append('dental_interaction')
+                cols.append('dental_signal')
+            elif persona == 'csnp':
+                cols.append('csnp_interaction')
+                cols.append('csnp_specific_signal')
+            persona_df = output_df[mask][cols]
+            print(persona_df.to_string(index=False))
 
     # Overall metrics
     overall_metrics = {
@@ -427,6 +467,32 @@ def evaluate_model(model, X, y_true, metadata):
         print(f"Persona '{persona}':")
         print(f"  Avg Confidence (Correct): {correct_conf:.2f} (Count: {correct_mask.sum()})")
         print(f"  Avg Confidence (Incorrect): {incorrect_conf:.2f} (Count: {incorrect_mask.sum()})")
+
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'feature': feature_columns,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    print("\nFeature Importance (Top 10):")
+    print(feature_importance.head(10))
+
+    # Misclassification analysis
+    print("\nMisclassification Analysis:")
+    misclassified = output_df[output_df['accuracy_rate'] == 0]
+    for persona in ['vision', 'csnp', 'dental']:
+        persona_mis = misclassified[misclassified['persona'] == persona]
+        print(f"\nMisclassified {persona.capitalize()} Records:")
+        cols = ['userid', 'persona', 'predicted_persona', 'confidence_score', f'w_{persona}', f'query_{persona}', f'filter_{persona}']
+        if persona == 'vision':
+            cols.append('vision_interaction')
+            cols.append('vision_signal')
+        elif persona == 'dental':
+            cols.append('dental_interaction')
+            cols.append('dental_signal')
+        elif persona == 'csnp':
+            cols.append('csnp_interaction')
+            cols.append('csnp_specific_signal')
+        print(persona_mis[cols].head().to_string(index=False))
 
     # Top-2 accuracy
     top_2_accuracy = top_k_accuracy_score(y_true, y_pred_proba, k=2, labels=personas)

@@ -3,7 +3,7 @@ import numpy as np
 import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, top_k_accuracy_score
 
-# Hardcoded file paths for Databricks (using /dbfs/ prefix)
+# Hardcoded file paths for Databricks
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-0.0.2.pkl'
@@ -120,8 +120,13 @@ def prepare_evaluation_features(behavioral_df, plan_df):
         else:
             return 'Medium'
 
-    # Reset index after applying quality level
+    # Apply quality level and verify
     training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
+    print(f"Columns after adding quality_level: {training_df.columns.tolist()}")
+    if 'quality_level' not in training_df.columns:
+        raise ValueError("quality_level column was not created successfully")
+
+    # Reset index after applying quality level
     training_df = training_df.reset_index(drop=True)
 
     additional_features = []
@@ -256,12 +261,12 @@ def prepare_evaluation_features(behavioral_df, plan_df):
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 2: behavioral_score += 0.7
             elif signal_count >= 1: behavioral_score += 0.4
-            if row['quality_level'] == 'High': behavioral_score += 0.6
+            if 'quality_level' in row and row['quality_level'] == 'High': behavioral_score += 0.6
             if row.get('dental_interaction', 0) > 0: behavioral_score += 0.4
         elif persona == 'vision':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.6
-            if row['quality_level'] == 'High': behavioral_score += 0.6
+            if 'quality_level' in row and row['quality_level'] == 'High': behavioral_score += 0.6
             if row.get('vision_interaction', 0) > 0: behavioral_score += 0.4
         elif persona == 'csnp':
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
@@ -271,11 +276,11 @@ def prepare_evaluation_features(behavioral_df, plan_df):
             if row.get('csnp_type_flag', 0) == 1: behavioral_score += 1.0
             if row.get('csnp_drug_interaction', 0) > 0: behavioral_score += 0.8
             if row.get('csnp_doctor_interaction', 0) > 0: behavioral_score += 0.6
-            if row['quality_level'] == 'High': behavioral_score += 1.5
+            if 'quality_level' in row and row['quality_level'] == 'High': behavioral_score += 1.5
         elif persona in ['otc', 'transportation']:
             signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
             if signal_count >= 1: behavioral_score += 0.5
-            if row['quality_level'] == 'High': behavioral_score += 0.5
+            if 'quality_level' in row and row['quality_level'] == 'High': behavioral_score += 0.5
         
         adjusted_weight = base_weight + behavioral_score
 
@@ -347,8 +352,17 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     print(f"Number of True values in valid_mask: {valid_mask.sum()}")
     training_df = training_df.loc[valid_mask].reset_index(drop=True)
     print(f"Rows after filtering fitness/hearing: {len(training_df)}")
+    print(f"Columns after filtering: {training_df.columns.tolist()}")
 
-    metadata = training_df[['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns]
+    # Verify quality_level is present before creating metadata
+    if 'quality_level' not in training_df.columns:
+        print("Warning: quality_level missing after filtering. Reapplying assign_quality_level.")
+        training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
+
+    metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns
+    available_columns = [col for col in metadata_columns if col in training_df.columns]
+    metadata = training_df[available_columns]
+    print(f"Metadata columns: {metadata.columns.tolist()}")
 
     X = training_df[feature_columns].fillna(0)
     y_true = training_df['persona'] if 'persona' in training_df.columns else None
@@ -376,7 +390,6 @@ def evaluate_model(model, X, y_true, metadata):
         probs = {persona: output_df.loc[i, f'prob_{persona}'] for persona in personas}
         ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
         output_df.loc[i, 'probability_ranking'] = '; '.join([f"{p}: {prob:.4f}" for p, prob in ranked])
-        # Set confidence_score as the probability of the predicted_persona
         predicted_persona = output_df.loc[i, 'predicted_persona']
         output_df.loc[i, 'confidence_score'] = probs[predicted_persona]
 
@@ -392,7 +405,7 @@ def evaluate_model(model, X, y_true, metadata):
         mask = y_true == persona
         persona_counts[persona] = mask.sum()
         if mask.sum() > 0:
-            persona_accuracy = accuracy_score(y_true[mask为什么要写代码？], y_pred[mask])
+            persona_accuracy = accuracy_score(y_true[mask], y_pred[mask])
             persona_correction_rates[persona] = persona_accuracy
             print(f"Correction Rate for '{persona}': {persona_accuracy * 100:.2f}% (Count: {mask.sum()})")
         else:
@@ -403,24 +416,31 @@ def evaluate_model(model, X, y_true, metadata):
     print("\nCorrection Rates by Quality Level:")
     quality_correction_rates = {}
     quality_counts = {}
-    for quality in ['High', 'Medium', 'Low']:
-        mask = output_df['quality_level'] == quality
-        quality_counts[quality] = mask.sum()
-        if mask.sum() > 0:
-            y_true_quality = y_true[mask]
-            y_pred_quality = y_pred[mask]
-            quality_accuracy = accuracy_score(y_true_quality, y_pred_quality)
-            quality_correction_rates[quality] = quality_accuracy
-            print(f"{quality} Quality Correction Rate: {quality_accuracy * 100:.2f}% (Count: {mask.sum()})")
-            print(f"Individual Persona Correction Rates ({quality}):")
-            for persona in personas:
-                persona_mask = y_true_quality == persona
-                if persona_mask.sum() > 0:
-                    persona_accuracy = accuracy_score(y_true_quality[persona_mask], y_pred_quality[persona_mask])
-                    print(f"Correction Rate for '{persona}': {persona_accuracy * 100:.2f}% (Count: {persona_mask.sum()})")
-        else:
+    if 'quality_level' in output_df.columns:
+        for quality in ['High', 'Medium', 'Low']:
+            mask = output_df['quality_level'] == quality
+            quality_counts[quality] = mask.sum()
+            if mask.sum() > 0:
+                y_true_quality = y_true[mask]
+                y_pred_quality = y_pred[mask]
+                quality_accuracy = accuracy_score(y_true_quality, y_pred_quality)
+                quality_correction_rates[quality] = quality_accuracy
+                print(f"{quality} Quality Correction Rate: {quality_accuracy * 100:.2f}% (Count: {mask.sum()})")
+                print(f"Individual Persona Correction Rates ({quality}):")
+                for persona in personas:
+                    persona_mask = y_true_quality == persona
+                    if persona_mask.sum() > 0:
+                        persona_accuracy = accuracy_score(y_true_quality[persona_mask], y_pred_quality[persona_mask])
+                        print(f"Correction Rate for '{persona}': {persona_accuracy * 100:.2f}% (Count: {persona_mask.sum()})")
+            else:
+                quality_correction_rates[quality] = 0.0
+                quality_counts[quality] = 0
+                print(f"{quality} Quality Correction Rate: N/A (Count: 0)")
+    else:
+        print("Warning: 'quality_level' column missing in output_df. Skipping quality-level analysis.")
+        for quality in ['High', 'Medium', 'Low']:
             quality_correction_rates[quality] = 0.0
-            print(f"{quality} Quality Correction Rate: N/A (Count: 0)")
+            quality_counts[quality] = 0
 
     # Compute top-2 accuracy for additional context
     top_2_accuracy = top_k_accuracy_score(y_true, y_pred_proba, k=2, labels=personas)

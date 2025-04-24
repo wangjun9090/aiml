@@ -57,7 +57,7 @@ def normalize_persona(df):
             new_rows.append(row_copy)
     return pd.DataFrame(new_rows).reset_index(drop=True)
 
-def prepare_evaluation_features(behavioral_df, plan_df):
+def prepare_evaluation_features(behavioral_df, plan_df, model):
     # Normalize personas and reset index
     behavioral_df = normalize_persona(behavioral_df)
     print(f"Rows after persona normalization: {len(behavioral_df)}")
@@ -354,10 +354,22 @@ def prepare_evaluation_features(behavioral_df, plan_df):
     print(f"Rows after filtering fitness/hearing: {len(training_df)}")
     print(f"Columns after filtering: {training_df.columns.tolist()}")
 
-    # Verify quality_level is present before creating metadata
+    # Verify quality_level is present
     if 'quality_level' not in training_df.columns:
         print("Warning: quality_level missing after filtering. Reapplying assign_quality_level.")
         training_df['quality_level'] = training_df.apply(assign_quality_level, axis=1)
+
+    # Filter to only include personas in model.classes_
+    model_classes = set(model.classes_)
+    all_personas = set(training_df['persona'].dropna().unique())
+    invalid_personas = all_personas - model_classes
+    if invalid_personas:
+        print(f"Warning: Found personas in y_true not in model.classes_: {invalid_personas}")
+        print(f"Model classes: {model_classes}")
+        print(f"All personas in data: {all_personas}")
+    valid_persona_mask = training_df['persona'].isin(model_classes)
+    training_df = training_df.loc[valid_persona_mask].reset_index(drop=True)
+    print(f"Rows after filtering for model classes: {len(training_df)}")
 
     metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'quality_level'] + feature_columns
     available_columns = [col for col in metadata_columns if col in training_df.columns]
@@ -442,7 +454,7 @@ def evaluate_model(model, X, y_true, metadata):
             quality_correction_rates[quality] = 0.0
             quality_counts[quality] = 0
 
-    # Compute top-2 accuracy for additional context
+    # Compute top-2 accuracy
     top_2_accuracy = top_k_accuracy_score(y_true, y_pred_proba, k=2, labels=personas)
     print(f"\nTop-2 Correction Rate: {top_2_accuracy * 100:.2f}%")
 
@@ -490,7 +502,7 @@ def main():
     print("Evaluating Random Forest model...")
     model = load_model(MODEL_FILE)
     behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
-    X, y_true, metadata = prepare_evaluation_features(behavioral_df, plan_df)
+    X, y_true, metadata = prepare_evaluation_features(behavioral_df, plan_df, model)
     if y_true is not None:
         evaluate_model(model, X, y_true, metadata)
     else:

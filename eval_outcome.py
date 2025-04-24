@@ -42,18 +42,21 @@ def compute_evaluation_outcomes(df):
         count = mask.sum()
         matches = df['correction_rate'][mask].sum()
         accuracy = accuracy_score(df['persona'][mask], df['predicted_persona'][mask]) if count > 0 else 0.0
+        match_rate_pct = accuracy * 100  # Convert to percentage
         avg_confidence = df['confidence_score'][mask].mean() if count > 0 else 0.0
         persona_metrics.append({
             'persona': persona,
             'total_records': count,
             'matches': matches,
             'accuracy_rate': accuracy,
+            'match_rate_pct': match_rate_pct,
             'avg_confidence': avg_confidence
         })
         print(f"Persona '{persona}':")
         print(f"  Total Records: {count}")
         print(f"  Matches: {matches}")
         print(f"  Accuracy Rate: {accuracy * 100:.2f}%")
+        print(f"  Match Rate %: {match_rate_pct:.2f}%")
         print(f"  Average Confidence: {avg_confidence:.4f}")
 
     # Overall metrics
@@ -62,12 +65,14 @@ def compute_evaluation_outcomes(df):
         'total_records': len(df),
         'matches': df['correction_rate'].sum(),
         'accuracy_rate': overall_accuracy,
+        'match_rate_pct': overall_accuracy * 100,
         'avg_confidence': df['confidence_score'].mean()
     }
     print("\nOverall Metrics:")
     print(f"  Total Records: {overall_metrics['total_records']}")
     print(f"  Matches: {overall_metrics['matches']}")
     print(f"  Accuracy Rate: {overall_metrics['accuracy_rate'] * 100:.2f}%")
+    print(f"  Match Rate %: {overall_metrics['match_rate_pct']:.2f}%")
     print(f"  Average Confidence: {overall_metrics['avg_confidence']:.4f}")
 
     # Create summary DataFrame

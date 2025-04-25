@@ -7,7 +7,6 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.linear_model import LogisticRegression
 from imblearn.over_sampling import SMOTE
-from imblearn.combine import SMOTEENN
 import xgboost as xgb
 import lightgbm as lgb
 import optuna
@@ -40,27 +39,41 @@ def load_data(behavioral_path, plan_path):
         raise
 
 def normalize_persona(df):
-    """Normalize personas, avoiding over-representation."""
+    """Normalize personas, ensuring all are strings and valid."""
     valid_personas = list(PERSONA_COEFFICIENTS.keys())
     new_rows = []
     
     for _, row in df.iterrows():
-        if pd.isna(row['persona']):
+        # Handle missing or invalid persona values
+        if pd.isna(row['persona']) or row['persona'] == '':
+            logging.warning(f"Skipping row with missing persona: {row.to_dict()}")
             continue
-        personas = [p.strip().lower() for p in str(row['persona']).split(',')]
+        
+        # Convert persona to string to handle numbers or mixed types
+        persona_str = str(row['persona']).strip().lower()
+        
+        # Split multi-persona entries (e.g., 'csnp,dental')
+        personas = [p.strip() for p in persona_str.split(',')]
         valid_found = [p for p in personas if p in valid_personas]
         
         if not valid_found:
+            logging.warning(f"Skipping row with no valid personas: {persona_str}")
             continue
         
         # Take the first valid persona to avoid duplication
         row_copy = row.copy()
-        row_copy['persona'] = valid_found[0]
+        row_copy['persona'] = valid_found[0]  # Ensure string type
         new_rows.append(row_copy)
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
     logging.info(f"Normalized {len(df)} rows into {len(result)} rows")
     logging.info(f"Persona distribution: {result['persona'].value_counts().to_dict()}")
+    
+    # Verify all personas are strings
+    if not all(isinstance(p, str) for p in result['persona']):
+        logging.error(f"Found non-string personas: {result['persona'].unique()}")
+        raise ValueError("Persona column contains non-string values after normalization")
+    
     return result
 
 def prepare_features(behavioral_df, plan_df):
@@ -140,6 +153,11 @@ def main():
     # Prepare features
     X, y, scaler = prepare_features(behavioral_df, plan_df)
     
+    # Verify all labels are strings
+    if not all(isinstance(label, str) for label in y):
+        logging.error(f"Non-string labels found in y: {y.unique()}")
+        raise ValueError("Target variable y contains non-string labels")
+    
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
@@ -152,7 +170,6 @@ def main():
     y_train_encoded = le.transform(y_train)
     
     # Balance training data with SMOTE and custom sampling strategy
-    # Ensure rare classes like 'csnp' are preserved
     sampling_strategy = {persona: max(100, count) for persona, count in y_train.value_counts().items()}
     smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
     try:
@@ -164,7 +181,8 @@ def main():
         y_train_balanced_encoded = le.transform(y_train_balanced)
     except ValueError as e:
         logging.error(f"SMOTE failed: {e}. Falling back to original training data.")
-        X_train_balanced, y_train_balanced_encoded = X_train, y_train_encoded
+        X_train_balanced, y_train_balanced = X_train, y_train
+        y_train_balanced_encoded = y_train_encoded
     
     # Verify test set labels
     unseen_labels = set(y_test) - set(le.classes_)
@@ -176,7 +194,7 @@ def main():
     
     # Hyperparameter tuning with Optuna
     study = optuna.create_study(direction='maximize')
-    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=20)
+    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encode, X_test, y_test_encoded), n_trials=20)
     best_params = study.best_params
     logging.info(f"Best hyperparameters: {best_params}")
     

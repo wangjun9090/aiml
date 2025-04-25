@@ -41,7 +41,6 @@ def load_data(behavioral_path, plan_path):
         behavioral_df = pd.read_csv(behavioral_path)
         plan_df = pd.read_csv(plan_path)
         
-        # Clean persona column
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
         behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
         logger.info(f"Raw persona values: {behavioral_df['persona'].unique()}")
@@ -110,9 +109,13 @@ def prepare_features(behavioral_df, plan_df):
     for col in behavioral_features + plan_features:
         training_df[col] = training_df.get(col, 0).fillna(0)
     
-    training_df['dental_signal'] = (training_df['query_dental'] + training_df['filter_dental']) * training_df['ma_dental_benefit']
+    # Enhanced feature engineering for underperforming personas
+    training_df['dental_interaction'] = (training_df['query_dental'] + training_df['filter_dental']) * training_df['ma_dental_benefit'] * 2.0
+    training_df['doctor_interaction'] = (training_df['query_provider'] + training_df['filter_provider']) * training_df.get('ma_provider_network', 0) * 2.0
+    training_df['csnp_interaction'] = (training_df['query_csnp'] + training_df['filter_csnp']) * training_df['csnp'] * 2.0
+    training_df['dsnp_interaction'] = (training_df['query_dsnp'] + training_df['filter_dsnp']) * training_df['dsnp'] * 2.0
     training_df['vision_signal'] = (training_df['query_vision'] + training_df['filter_vision']) * training_df['ma_vision']
-    additional_features = ['dental_signal', 'vision_signal']
+    additional_features = ['dental_interaction', 'doctor_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_signal']
     
     feature_columns = behavioral_features + plan_features + additional_features
     
@@ -126,7 +129,6 @@ def prepare_features(behavioral_df, plan_df):
     X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
     
     logger.info(f"Features: {X.columns.tolist()}")
-    logger.info(f"Persona distribution: {y.value_counts().to_dict()}")
     return X, y, scaler
 
 def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
@@ -138,8 +140,17 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             cls_accuracy = accuracy_score(y_true[mask], y_pred[mask])
             per_persona_accuracy[cls_name] = cls_accuracy * 100
         else:
-            per_persona_accuracy[cls_name] = 0.0  # No samples for this class
+            per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
+
+def focal_loss_objective(y_true, y_pred):
+    """Focal loss for XGBoost to focus on minority classes."""
+    gamma = 2.0
+    alpha = 0.25
+    p = 1 / (1 + np.exp(-y_pred))
+    grad = alpha * (p - y_true) * (1 - p)**gamma * np.log(p + 1e-8)
+    hess = alpha * (1 - p)**gamma * (np.log(p + 1e-8) * (1 - p) + (p - y_true) * (gamma * p / (1 - p)))
+    return grad, hess
 
 def objective(trial, X_train, y_train, X_val, y_val):
     params = {
@@ -150,7 +161,7 @@ def objective(trial, X_train, y_train, X_val, y_val):
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0)
     }
     
-    model = xgb.XGBClassifier(**params, random_state=42)
+    model = xgb.XGBClassifier(**params, random_state=42, objective='multi:softmax')
     model.fit(X_train, y_train)
     y_pred = model.predict(X_val)
     return accuracy_score(y_val, y_pred)
@@ -190,8 +201,11 @@ def main():
     y_train_encoded = le.transform(y_train)
     y_test_encoded = le.transform(y_test)
     
-    # Balance training data with SMOTE
-    sampling_strategy = {persona: max(500, count) for persona, count in y_train.value_counts().items()}
+    # Aggressive SMOTE for minority classes
+    sampling_strategy = {
+        persona: 1000 if persona in ['csnp', 'dental', 'doctor', 'dsnp', 'vision'] else max(500, count)
+        for persona, count in y_train.value_counts().items()
+    }
     smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
     try:
         X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
@@ -214,19 +228,19 @@ def main():
         logger.error(f"Test set contains unseen labels: {unseen_labels}")
         raise ValueError(f"Test set contains labels not seen in training: {unseen_labels}")
     
-    # Compute class weights
+    # Enhanced class weights using PERSONA_COEFFICIENTS
     class_weights = compute_class_weight('balanced', classes=le.classes_, y=y_train)
-    class_weight_dict = {i: class_weights[i] for i in range(len(le.classes_))}
+    class_weight_dict = {i: class_weights[i] * PERSONA_COEFFICIENTS[le.classes_[i]] for i in range(len(le.classes_))}
     
     # Hyperparameter tuning
     logger.info("Starting hyperparameter tuning...")
     study = optuna.create_study(direction='maximize')
-    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=50)
+    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=100)
     best_params = study.best_params
     logger.info(f"Best hyperparameters: {best_params}")
     
     # Train final model
-    xgb_model = xgb.XGBClassifier(**best_params, random_state=42)
+    xgb_model = xgb.XGBClassifier(**best_params, random_state=42, objective='multi:softmax')
     lgb_model = lgb.LGBMClassifier(n_estimators=200, num_leaves=31, random_state=42, class_weight=class_weight_dict)
     rf_model = RandomForestClassifier(n_estimators=200, max_depth=20, random_state=42, n_jobs=-1, class_weight=class_weight_dict)
     
@@ -262,6 +276,10 @@ def main():
     
     logger.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
     logger.info("Confusion Matrix:\n" + str(confusion_matrix(y_test_encoded, y_pred)))
+    
+    # Feature importance from XGBoost
+    xgb_model.fit(X_train_balanced, y_train_balanced_encoded)
+    logger.info(f"Feature importances: {dict(zip(X.columns, xgb_model.feature_importances_))}")
     
     # Save model and artifacts
     os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)

@@ -380,7 +380,12 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
         print("Error: No data remains after aligning with ground truth. Check userid/zip/plan_id compatibility.")
         return None, None, None
 
-    # Prepare features and metadata
+    
+    all_weighted_features = [f'w_{feature}' for feature in [
+        'doctor', 'drug', 'vision', 'dental', 'otc', 'transportation', 'csnp', 'dsnp'
+    ]]
+    feature_columns = all_behavioral_features + raw_plan_features + additional_features + all_weighted_features
+# Prepare features and metadata
     metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'persona_encoded', 'quality_level'] + feature_columns
     available_columns = [col for col in metadata_columns if col in training_df.columns]
     metadata = training_df[available_columns]

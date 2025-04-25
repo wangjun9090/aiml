@@ -32,20 +32,20 @@ SCALER_FILE = '/dbfs/scaler.pkl'
 # Persona list
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp', 'transportation', 'otc']
 
-# Default coefficients (adjust if known)
+# Default coefficients
 W_CSNP_HIGH = 1.5
 W_CSNP_BASE = 1.0
 W_DSNP_HIGH = 1.5
 W_DSNP_BASE = 1.0
-k1 = 0.1  # Pages viewed
-k3 = 0.2  # Query coefficient (non-csnp)
-k4 = 0.2  # Filter coefficient (non-csnp)
-k7 = 0.3  # Click coefficient (drug)
-k8 = 0.3  # Click coefficient (doctor)
-k9 = 0.4  # Query coefficient (csnp)
-k10 = 0.4  # Filter coefficient (csnp)
+k1 = 0.1
+k3 = 0.2
+k4 = 0.2
+k7 = 0.3
+k8 = 0.3
+k9 = 0.4
+k10 = 0.4
 
-# Persona info dictionary
+# Persona info
 PERSONA_INFO = {
     'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp'},
     'dental': {'plan_col': 'ma_dental_benefit', 'query_col': 'query_dental', 'filter_col': 'filter_dental'},
@@ -119,13 +119,18 @@ def calculate_persona_weight(row, persona_info, persona, plan_df):
     return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)
 
 def load_data(behavioral_path, plan_path):
-    behavioral_df = pd.read_csv(behavioral_path)
-    plan_df = pd.read_csv(plan_path)
-    
-    behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
-    behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
-    
-    return behavioral_df, plan_df
+    try:
+        behavioral_df = pd.read_csv(behavioral_path)
+        plan_df = pd.read_csv(plan_path)
+        
+        behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
+        behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
+        logger.info(f"Unique personas in behavioral_df: {behavioral_df['persona'].unique()}")
+        
+        return behavioral_df, plan_df
+    except Exception as e:
+        logger.error(f"Failed to load data: {e}")
+        raise
 
 def normalize_persona(df):
     valid_personas = PERSONAS
@@ -145,61 +150,77 @@ def normalize_persona(df):
         row_copy['persona'] = valid_found[0]
         new_rows.append(row_copy)
     
-    return pd.DataFrame(new_rows).reset_index(drop=True)
+    result = pd.DataFrame(new_rows).reset_index(drop=True)
+    if result.empty:
+        logger.error("No valid personas found after normalization")
+        raise ValueError("No valid personas found after normalization")
+    logger.info(f"Rows after normalization: {len(result)}")
+    return result
 
 def prepare_features(behavioral_df, plan_df):
-    behavioral_df = normalize_persona(behavioral_df)
-    
-    behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
-    behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).fillna('')
-    plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
-    plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
-    
-    training_df = behavioral_df.merge(
-        plan_df.rename(columns={'StateCode': 'state'}),
-        how='inner', on=['zip', 'plan_id']
-    ).reset_index(drop=True)
-    
-    behavioral_features = [
-        'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
-        'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
-        'num_pages_viewed'
-    ]
-    plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp']
-    
-    for col in behavioral_features + plan_features:
-        training_df[col] = training_df.get(col, 0).fillna(0)
-    
-    # Add persona weights as features
-    for persona in PERSONAS:
-        if persona in PERSONA_INFO:
-            training_df[f'{persona}_weight'] = training_df.apply(
-                lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona, plan_df), axis=1
-            )
-    
-    training_df['dental_interaction'] = training_df['query_dental'] * training_df['ma_dental_benefit']
-    training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
-    training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
-    training_df['vision_interaction'] = training_df['query_vision'] * training_df['ma_vision']
-    additional_features = ['dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction']
-    additional_features += [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
-    
-    feature_columns = behavioral_features + plan_features + additional_features
-    
-    training_df = training_df[training_df['persona'].isin(PERSONAS)].reset_index(drop=True)
-    
-    X = training_df[feature_columns].fillna(0)
-    y = training_df['persona']
-    
-    # Feature selection: top 15 features by variance
-    variances = X.var()
-    top_features = variances.nlargest(15).index.tolist()
-    X = X[top_features]
-    
-    scaler = StandardScaler()
-    X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
-    
-    return X, y, scaler
+    try:
+        behavioral_df = normalize_persona(behavioral_df)
+        
+        behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
+        behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).fillna('')
+        plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
+        
+        training_df = behavioral_df.merge(
+            plan_df.rename(columns={'StateCode': 'state'}),
+            how='left', on=['zip', 'plan_id']
+        ).reset_index(drop=True)
+        if training_df.empty:
+            logger.error("Merge resulted in empty DataFrame. Check zip/plan_id alignment.")
+            raise ValueError("Merge resulted in empty DataFrame")
+        logger.info(f"Rows after merge: {len(training_df)}")
+        
+        behavioral_features = [
+            'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
+            'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
+            'num_pages_viewed'
+        ]
+        plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp']
+        
+        for col in behavioral_features + plan_features:
+            training_df[col] = training_df.get(col, 0).fillna(0)
+        
+        # Add persona weights
+        for persona in PERSONAS:
+            if persona in PERSONA_INFO:
+                training_df[f'{persona}_weight'] = training_df.apply(
+                    lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona, plan_df), axis=1
+                )
+        
+        training_df['dental_interaction'] = training_df['query_dental'] * training_df['ma_dental_benefit']
+        training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
+        training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
+        training_df['vision_interaction'] = training_df['query_vision'] * training_df['ma_vision']
+        additional_features = ['dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction']
+        additional_features += [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
+        
+        feature_columns = behavioral_features + plan_features + additional_features
+        
+        training_df = training_df[training_df['persona'].isin(PERSONAS)].reset_index(drop=True)
+        if training_df.empty:
+            logger.error("No rows left after persona filtering")
+            raise ValueError("No rows left after persona filtering")
+        logger.info(f"Rows after filtering: {len(training_df)}")
+        
+        X = training_df[feature_columns].fillna(0)
+        y = training_df['persona']
+        
+        if X.empty or y.empty:
+            logger.error(f"Feature matrix empty: X shape={X.shape}, y shape={y.shape}")
+            raise ValueError("Feature matrix or target empty")
+        
+        scaler = StandardScaler()
+        X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
+        
+        return X, y, scaler
+    except Exception as e:
+        logger.error(f"Failed to prepare features: {e}")
+        raise
 
 def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
     per_persona_accuracy = {}
@@ -291,6 +312,13 @@ def main():
     # Train CatBoost
     try:
         model = CatBoostClassifier(**best_params, random_seed=42, verbose=0, auto_class_weights='Balanced')
+        model.fit(X_train_balanced, y_train_balanced_encoded)
+        
+        # Feature selection by importance
+        importances = model.get_feature_importance()
+        feature_importance = pd.Series(importances, index=X_train.columns).nlargest(15).index.tolist()
+        X_train_balanced = X_train_balanced[feature_importance]
+        X_test = X_test[feature_importance]
         model.fit(X_train_balanced, y_train_balanced_encoded)
     except Exception as e:
         logger.error(f"Model training failed: {e}")

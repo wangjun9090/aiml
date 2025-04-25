@@ -1,11 +1,14 @@
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
 from sklearn.utils.class_weight import compute_class_weight
 from imblearn.over_sampling import SMOTE
+import xgboost as xgb
 import lightgbm as lgb
 import optuna
 import logging
@@ -28,7 +31,7 @@ PLAN_FILE = 'path_to_plan.csv'
 MODEL_FILE = 'model-persona-0.2.0.pkl'
 LABEL_ENCODER_FILE = 'label_encoder.pkl'
 
-# Persona coefficients for weighting
+# Persona coefficients (not used for class weights)
 PERSONA_COEFFICIENTS = {
     'dental': 3.5, 'doctor': 3.0, 'dsnp': 2.5, 'drug': 1.0,
     'vision': 1.8, 'csnp': 2.0, 'transportation': 1.0, 'otc': 1.0
@@ -105,13 +108,11 @@ def prepare_features(behavioral_df, plan_df):
     for col in behavioral_features + plan_features:
         training_df[col] = training_df.get(col, 0).fillna(0)
     
-    # Enhanced features for underperforming personas
-    training_df['dental_interaction'] = (training_df['query_dental'] + training_df['filter_dental']) * training_df['ma_dental_benefit'] * 2.0
-    training_df['doctor_interaction'] = (training_df['query_provider'] + training_df['filter_provider']) * training_df.get('ma_provider_network', 0) * 2.0
-    training_df['csnp_interaction'] = (training_df['query_csnp'] + training_df['filter_csnp']) * training_df['csnp'] * 2.0
-    training_df['dsnp_interaction'] = (training_df['query_dsnp'] + training_df['filter_dsnp']) * training_df['dsnp'] * 2.0
-    training_df['vision_signal'] = (training_df['query_vision'] + training_df['filter_vision']) * training_df['ma_vision']
-    additional_features = ['dental_interaction', 'doctor_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_signal']
+    # Simplified features for underperforming personas
+    training_df['dental_interaction'] = training_df['query_dental'] * training_df['ma_dental_benefit']
+    training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
+    training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
+    additional_features = ['dental_interaction', 'csnp_interaction', 'dsnp_interaction']
     
     feature_columns = behavioral_features + plan_features + additional_features
     
@@ -120,6 +121,11 @@ def prepare_features(behavioral_df, plan_df):
     
     X = training_df[feature_columns].fillna(0)
     y = training_df['persona']
+    
+    # Feature selection: keep top 15 features by variance
+    variances = X.var()
+    top_features = variances.nlargest(15).index.tolist()
+    X = X[top_features]
     
     scaler = StandardScaler()
     X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
@@ -141,13 +147,13 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
 def objective(trial, X_train, y_train, X_val, y_val):
     params = {
         'n_estimators': trial.suggest_int('n_estimators', 100, 500),
-        'num_leaves': trial.suggest_int('num_leaves', 20, 100),
+        'max_depth': trial.suggest_int('max_depth', 5, 20),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
         'subsample': trial.suggest_float('subsample', 0.6, 1.0),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0)
     }
     
-    model = lgb.LGBMClassifier(**params, random_state=42, verbose=-1)
+    model = xgb.XGBClassifier(**params, random_state=42, objective='multi:softmax')
     model.fit(X_train, y_train)
     y_pred = model.predict(X_val)
     return accuracy_score(y_val, y_pred)
@@ -194,9 +200,9 @@ def main():
         logger.error(f"Failed to encode labels: {e}")
         return
     
-    # SMOTE for minority classes
+    # SMOTE with balanced sampling
     sampling_strategy = {
-        persona: 1000 if persona in ['csnp', 'dental', 'doctor', 'dsnp', 'vision'] else max(500, count)
+        persona: 500 if persona in ['csnp', 'dental', 'doctor', 'dsnp', 'vision'] else max(300, count)
         for persona, count in y_train.value_counts().items()
     }
     smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
@@ -211,7 +217,7 @@ def main():
     
     # Class weights
     class_weights = compute_class_weight('balanced', classes=le.classes_, y=y_train)
-    class_weight_dict = {i: class_weights[i] * PERSONA_COEFFICIENTS[le.classes_[i]] for i in range(len(le.classes_))}
+    class_weight_dict = {i: class_weights[i] for i in range(len(le.classes_))}
     
     # Hyperparameter tuning
     logger.info("Starting hyperparameter tuning...")
@@ -224,10 +230,18 @@ def main():
         logger.error(f"Hyperparameter tuning failed: {e}")
         return
     
-    # Train final model
+    # Train stacking ensemble
     try:
-        model = lgb.LGBMClassifier(**best_params, random_state=42, class_weight=class_weight_dict, verbose=-1)
-        model.fit(X_train_balanced, y_train_balanced_encoded)
+        xgb_model = xgb.XGBClassifier(**best_params, random_state=42, objective='multi:softmax')
+        lgb_model = lgb.LGBMClassifier(n_estimators=200, num_leaves=31, random_state=42, class_weight=class_weight_dict, verbose=-1)
+        rf_model = RandomForestClassifier(n_estimators=200, max_depth=20, random_state=42, n_jobs=-1, class_weight=class_weight_dict)
+        
+        stacking = StackingClassifier(
+            estimators=[('xgb', xgb_model), ('lgb', lgb_model), ('rf', rf_model)],
+            final_estimator=xgb.XGBClassifier(random_state=42),
+            cv=3, n_jobs=-1
+        )
+        stacking.fit(X_train_balanced, y_train_balanced_encoded)
     except Exception as e:
         logger.error(f"Model training failed: {e}")
         return
@@ -235,7 +249,7 @@ def main():
     # Evaluate
     logger.info("Evaluating on test set...")
     try:
-        y_pred = model.predict(X_test)
+        y_pred = stacking.predict(X_test)
         overall_accuracy = accuracy_score(y_test_encoded, y_pred)
         logger.info(f"Overall Accuracy on Test Set (20% of data): {overall_accuracy * 100:.2f}%")
         
@@ -256,7 +270,7 @@ def main():
     try:
         os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
         with open(MODEL_FILE, 'wb') as f:
-            pickle.dump(model, f)
+            pickle.dump(stacking, f)
         with open(LABEL_ENCODER_FILE, 'wb') as f:
             pickle.dump(le, f)
         with open('scaler.pkl', 'wb') as f:

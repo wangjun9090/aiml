@@ -56,32 +56,26 @@ def normalize_persona(df):
     """Normalize personas for ground truth evaluation (split multiple personas into separate rows)."""
     new_rows = []
     for idx, row in df.iterrows():
-        # Handle NaN, empty, or blank personas
         if pd.isna(row['persona']) or str(row['persona']).strip() == '':
             print(f"Warning: NaN or empty persona at index {idx}. Assigning default 'dsnp'.")
             personas = ['dsnp']
         else:
-            # Split and clean personas
             personas = [p.strip().lower() for p in str(row['persona']).split(',') if p.strip()]
             if not personas:
                 print(f"Warning: No valid personas after cleaning at index {idx}. Assigning default 'dsnp'.")
                 personas = ['dsnp']
-
-        # Process each row based on personas
+        
         if 'dsnp' in personas or 'csnp' in personas:
-            # Create first row with the primary persona
             first_row = row.copy()
             first_persona = personas[0]
             if first_persona in ['unknown', 'none', 'healthcare', '']:
                 first_persona = 'dsnp' if 'dsnp' in personas else 'csnp'
             first_row['persona'] = first_persona
             new_rows.append(first_row)
-            # Create second row with dsnp or csnp
             second_row = row.copy()
             second_row['persona'] = 'dsnp' if 'dsnp' in personas else 'csnp'
             new_rows.append(second_row)
         else:
-            # Single persona case
             row_copy = row.copy()
             row_copy['persona'] = personas[0]
             new_rows.append(row_copy)
@@ -94,7 +88,6 @@ def normalize_persona(df):
 def prepare_evaluation_features(behavioral_df, plan_df, model, le):
     feature_df = behavioral_df.copy()
 
-    # Ensure consistent data types for merge keys
     feature_df['zip'] = feature_df['zip'].astype(str).fillna('unknown')
     feature_df['plan_id'] = feature_df['plan_id'].astype(str).fillna('unknown')
     plan_df['zip'] = plan_df['zip'].astype(str).fillna('unknown')
@@ -355,10 +348,8 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
 
     print(f"Columns in training_df after filling: {training_df.columns.tolist()}")
 
-    # Prepare ground truth using persona column
     ground_truth_df = normalize_persona(behavioral_df)
-
-    # Log unexpected personas
+    
     all_personas = ground_truth_df['persona'].unique()
     valid_personas = [p for p in all_personas if p in le.classes_]
     unexpected_personas = [p for p in all_personas if p not in le.classes_]
@@ -379,16 +370,13 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
         print(f"Label encoder classes: {le.classes_}")
         return None, None, None, None, None
 
-    # Encode y_true
     valid_ground_truth['persona_encoded'] = le.transform(valid_ground_truth['persona'])
     print(f"Encoded ground truth personas: {valid_ground_truth['persona_encoded'].unique().tolist()}")
 
-    # Ensure consistent data types for merge with ground truth
-    valid_ground_truth['zip'] = valid_ground_truth['zip'].astype(str).fillna('unknown')
-    valid_ground_truth['plan_id'] = valid_ground_truth['plan_id'].astype(str).fillna('unknown')
-    valid_ground_truth['userid'] = valid_ground_truth['userid'].astype(str).fillna('unknown')
+    for col in ['userid', 'zip', 'plan_id']:
+        training_df[col] = training_df[col].astype(str).fillna('unknown')
+        valid_ground_truth[col] = valid_ground_truth[col].astype(str).fillna('unknown')
 
-    # Align feature_df with ground_truth_df using userid, zip, plan_id
     training_df = training_df.merge(
         valid_ground_truth[['userid', 'zip', 'plan_id', 'persona', 'persona_encoded']],
         how='inner',
@@ -400,7 +388,6 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
         print("Error: No data remains after aligning with ground truth. Check userid/zip/plan_id compatibility.")
         return None, None, None, None, None
 
-    # Prepare features and metadata
     metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'persona_encoded', 'quality_level'] + feature_columns
     available_columns = [col for col in metadata_columns if col in training_df.columns]
     metadata = training_df[available_columns]
@@ -419,22 +406,18 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
         print("Cannot evaluate model: No valid data provided.")
         return None
 
-    # Predict probabilities and labels
     y_pred_proba = model.predict_proba(X)
     y_pred = model.predict(X)
 
-    # Decode predictions and ground truth back to string personas
     personas = le.inverse_transform(model.classes_)
     proba_df = pd.DataFrame(y_pred_proba, columns=[f'prob_{p}' for p in personas])
     y_pred_str = le.inverse_transform(y_pred)
     y_true_str = le.inverse_transform(y_true)
 
-    # Combine metadata with predictions
     output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
     output_df['predicted_persona'] = y_pred_str
     output_df['persona'] = y_true_str
 
-    # Add probability ranking and confidence score
     output_df['probability_ranking'] = ''
     output_df['confidence_score'] = 0.0
     for i in range(len(output_df)):
@@ -444,14 +427,11 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
         predicted_persona = output_df.loc[i, 'predicted_persona']
         output_df.loc[i, 'confidence_score'] = probs[predicted_persona]
 
-    # Compute per-record accuracy_rate
     output_df['accuracy_rate'] = (output_df['predicted_persona'] == output_df['persona']).astype(int)
 
-    # Compute overall accuracy
     overall_accuracy = accuracy_score(y_true, y_pred)
     print(f"\nOverall Accuracy: {overall_accuracy * 100:.2f}%")
 
-    # Compute per-persona metrics
     print("\nPer-Persona Metrics:")
     persona_metrics = []
     for persona in sorted(personas):
@@ -491,7 +471,6 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
             persona_df = output_df[mask][cols]
             print(persona_df.head().to_string(index=False))
 
-    # Overall metrics
     overall_metrics = {
         'persona': 'Overall',
         'total_records': len(output_df),
@@ -509,7 +488,6 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
     print(f"  Correct Predictions with Low Confidence (< 0.7): {low_conf_correct_overall} ({low_conf_correct_overall/overall_metrics['matches']*100:.2f}% of matches)")
     print(f"  Correct Predictions with Very Low Confidence (< 0.5): {very_low_conf_correct_overall} ({very_low_conf_correct_overall/overall_metrics['matches']*100:.2f}% of matches)")
 
-    # Confidence analysis by correctness
     print("\nConfidence Analysis by Correctness:")
     for persona in sorted(personas):
         mask = output_df['persona'] == persona
@@ -521,7 +499,6 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
         print(f"  Avg Confidence (Correct): {correct_conf:.2f} (Count: {correct_mask.sum()})")
         print(f"  Avg Confidence (Incorrect): {incorrect_conf:.2f} (Count: {incorrect_mask.sum()})")
 
-    # Feature importance
     print("\nFeature Importance (Top 10):")
     try:
         if isinstance(model, CalibratedClassifierCV):
@@ -546,7 +523,6 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
     except Exception as e:
         print(f"Error calculating feature importance: {e}. Skipping feature importance calculation.")
 
-    # Misclassification analysis
     print("\nMisclassification Analysis:")
     misclassified = output_df[output_df['accuracy_rate'] == 0]
     for persona in ['vision', 'csnp', 'dental']:
@@ -564,31 +540,25 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
             cols.append('csnp_specific_signal')
         print(persona_mis[cols].head().to_string(index=False))
 
-    # Top-2 accuracy
     top_2_accuracy = top_k_accuracy_score(y_true, y_pred_proba, k=2, labels=model.classes_)
     print(f"\nTop-2 Accuracy: {top_2_accuracy * 100:.2f}%")
 
-    # Confusion matrix
     cm = confusion_matrix(y_true, y_pred, labels=model.classes_)
     cm_df = pd.DataFrame(cm, index=personas, columns=personas)
     print("\nConfusion Matrix:")
     print(cm_df)
 
-    # Classification report
     print("\nClassification Report:")
     print(classification_report(y_true_str, y_pred_str, labels=personas, target_names=personas))
 
-    # Create summary DataFrame
     summary_data = persona_metrics + [overall_metrics]
     summary_df = pd.DataFrame(summary_data)
     summary_df.to_csv(SUMMARY_FILE, index=False)
     print(f"\nSummary evaluation results saved to {SUMMARY_FILE}")
 
-    # Add overall metrics to output_df
     output_df['overall_accuracy'] = overall_accuracy
     output_df['top_2_accuracy'] = top_2_accuracy
 
-    # Save detailed results
     output_df.to_csv(OUTPUT_FILE, index=False)
     print(f"\nDetailed evaluation results saved to {OUTPUT_FILE}")
 

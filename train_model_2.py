@@ -32,6 +32,14 @@ def load_data(behavioral_path, plan_path):
     try:
         behavioral_df = pd.read_csv(behavioral_path)
         plan_df = pd.read_csv(plan_path)
+        
+        # Clean persona column immediately: convert to string and handle invalid values
+        behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
+        # Replace 'nan' strings (from float NaN) with empty string
+        behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
+        # Log unique personas for debugging
+        logging.info(f"Raw persona values: {behavioral_df['persona'].unique()}")
+        
         logging.info(f"Behavioral data: {len(behavioral_df)} rows, Plan data: {len(plan_df)} rows")
         return behavioral_df, plan_df
     except Exception as e:
@@ -39,30 +47,26 @@ def load_data(behavioral_path, plan_path):
         raise
 
 def normalize_persona(df):
-    """Normalize personas, ensuring all are strings and valid."""
+    """Normalize personas, ensuring all are valid strings."""
     valid_personas = list(PERSONA_COEFFICIENTS.keys())
     new_rows = []
     
     for _, row in df.iterrows():
-        # Handle missing or invalid persona values
-        if pd.isna(row['persona']) or row['persona'] == '':
-            logging.warning(f"Skipping row with missing persona: {row.to_dict()}")
+        if not row['persona'] or row['persona'] == '':
+            logging.warning(f"Skipping row with empty persona: {row.to_dict()}")
             continue
         
-        # Convert persona to string to handle numbers or mixed types
-        persona_str = str(row['persona']).strip().lower()
-        
-        # Split multi-persona entries (e.g., 'csnp,dental')
-        personas = [p.strip() for p in persona_str.split(',')]
+        # Persona is already a string from load_data
+        personas = [p.strip() for p in row['persona'].split(',')]
         valid_found = [p for p in personas if p in valid_personas]
         
         if not valid_found:
-            logging.warning(f"Skipping row with no valid personas: {persona_str}")
+            logging.warning(f"Skipping row with no valid personas: {row['persona']}")
             continue
         
-        # Take the first valid persona to avoid duplication
+        # Take the first valid persona
         row_copy = row.copy()
-        row_copy['persona'] = valid_found[0]  # Ensure string type
+        row_copy['persona'] = valid_found[0]
         new_rows.append(row_copy)
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
@@ -71,7 +75,7 @@ def normalize_persona(df):
     
     # Verify all personas are strings
     if not all(isinstance(p, str) for p in result['persona']):
-        logging.error(f"Found non-string personas: {result['persona'].unique()}")
+        logging.error(f"Non-string personas found: {result['persona'].unique()}")
         raise ValueError("Persona column contains non-string values after normalization")
     
     return result
@@ -164,12 +168,21 @@ def main():
     )
     logging.info(f"Training set: {X_train.shape[0]} samples, Testing set: {X_test.shape[0]} samples")
     
-    # Label encoding on all labels to ensure all personas are known
+    # Verify labels in train and test sets
+    if not all(isinstance(label, str) for label in y_train):
+        logging.error(f"Non-string labels in y_train: {y_train.unique()}")
+        raise ValueError("y_train contains non-string labels")
+    if not all(isinstance(label, str) for label in y_test):
+        logging.error(f"Non-string labels in y_test: {y_test.unique()}")
+        raise ValueError("y_test contains non-string labels")
+    
+    # Label encoding
     le = LabelEncoder()
     le.fit(y)  # Fit on full y to include all possible labels
     y_train_encoded = le.transform(y_train)
+    y_test_encoded = le.transform(y_test)
     
-    # Balance training data with SMOTE and custom sampling strategy
+    # Balance training data with SMOTE
     sampling_strategy = {persona: max(100, count) for persona, count in y_train.value_counts().items()}
     smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
     try:
@@ -177,7 +190,11 @@ def main():
         logging.info(f"Balanced training set: {X_train_balanced.shape[0]} samples")
         logging.info(f"Class distribution after balancing: {pd.Series(y_train_balanced).value_counts().to_dict()}")
         
-        # Encode balanced training labels
+        # Verify balanced labels
+        if not all(isinstance(label, str) for label in y_train_balanced):
+            logging.error(f"Non-string labels in y_train_balanced: {y_train_balanced.unique()}")
+            raise ValueError("y_train_balanced contains non-string labels")
+        
         y_train_balanced_encoded = le.transform(y_train_balanced)
     except ValueError as e:
         logging.error(f"SMOTE failed: {e}. Falling back to original training data.")
@@ -190,11 +207,9 @@ def main():
         logging.error(f"Test set contains unseen labels: {unseen_labels}")
         raise ValueError(f"Test set contains labels not seen in training: {unseen_labels}")
     
-    y_test_encoded = le.transform(y_test)
-    
     # Hyperparameter tuning with Optuna
     study = optuna.create_study(direction='maximize')
-    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encode, X_test, y_test_encoded), n_trials=20)
+    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=20)
     best_params = study.best_params
     logging.info(f"Best hyperparameters: {best_params}")
     
@@ -213,10 +228,10 @@ def main():
     
     # Evaluate
     y_pred = stacking.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
+    accuracy = accuracy_score(y_test_encoded, y_pred)
     logging.info(f"Overall Accuracy: {accuracy * 100:.2f}%")
-    logging.info("Classification Report:\n" + classification_report(y_test, y_pred))
-    logging.info("Confusion Matrix:\n" + str(confusion_matrix(y_test, y_pred)))
+    logging.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
+    logging.info("Confusion Matrix:\n" + str(confusion_matrix(y_test_encoded, y_pred)))
     
     # Save model and artifacts
     os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)

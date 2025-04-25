@@ -9,8 +9,8 @@ BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-0.0.3.pkl'
 LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder.pkl'  # New
-OUTPUT_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_results_0401_2025_0420_2025.csv'
-SUMMARY_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_summary_0401_2025_0420_2025.csv'
+OUTPUT_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_results_0401_2025_0420_2025_v3.csv'
+SUMMARY_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_summary_0401_2025_0420_2025_v3.csv'
 
 def load_model_and_encoder(model_path, encoder_path):
     try:
@@ -363,6 +363,12 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
     print(f"Encoded ground truth personas: {valid_ground_truth['persona_encoded'].unique().tolist()}")
 
     # Align feature_df with ground_truth_df using userid, zip, plan_id
+    
+    # 🔧 FIX: Ensure matching datatypes for merge keys
+    for col in ['userid', 'zip', 'plan_id']:
+        training_df[col] = training_df[col].astype(str)
+        valid_ground_truth[col] = valid_ground_truth[col].astype(str)
+
     training_df = training_df.merge(
         valid_ground_truth[['userid', 'zip', 'plan_id', 'persona', 'persona_encoded']],
         how='inner',

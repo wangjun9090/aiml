@@ -8,7 +8,7 @@ from sklearn.preprocessing import LabelEncoder
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-0.0.3.pkl'
-LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder.pkl'  # New
+LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder.pkl'
 OUTPUT_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_results_0401_2025_0420_2025.csv'
 SUMMARY_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/eval/042025/eval_summary_0401_2025_0420_2025.csv'
 
@@ -26,7 +26,6 @@ def load_model_and_encoder(model_path, encoder_path):
             print(f"Label encoder classes: {le.classes_}")
         except FileNotFoundError:
             print(f"Warning: Label encoder file {encoder_path} not found. Using default persona mapping.")
-            # Default mapping based on expected personas
             le = LabelEncoder()
             le.classes_ = np.array(['csnp', 'dental', 'doctor', 'drug', 'dsnp', 'vision'])
             print(f"Default label encoder classes: {le.classes_}")
@@ -54,13 +53,15 @@ def normalize_persona(df):
     """Normalize personas for ground truth evaluation (split multiple personas into separate rows)."""
     new_rows = []
     for idx, row in df.iterrows():
-        if pd.isna(row['persona']):
-            print(f"Warning: NaN persona at index {idx}")
-            continue
-        personas = [p.strip().lower() for p in str(row['persona']).split(',')]
-        if not personas or personas[0] == '':
-            print(f"Warning: Empty persona at index {idx}")
-            continue
+        if pd.isna(row['persona']) or str(row['persona']).strip() == '':
+            print(f"Warning: NaN or empty persona at index {idx}. Assigning default 'dsnp'.")
+            personas = ['dsnp']
+        else:
+            personas = [p.strip().lower() for p in str(row['persona']).split(',')]
+            if not personas or personas[0] == '':
+                print(f"Warning: Empty persona at index {idx}. Assigning default 'dsnp'.")
+                personas = ['dsnp']
+        
         if 'dsnp' in personas or 'csnp' in personas:
             first_row = row.copy()
             first_persona = personas[0]
@@ -75,6 +76,7 @@ def normalize_persona(df):
             row_copy = row.copy()
             row_copy['persona'] = personas[0]
             new_rows.append(row_copy)
+    
     normalized_df = pd.DataFrame(new_rows).reset_index(drop=True)
     print(f"Rows after persona normalization: {len(normalized_df)}")
     print(f"Unique personas after normalization: {normalized_df['persona'].unique().tolist()}")
@@ -83,10 +85,11 @@ def normalize_persona(df):
 def prepare_evaluation_features(behavioral_df, plan_df, model, le):
     feature_df = behavioral_df.copy()
 
-    feature_df['zip'] = feature_df['zip'].astype(str).fillna('')
-    feature_df['plan_id'] = feature_df['plan_id'].astype(str).fillna('')
-    plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
-    plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
+    # Ensure consistent data types for merge keys
+    feature_df['zip'] = feature_df['zip'].astype(str).fillna('unknown')
+    feature_df['plan_id'] = feature_df['plan_id'].astype(str).fillna('unknown')
+    plan_df['zip'] = plan_df['zip'].astype(str).fillna('unknown')
+    plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('unknown')
 
     training_df = feature_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
@@ -101,7 +104,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
         print("Error: Merge resulted in empty DataFrame. Check zip/plan_id compatibility.")
         print(f"Behavioral_df zip/plan_id sample: {feature_df[['zip', 'plan_id']].head().to_string()}")
         print(f"Plan_df zip/plan_id sample: {plan_df[['zip', 'plan_id']].head().to_string()}")
-        return None, None, None
+        return None, None, None, None
 
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
     training_df = training_df.drop(columns=['state_beh', 'state_plan'], errors='ignore').reset_index(drop=True)
@@ -136,7 +139,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
     query_cols = [col for col in training_df.columns if col.startswith('query_')]
 
     def assign_quality_level(row):
-        has_plan_id = pd.notna(row['plan_id']) and row['plan_id'] != ''
+        has_plan_id = pd.notna(row['plan_id']) and row['plan_id'] != 'unknown'
         has_clicks = (row.get('dce_click_count', 0) > 0 and pd.notna(row.get('dce_click_count'))) or \
                      (row.get('pro_click_count', 0) > 0 and pd.notna(row.get('pro_click_count')))
         has_filters = any(row.get(col, 0) > 0 and pd.notna(row.get(col)) for col in filter_cols)
@@ -247,7 +250,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
         click_col = feature_info.get('click_col', None)
         interaction_col = feature_info.get('interaction_col', None)
         
-        if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
+        if pd.notna(row['plan_id']) and row['plan_id'] != 'unknown' and plan_col in row and pd.notna(row[plan_col]):
             base_weight = min(row[plan_col], 0.5)
             if plan_col in ['csnp', 'dsnp'] and row.get('csnp_type', 'N') == 'Y':
                 base_weight *= W_HIGH
@@ -345,22 +348,36 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
 
     # Prepare ground truth using persona column
     ground_truth_df = normalize_persona(behavioral_df)
-    # Encode ground truth personas
-    valid_personas = [p for p in ground_truth_df['persona'].unique() if p in le.classes_]
+
+    # Log unexpected personas
+    all_personas = ground_truth_df['persona'].unique()
+    valid_personas = [p for p in all_personas if p in le.classes_]
+    unexpected_personas = [p for p in all_personas if p not in le.classes_]
+    if unexpected_personas:
+        print(f"Warning: Unexpected personas found: {unexpected_personas}")
+        ground_truth_df['persona'] = ground_truth_df['persona'].apply(
+            lambda x: 'dsnp' if x in unexpected_personas else x
+        )
+        print(f"Mapped unexpected personas to 'dsnp'")
+
     print(f"Valid personas for encoding: {valid_personas}")
-    valid_ground_truth = ground_truth_df[ground_truth_df['persona'].isin(valid_personas)].reset_index(drop=True)
+    valid_ground_truth = ground_truth_df[ground_truth_df['persona'].isin(le.classes_)].reset_index(drop=True)
     print(f"Rows in valid ground truth: {len(valid_ground_truth)}")
     print(f"Unique personas in ground truth: {valid_ground_truth['persona'].unique().tolist()}")
 
     if len(valid_ground_truth) == 0:
         print("Error: No valid ground truth personas match label encoder classes.")
         print(f"Label encoder classes: {le.classes_}")
-        return None, None, None
+        return None, None, None, None
 
     # Encode y_true
-    y_true = le.transform(valid_ground_truth['persona'])
-    valid_ground_truth['persona_encoded'] = y_true
+    valid_ground_truth['persona_encoded'] = le.transform(valid_ground_truth['persona'])
     print(f"Encoded ground truth personas: {valid_ground_truth['persona_encoded'].unique().tolist()}")
+
+    # Ensure consistent data types for merge with ground truth
+    valid_ground_truth['zip'] = valid_ground_truth['zip'].astype(str).fillna('unknown')
+    valid_ground_truth['plan_id'] = valid_ground_truth['plan_id'].astype(str).fillna('unknown')
+    valid_ground_truth['userid'] = valid_ground_truth['userid'].astype(str).fillna('unknown')
 
     # Align feature_df with ground_truth_df using userid, zip, plan_id
     training_df = training_df.merge(
@@ -372,7 +389,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
 
     if len(training_df) == 0:
         print("Error: No data remains after aligning with ground truth. Check userid/zip/plan_id compatibility.")
-        return None, None, None
+        return None, None, None, None
 
     # Prepare features and metadata
     metadata_columns = ['userid', 'zip', 'plan_id', 'persona', 'persona_encoded', 'quality_level'] + feature_columns
@@ -406,7 +423,7 @@ def evaluate_model(model, X, y_true, metadata, le):
     # Combine metadata with predictions
     output_df = pd.concat([metadata.reset_index(drop=True), proba_df], axis=1)
     output_df['predicted_persona'] = y_pred_str
-    output_df['persona'] = y_true_str  # Update persona to string labels
+    output_df['persona'] = y_true_str
 
     # Add probability ranking and confidence score
     output_df['probability_ranking'] = ''
@@ -493,7 +510,7 @@ def evaluate_model(model, X, y_true, metadata, le):
         incorrect_conf = output_df['confidence_score'][incorrect_mask].mean() if incorrect_mask.sum() > 0 else 0.0
         print(f"Persona '{persona}':")
         print(f"  Avg Confidence (Correct): {correct_conf:.2f} (Count: {correct_mask.sum()})")
-        print(f"  Avg Confidence (Incorrect): {incorrect_conf:.2f} (Count: {incorrect_mask.sum()})")
+        print(f"  Avg Confidence (Incorrect): {incorrect_conf:.2f янкета(Count: {incorrect_mask.sum()})")
 
     # Feature importance
     feature_importance = pd.DataFrame({
@@ -511,7 +528,7 @@ def evaluate_model(model, X, y_true, metadata, le):
         print(f"\nMisclassified {persona.capitalize()} Records:")
         cols = ['userid', 'persona', 'predicted_persona', 'confidence_score', f'w_{persona}', f'query_{persona}', f'filter_{persona}']
         if persona == 'vision':
-            cols.append('vision_interaction')
+            cols.append('vision_interreation')
             cols.append('vision_signal')
         elif persona == 'dental':
             cols.append('dental_interaction')

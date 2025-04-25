@@ -3,6 +3,7 @@ import numpy as np
 import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, top_k_accuracy_score
 from sklearn.preprocessing import LabelEncoder
+from sklearn.calibration import CalibratedClassifierCV
 
 # Hardcoded file paths for Databricks
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
@@ -18,6 +19,8 @@ def load_model_and_encoder(model_path, encoder_path):
             model = pickle.load(f)
         print(f"Model loaded from {model_path}")
         print(f"Model classes: {model.classes_}")
+        if isinstance(model, CalibratedClassifierCV):
+            print(f"Base estimator: {type(model.base_estimator).__name__}")
         
         try:
             with open(encoder_path, 'rb') as f:
@@ -53,26 +56,32 @@ def normalize_persona(df):
     """Normalize personas for ground truth evaluation (split multiple personas into separate rows)."""
     new_rows = []
     for idx, row in df.iterrows():
+        # Handle NaN, empty, or blank personas
         if pd.isna(row['persona']) or str(row['persona']).strip() == '':
             print(f"Warning: NaN or empty persona at index {idx}. Assigning default 'dsnp'.")
             personas = ['dsnp']
         else:
-            personas = [p.strip().lower() for p in str(row['persona']).split(',')]
-            if not personas or personas[0] == '':
-                print(f"Warning: Empty persona at index {idx}. Assigning default 'dsnp'.")
+            # Split and clean personas
+            personas = [p.strip().lower() for p in str(row['persona']).split(',') if p.strip()]
+            if not personas:
+                print(f"Warning: No valid personas after cleaning at index {idx}. Assigning default 'dsnp'.")
                 personas = ['dsnp']
-        
+
+        # Process each row based on personas
         if 'dsnp' in personas or 'csnp' in personas:
+            # Create first row with the primary persona
             first_row = row.copy()
             first_persona = personas[0]
             if first_persona in ['unknown', 'none', 'healthcare', '']:
                 first_persona = 'dsnp' if 'dsnp' in personas else 'csnp'
             first_row['persona'] = first_persona
             new_rows.append(first_row)
+            # Create second row with dsnp or csnp
             second_row = row.copy()
             second_row['persona'] = 'dsnp' if 'dsnp' in personas else 'csnp'
             new_rows.append(second_row)
         else:
+            # Single persona case
             row_copy = row.copy()
             row_copy['persona'] = personas[0]
             new_rows.append(row_copy)
@@ -103,7 +112,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
     if len(training_df) == 0:
         print("Error: Merge resulted in empty DataFrame. Check zip/plan_id compatibility.")
         print(f"Behavioral_df zip/plan_id sample: {feature_df[['zip', 'plan_id']].head().to_string()}")
-        print(f"Plan_df zip/PLAN_id sample: {plan_df[['zip', 'plan_id']].head().to_string()}")
+        print(f"Plan_df zip/plan_id sample: {plan_df[['zip', 'plan_id']].head().to_string()}")
         return None, None, None, None, None
 
     training_df['state'] = training_df['state_beh'].fillna(training_df['state_plan'])
@@ -259,7 +268,7 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
         elif pd.notna(row.get('compared_plan_ids')) and isinstance(row['compared_plan_ids'], str) and row.get('num_plans_compared', 0) > 0:
             compared_ids = row['compared_plan_ids'].split(',')
             compared_plans = plan_df[plan_df['plan_id'].isin(compared_ids) & (plan_df['zip'] == row['zip'])]
-            if not compared_plans.empty and plan egregation_col in compared_plans.columns:
+            if not compared_plans.empty and plan_col in compared_plans.columns:
                 base_weight = min(compared_plans[plan_col].mean(), 0.5)
                 if plan_col in ['csnp', 'dsnp'] and 'csnp_type' in compared_plans.columns:
                     type_y_ratio = (compared_plans['csnp_type'] == 'Y').mean()
@@ -513,12 +522,29 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
         print(f"  Avg Confidence (Incorrect): {incorrect_conf:.2f} (Count: {incorrect_mask.sum()})")
 
     # Feature importance
-    feature_importance = pd.DataFrame({
-        'feature': feature_columns,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
     print("\nFeature Importance (Top 10):")
-    print(feature_importance.head(10))
+    try:
+        if isinstance(model, CalibratedClassifierCV):
+            base_estimator = model.base_estimator
+            if hasattr(base_estimator, 'feature_importances_'):
+                feature_importance = pd.DataFrame({
+                    'feature': feature_columns,
+                    'importance': base_estimator.feature_importances_
+                }).sort_values('importance', ascending=False)
+                print(feature_importance.head(10))
+            else:
+                print("Base estimator does not support feature_importances_. Skipping feature importance calculation.")
+        else:
+            if hasattr(model, 'feature_importances_'):
+                feature_importance = pd.DataFrame({
+                    'feature': feature_columns,
+                    'importance': model.feature_importances_
+                }).sort_values('importance', ascending=False)
+                print(feature_importance.head(10))
+            else:
+                print("Model does not support feature_importances_. Skipping feature importance calculation.")
+    except Exception as e:
+        print(f"Error calculating feature importance: {e}. Skipping feature importance calculation.")
 
     # Misclassification analysis
     print("\nMisclassification Analysis:")
@@ -569,7 +595,7 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
     return output_df
 
 def main():
-    print("Evaluating Random Forest model...")
+    print("Evaluating model...")
     model, le = load_model_and_encoder(MODEL_FILE, LABEL_ENCODER_FILE)
     behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
     X, y_true, metadata, le, feature_columns = prepare_evaluation_features(behavioral_df, plan_df, model, le)

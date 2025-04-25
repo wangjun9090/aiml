@@ -15,13 +15,11 @@ import logging
 import os
 import sys
 
-# Set up logging with force flush
+# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -35,7 +33,7 @@ LABEL_ENCODER_FILE = 'label_encoder.pkl'
 # Persona coefficients for weighting
 PERSONA_COEFFICIENTS = {
     'dental': 3.5, 'doctor': 3.0, 'dsnp': 2.5, 'drug': 1.0,
-    'vision': 1.8, 'csnp': 2SyS': 2.0, 'transportation': 1.0, 'otc': 1.0
+    'vision': 1.8, 'csnp': 2.0, 'transportation': 1.0, 'otc': 1.0
 }
 
 def load_data(behavioral_path, plan_path):
@@ -43,7 +41,7 @@ def load_data(behavioral_path, plan_path):
         behavioral_df = pd.read_csv(behavioral_path)
         plan_df = pd.read_csv(plan_path)
         
-        # Clean persona column: convert to string and handle invalid values
+        # Clean persona column
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
         behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
         logger.info(f"Raw persona values: {behavioral_df['persona'].unique()}")
@@ -57,18 +55,17 @@ def load_data(behavioral_path, plan_path):
 def normalize_persona(df):
     """Normalize personas, ensuring all are valid strings."""
     valid_personas = list(PERSONA_COEFFICIENTS.keys())
+    original_len = len(df)
     new_rows = []
     
     for _, row in df.iterrows():
         if not row['persona'] or row['persona'] == '':
-            logger.warning(f"Skipping row with empty persona: {row.to_dict()}")
             continue
         
         personas = [p.strip() for p in row['persona'].split(',')]
         valid_found = [p for p in personas if p in valid_personas]
         
         if not valid_found:
-            logger.warning(f"Skipping row with no valid personas: {row['persona']}")
             continue
         
         row_copy = row.copy()
@@ -76,7 +73,10 @@ def normalize_persona(df):
         new_rows.append(row_copy)
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
-    logger.info(f"Normalized {len(df)} rows into {len(result)} rows")
+    skipped = original_len - len(result)
+    if skipped > 0:
+        logger.info(f"Skipped {skipped} rows due to empty or invalid personas")
+    logger.info(f"Normalized to {len(result)} rows")
     logger.info(f"Persona distribution: {result['persona'].value_counts().to_dict()}")
     
     if not all(isinstance(p, str) for p in result['persona']):
@@ -88,20 +88,17 @@ def normalize_persona(df):
 def prepare_features(behavioral_df, plan_df):
     behavioral_df = normalize_persona(behavioral_df)
     
-    # Ensure consistent data types
     behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
     behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).fillna('')
     plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
     plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
     
-    # Merge data
     training_df = behavioral_df.merge(
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left', on=['zip', 'plan_id']
     ).reset_index(drop=True)
     logger.info(f"Rows after merge: {len(training_df)}")
     
-    # Simplified feature list
     behavioral_features = [
         'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider',
         'query_vision', 'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation',
@@ -110,11 +107,9 @@ def prepare_features(behavioral_df, plan_df):
     ]
     plan_features = ['ma_otc', 'ma_transportation', 'ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp']
     
-    # Fill missing features
     for col in behavioral_features + plan_features:
         training_df[col] = training_df.get(col, 0).fillna(0)
     
-    # Simplified feature engineering
     training_df['dental_signal'] = (training_df['query_dental'] + training_df['filter_dental']) * training_df['ma_dental_benefit']
     training_df['vision_signal'] = (training_df['query_vision'] + training_df['filter_vision']) * training_df['ma_vision']
     additional_features = ['dental_signal', 'vision_signal']
@@ -133,6 +128,18 @@ def prepare_features(behavioral_df, plan_df):
     logger.info(f"Features: {X.columns.tolist()}")
     logger.info(f"Persona distribution: {y.value_counts().to_dict()}")
     return X, y, scaler
+
+def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
+    """Calculate accuracy for each persona."""
+    per_persona_accuracy = {}
+    for cls_idx, cls_name in enumerate(class_names):
+        mask = y_true == cls_idx
+        if mask.sum() > 0:
+            cls_accuracy = accuracy_score(y_true[mask], y_pred[mask])
+            per_persona_accuracy[cls_name] = cls_accuracy * 100
+        else:
+            per_persona_accuracy[cls_name] = 0.0  # No samples for this class
+    return per_persona_accuracy
 
 def objective(trial, X_train, y_train, X_val, y_val):
     params = {
@@ -168,8 +175,6 @@ def main():
     )
     logger.info(f"Training set: {X_train.shape[0]} samples ({X_train.shape[0]/len(X)*100:.1f}%)")
     logger.info(f"Testing set: {X_test.shape[0]} samples ({X_test.shape[0]/len(X)*100:.1f}%)")
-    logger.info(f"Train class distribution: {pd.Series(y_train).value_counts().to_dict()}")
-    logger.info(f"Test class distribution: {pd.Series(y_test).value_counts().to_dict()}")
     
     # Verify labels
     if not all(isinstance(label, str) for label in y_train):
@@ -186,7 +191,7 @@ def main():
     y_test_encoded = le.transform(y_test)
     
     # Balance training data with SMOTE
-    sampling_strategy = {persona: max(200, count) for persona, count in y_train.value_counts().items()}
+    sampling_strategy = {persona: max(500, count) for persona, count in y_train.value_counts().items()}
     smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
     try:
         X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
@@ -213,14 +218,14 @@ def main():
     class_weights = compute_class_weight('balanced', classes=le.classes_, y=y_train)
     class_weight_dict = {i: class_weights[i] for i in range(len(le.classes_))}
     
-    # Hyperparameter tuning with Optuna
+    # Hyperparameter tuning
     logger.info("Starting hyperparameter tuning...")
     study = optuna.create_study(direction='maximize')
     study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=50)
     best_params = study.best_params
     logger.info(f"Best hyperparameters: {best_params}")
     
-    # Train final model with class weights
+    # Train final model
     xgb_model = xgb.XGBClassifier(**best_params, random_state=42)
     lgb_model = lgb.LGBMClassifier(n_estimators=200, num_leaves=31, random_state=42, class_weight=class_weight_dict)
     rf_model = RandomForestClassifier(n_estimators=200, max_depth=20, random_state=42, n_jobs=-1, class_weight=class_weight_dict)
@@ -231,7 +236,7 @@ def main():
         cv=5, n_jobs=-1
     )
     
-    # Cross-validation on training set
+    # Cross-validation
     logger.info("Performing cross-validation on training set...")
     cv_scores = cross_val_score(stacking, X_train_balanced, y_train_balanced_encoded, cv=StratifiedKFold(n_splits=5), scoring='accuracy')
     logger.info(f"Cross-validation accuracy: {cv_scores.mean()*100:.2f}% ± {cv_scores.std()*100:.2f}%")
@@ -243,11 +248,17 @@ def main():
     # Evaluate on test set
     logger.info("Evaluating on test set...")
     y_pred = stacking.predict(X_test)
-    accuracy = accuracy_score(y_test_encoded, y_pred)
-    logger.info(f"Overall Accuracy on Test Set (20% of data): {accuracy * 100:.2f}%")
+    overall_accuracy = accuracy_score(y_test_encoded, y_pred)
+    logger.info(f"Overall Accuracy on Test Set (20% of data): {overall_accuracy * 100:.2f}%")
     
-    if accuracy < 0.8:
-        logger.warning(f"Accuracy {accuracy * 100:.2f}% is below target of 80%. See classification report for details.")
+    if overall_accuracy < 0.8:
+        logger.warning(f"Accuracy {overall_accuracy * 100:.2f}% is below target of 80%. Check per-persona accuracies.")
+    
+    # Per-persona accuracy
+    per_persona_accuracy = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
+    logger.info("Per-Persona Accuracy (%):")
+    for persona, acc in per_persona_accuracy.items():
+        logger.info(f"  {persona}: {acc:.2f}%")
     
     logger.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
     logger.info("Confusion Matrix:\n" + str(confusion_matrix(y_test_encoded, y_pred)))

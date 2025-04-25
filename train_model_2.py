@@ -125,7 +125,18 @@ def load_data(behavioral_path, plan_path):
         
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
         behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
-        logger.info(f"Unique personas in behavioral_df: {behavioral_df['persona'].unique()}")
+        logger.info(f"Behavioral_df rows: {len(behavioral_df)}, Unique personas: {behavioral_df['persona'].unique()}")
+        logger.info(f"Plan_df rows: {len(plan_df)}")
+        
+        # Check zip/plan_id overlap
+        behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip()
+        behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip()
+        plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
+        common_zips = set(behavioral_df['zip']).intersection(set(plan_df['zip']))
+        common_plan_ids = set(behavioral_df['plan_id']).intersection(set(plan_df['plan_id']))
+        logger.info(f"Common zip values: {len(common_zips)}/{len(set(behavioral_df['zip']))} behavioral, {len(set(plan_df['zip']))} plan")
+        logger.info(f"Common plan_id values: {len(common_plan_ids)}/{len(set(behavioral_df['plan_id']))} behavioral, {len(set(plan_df['plan_id']))} plan")
         
         return behavioral_df, plan_df
     except Exception as e:
@@ -152,7 +163,7 @@ def normalize_persona(df):
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
     if result.empty:
-        logger.error("No valid personas found after normalization")
+        logger.error(f"No valid personas found after normalization. Valid personas: {valid_personas}")
         raise ValueError("No valid personas found after normalization")
     logger.info(f"Rows after normalization: {len(result)}")
     return result
@@ -161,26 +172,26 @@ def prepare_features(behavioral_df, plan_df):
     try:
         behavioral_df = normalize_persona(behavioral_df)
         
-        behavioral_df['zip'] = behavioral_df['zip'].astype(str).fillna('')
-        behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).fillna('')
-        plan_df['zip'] = plan_df['zip'].astype(str).fillna('')
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).fillna('')
-        
+        # Try merge
         training_df = behavioral_df.merge(
             plan_df.rename(columns={'StateCode': 'state'}),
             how='left', on=['zip', 'plan_id']
         ).reset_index(drop=True)
-        if training_df.empty:
-            logger.error("Merge resulted in empty DataFrame. Check zip/plan_id alignment.")
-            raise ValueError("Merge resulted in empty DataFrame")
         logger.info(f"Rows after merge: {len(training_df)}")
+        
+        # Fallback if merge fails
+        if training_df.empty or len(training_df) < 10:
+            logger.warning("Merge yielded insufficient data. Using behavioral_df features only.")
+            training_df = behavioral_df.copy()
+            plan_features = []
+        else:
+            plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp']
         
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
             'num_pages_viewed'
         ]
-        plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp']
         
         for col in behavioral_features + plan_features:
             training_df[col] = training_df.get(col, 0).fillna(0)
@@ -192,20 +203,21 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona, plan_df), axis=1
                 )
         
-        training_df['dental_interaction'] = training_df['query_dental'] * training_df['ma_dental_benefit']
-        training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
-        training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
-        training_df['vision_interaction'] = training_df['query_vision'] * training_df['ma_vision']
+        training_df['dental_interaction'] = training_df['query_dental'] * training_df.get('ma_dental_benefit', 0)
+        training_df['csnp_interaction'] = training_df['query_csnp'] * training_df.get('csnp', 0)
+        training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df.get('dsnp', 0)
+        training_df['vision_interaction'] = training_df['query_vision'] * training_df.get('ma_vision', 0)
         additional_features = ['dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction']
         additional_features += [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         
         feature_columns = behavioral_features + plan_features + additional_features
         
         training_df = training_df[training_df['persona'].isin(PERSONAS)].reset_index(drop=True)
+        logger.info(f"Rows after filtering: {len(training_df)}")
+        
         if training_df.empty:
             logger.error("No rows left after persona filtering")
             raise ValueError("No rows left after persona filtering")
-        logger.info(f"Rows after filtering: {len(training_df)}")
         
         X = training_df[feature_columns].fillna(0)
         y = training_df['persona']
@@ -213,6 +225,15 @@ def prepare_features(behavioral_df, plan_df):
         if X.empty or y.empty:
             logger.error(f"Feature matrix empty: X shape={X.shape}, y shape={y.shape}")
             raise ValueError("Feature matrix or target empty")
+        
+        # Validate feature variance
+        variances = X.var()
+        valid_features = variances[variances > 1e-5].index.tolist()
+        if not valid_features:
+            logger.error("No features with sufficient variance")
+            raise ValueError("No features with sufficient variance")
+        X = X[valid_features]
+        logger.info(f"Selected features: {valid_features}")
         
         scaler = StandardScaler()
         X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
@@ -316,7 +337,7 @@ def main():
         
         # Feature selection by importance
         importances = model.get_feature_importance()
-        feature_importance = pd.Series(importances, index=X_train.columns).nlargest(15).index.tolist()
+        feature_importance = pd.Series(importances, index=X_train_balanced.columns).nlargest(15).index.tolist()
         X_train_balanced = X_train_balanced[feature_importance]
         X_test = X_test[feature_importance]
         model.fit(X_train_balanced, y_train_balanced_encoded)

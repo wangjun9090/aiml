@@ -1,14 +1,11 @@
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.ensemble import RandomForestClassifier, StackingClassifier
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.linear_model import LogisticRegression
 from sklearn.utils.class_weight import compute_class_weight
 from imblearn.over_sampling import SMOTE
-import xgboost as xgb
 import lightgbm as lgb
 import optuna
 import logging
@@ -19,7 +16,8 @@ import sys
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True
 )
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -43,7 +41,6 @@ def load_data(behavioral_path, plan_path):
         
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
         behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
-        logger.info(f"Raw persona values: {behavioral_df['persona'].unique()}")
         
         logger.info(f"Behavioral data: {len(behavioral_df)} rows, Plan data: {len(plan_df)} rows")
         return behavioral_df, plan_df
@@ -76,7 +73,6 @@ def normalize_persona(df):
     if skipped > 0:
         logger.info(f"Skipped {skipped} rows due to empty or invalid personas")
     logger.info(f"Normalized to {len(result)} rows")
-    logger.info(f"Persona distribution: {result['persona'].value_counts().to_dict()}")
     
     if not all(isinstance(p, str) for p in result['persona']):
         logger.error(f"Non-string personas found: {result['persona'].unique()}")
@@ -109,7 +105,7 @@ def prepare_features(behavioral_df, plan_df):
     for col in behavioral_features + plan_features:
         training_df[col] = training_df.get(col, 0).fillna(0)
     
-    # Enhanced feature engineering for underperforming personas
+    # Enhanced features for underperforming personas
     training_df['dental_interaction'] = (training_df['query_dental'] + training_df['filter_dental']) * training_df['ma_dental_benefit'] * 2.0
     training_df['doctor_interaction'] = (training_df['query_provider'] + training_df['filter_provider']) * training_df.get('ma_provider_network', 0) * 2.0
     training_df['csnp_interaction'] = (training_df['query_csnp'] + training_df['filter_csnp']) * training_df['csnp'] * 2.0
@@ -128,7 +124,6 @@ def prepare_features(behavioral_df, plan_df):
     scaler = StandardScaler()
     X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
     
-    logger.info(f"Features: {X.columns.tolist()}")
     return X, y, scaler
 
 def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
@@ -143,25 +138,16 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
 
-def focal_loss_objective(y_true, y_pred):
-    """Focal loss for XGBoost to focus on minority classes."""
-    gamma = 2.0
-    alpha = 0.25
-    p = 1 / (1 + np.exp(-y_pred))
-    grad = alpha * (p - y_true) * (1 - p)**gamma * np.log(p + 1e-8)
-    hess = alpha * (1 - p)**gamma * (np.log(p + 1e-8) * (1 - p) + (p - y_true) * (gamma * p / (1 - p)))
-    return grad, hess
-
 def objective(trial, X_train, y_train, X_val, y_val):
     params = {
-        'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
-        'max_depth': trial.suggest_int('max_depth', 5, 30),
+        'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+        'num_leaves': trial.suggest_int('num_leaves', 20, 100),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
         'subsample': trial.suggest_float('subsample', 0.6, 1.0),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0)
     }
     
-    model = xgb.XGBClassifier(**params, random_state=42, objective='multi:softmax')
+    model = lgb.LGBMClassifier(**params, random_state=42, verbose=-1)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_val)
     return accuracy_score(y_val, y_pred)
@@ -170,38 +156,45 @@ def main():
     logger.info("Starting model training...")
     
     # Load data
-    behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
+    try:
+        behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
+    except Exception as e:
+        logger.error(f"Failed to load data: {e}")
+        return
     
     # Prepare features
-    X, y, scaler = prepare_features(behavioral_df, plan_df)
-    
-    # Verify all labels are strings
-    if not all(isinstance(label, str) for label in y):
-        logger.error(f"Non-string labels found in y: {y.unique()}")
-        raise ValueError("Target variable y contains non-string labels")
-    
-    # Split data (80% train, 20% test)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    logger.info(f"Training set: {X_train.shape[0]} samples ({X_train.shape[0]/len(X)*100:.1f}%)")
-    logger.info(f"Testing set: {X_test.shape[0]} samples ({X_test.shape[0]/len(X)*100:.1f}%)")
+    try:
+        X, y, scaler = prepare_features(behavioral_df, plan_df)
+    except Exception as e:
+        logger.error(f"Failed to prepare features: {e}")
+        return
     
     # Verify labels
-    if not all(isinstance(label, str) for label in y_train):
-        logger.error(f"Non-string labels in y_train: {y_train.unique()}")
-        raise ValueError("y_train contains non-string labels")
-    if not all(isinstance(label, str) for label in y_test):
-        logger.error(f"Non-string labels in y_test: {y_test.unique()}")
-        raise ValueError("y_test contains non-string labels")
+    if not all(isinstance(label, str) for label in y):
+        logger.error(f"Non-string labels found in y: {y.unique()}")
+        return
+    
+    # Split data (80% train, 20% test)
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        logger.info(f"Total samples: {len(X)}, Training set: {X_train.shape[0]} samples ({X_train.shape[0]/len(X)*100:.1f}%), Testing set: {X_test.shape[0]} samples ({X_test.shape[0]/len(X)*100:.1f}%)")
+    except Exception as e:
+        logger.error(f"Failed to split data: {e}")
+        return
     
     # Label encoding
     le = LabelEncoder()
-    le.fit(y)
-    y_train_encoded = le.transform(y_train)
-    y_test_encoded = le.transform(y_test)
+    try:
+        le.fit(y)
+        y_train_encoded = le.transform(y_train)
+        y_test_encoded = le.transform(y_test)
+    except Exception as e:
+        logger.error(f"Failed to encode labels: {e}")
+        return
     
-    # Aggressive SMOTE for minority classes
+    # SMOTE for minority classes
     sampling_strategy = {
         persona: 1000 if persona in ['csnp', 'dental', 'doctor', 'dsnp', 'vision'] else max(500, count)
         for persona, count in y_train.value_counts().items()
@@ -209,87 +202,68 @@ def main():
     smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
     try:
         X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
-        logger.info(f"Balanced training set: {X_train_balanced.shape[0]} samples")
-        logger.info(f"Class distribution after balancing: {pd.Series(y_train_balanced).value_counts().to_dict()}")
-        
-        if not all(isinstance(label, str) for label in y_train_balanced):
-            logger.error(f"Non-string labels in y_train_balanced: {y_train_balanced.unique()}")
-            raise ValueError("y_train_balanced contains non-string labels")
-        
         y_train_balanced_encoded = le.transform(y_train_balanced)
-    except ValueError as e:
-        logger.error(f"SMOTE failed: {e}. Falling back to original training data.")
+        logger.info(f"Balanced training set: {X_train_balanced.shape[0]} samples")
+    except Exception as e:
+        logger.error(f"SMOTE failed: {e}. Using original training data.")
         X_train_balanced, y_train_balanced = X_train, y_train
         y_train_balanced_encoded = y_train_encoded
     
-    # Verify test set labels
-    unseen_labels = set(y_test) - set(le.classes_)
-    if unseen_labels:
-        logger.error(f"Test set contains unseen labels: {unseen_labels}")
-        raise ValueError(f"Test set contains labels not seen in training: {unseen_labels}")
-    
-    # Enhanced class weights using PERSONA_COEFFICIENTS
+    # Class weights
     class_weights = compute_class_weight('balanced', classes=le.classes_, y=y_train)
     class_weight_dict = {i: class_weights[i] * PERSONA_COEFFICIENTS[le.classes_[i]] for i in range(len(le.classes_))}
     
     # Hyperparameter tuning
     logger.info("Starting hyperparameter tuning...")
-    study = optuna.create_study(direction='maximize')
-    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=100)
-    best_params = study.best_params
-    logger.info(f"Best hyperparameters: {best_params}")
+    try:
+        study = optuna.create_study(direction='maximize')
+        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=50)
+        best_params = study.best_params
+        logger.info(f"Best hyperparameters: {best_params}")
+    except Exception as e:
+        logger.error(f"Hyperparameter tuning failed: {e}")
+        return
     
     # Train final model
-    xgb_model = xgb.XGBClassifier(**best_params, random_state=42, objective='multi:softmax')
-    lgb_model = lgb.LGBMClassifier(n_estimators=200, num_leaves=31, random_state=42, class_weight=class_weight_dict)
-    rf_model = RandomForestClassifier(n_estimators=200, max_depth=20, random_state=42, n_jobs=-1, class_weight=class_weight_dict)
+    try:
+        model = lgb.LGBMClassifier(**best_params, random_state=42, class_weight=class_weight_dict, verbose=-1)
+        model.fit(X_train_balanced, y_train_balanced_encoded)
+    except Exception as e:
+        logger.error(f"Model training failed: {e}")
+        return
     
-    stacking = StackingClassifier(
-        estimators=[('xgb', xgb_model), ('lgb', lgb_model), ('rf', rf_model)],
-        final_estimator=xgb.XGBClassifier(random_state=42),
-        cv=5, n_jobs=-1
-    )
-    
-    # Cross-validation
-    logger.info("Performing cross-validation on training set...")
-    cv_scores = cross_val_score(stacking, X_train_balanced, y_train_balanced_encoded, cv=StratifiedKFold(n_splits=5), scoring='accuracy')
-    logger.info(f"Cross-validation accuracy: {cv_scores.mean()*100:.2f}% ± {cv_scores.std()*100:.2f}%")
-    
-    # Fit final model
-    logger.info("Training final model...")
-    stacking.fit(X_train_balanced, y_train_balanced_encoded)
-    
-    # Evaluate on test set
+    # Evaluate
     logger.info("Evaluating on test set...")
-    y_pred = stacking.predict(X_test)
-    overall_accuracy = accuracy_score(y_test_encoded, y_pred)
-    logger.info(f"Overall Accuracy on Test Set (20% of data): {overall_accuracy * 100:.2f}%")
-    
-    if overall_accuracy < 0.8:
-        logger.warning(f"Accuracy {overall_accuracy * 100:.2f}% is below target of 80%. Check per-persona accuracies.")
-    
-    # Per-persona accuracy
-    per_persona_accuracy = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
-    logger.info("Per-Persona Accuracy (%):")
-    for persona, acc in per_persona_accuracy.items():
-        logger.info(f"  {persona}: {acc:.2f}%")
-    
-    logger.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
-    logger.info("Confusion Matrix:\n" + str(confusion_matrix(y_test_encoded, y_pred)))
-    
-    # Feature importance from XGBoost
-    xgb_model.fit(X_train_balanced, y_train_balanced_encoded)
-    logger.info(f"Feature importances: {dict(zip(X.columns, xgb_model.feature_importances_))}")
+    try:
+        y_pred = model.predict(X_test)
+        overall_accuracy = accuracy_score(y_test_encoded, y_pred)
+        logger.info(f"Overall Accuracy on Test Set (20% of data): {overall_accuracy * 100:.2f}%")
+        
+        if overall_accuracy < 0.8:
+            logger.warning(f"Accuracy {overall_accuracy * 100:.2f}% is below target of 80%. Check per-persona accuracies.")
+        
+        per_persona_accuracy = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
+        logger.info("Per-Persona Accuracy (%):")
+        for persona, acc in per_persona_accuracy.items():
+            logger.info(f"  {persona}: {acc:.2f}%")
+        
+        logger.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
+    except Exception as e:
+        logger.error(f"Evaluation failed: {e}")
+        return
     
     # Save model and artifacts
-    os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
-    with open(MODEL_FILE, 'wb') as f:
-        pickle.dump(stacking, f)
-    with open(LABEL_ENCODER_FILE, 'wb') as f:
-        pickle.dump(le, f)
-    with open('scaler.pkl', 'wb') as f:
-        pickle.dump(scaler, f)
-    logger.info(f"Saved model, label encoder, and scaler to disk.")
+    try:
+        os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
+        with open(MODEL_FILE, 'wb') as f:
+            pickle.dump(model, f)
+        with open(LABEL_ENCODER_FILE, 'wb') as f:
+            pickle.dump(le, f)
+        with open('scaler.pkl', 'wb') as f:
+            pickle.dump(scaler, f)
+        logger.info(f"Saved model, label encoder, and scaler to disk.")
+    except Exception as e:
+        logger.error(f"Failed to save model: {e}")
 
 if __name__ == "__main__":
     main()

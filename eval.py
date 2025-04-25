@@ -3,7 +3,6 @@ import numpy as np
 import pickle
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, top_k_accuracy_score
 from sklearn.preprocessing import LabelEncoder
-from sklearn.calibration import CalibratedClassifierCV
 
 # Hardcoded file paths for Databricks
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
@@ -19,8 +18,6 @@ def load_model_and_encoder(model_path, encoder_path):
             model = pickle.load(f)
         print(f"Model loaded from {model_path}")
         print(f"Model classes: {model.classes_}")
-        if isinstance(model, CalibratedClassifierCV):
-            print(f"Base estimator: {type(model.base_estimator).__name__}")
         
         try:
             with open(encoder_path, 'rb') as f:
@@ -172,7 +169,55 @@ def prepare_evaluation_features(behavioral_df, plan_df, model, le):
 
     training_df['csnp_signal_strength'] = (
         training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
-        training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
+        training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(#pragma once
+
+#include <string>
+#include <vector>
+#include <unordered_map>
+
+class PersonaEvaluator {
+public:
+    PersonaEvaluator(const std::string& model_path, const std::string& encoder_path);
+    void load_data(const std::string& behavioral_path, const std::string& plan_path);
+    void evaluate_model();
+    void save_results(const std::string& output_file, const std::string& summary_file);
+
+private:
+    struct PersonaData {
+        std::string userid;
+        std::string zip;
+        std::string plan_id;
+        std::string persona;
+        std::unordered_map<std::string, double> features;
+    };
+
+    void normalize_persona(std::vector<PersonaData>& data);
+    void prepare_evaluation_features();
+    void compute_metrics(const std::vector<std::string>& y_true, 
+                       const std::vector<std::string>& y_pred,
+                       const std::vector<std::vector<double>>& y_pred_proba);
+
+    std::vector<PersonaData> behavioral_data_;
+    std::vector<PersonaData> plan_data_;
+    std::unordered_map<std::string, int> label_encoder_;
+    std::vector<std::string> classes_;
+    // Note: In a real implementation, you'd include a model object
+    // This is a placeholder for the ML model
+    void* model_;  // Placeholder for actual model implementation
+
+    // Feature lists
+    std::vector<std::string> behavioral_features_ = {
+        "query_dental", "query_transportation", "query_otc", "query_drug",
+        "query_provider", "query_vision", "query_csnp", "query_dsnp",
+        // ... (add all other features)
+    };
+    
+    std::vector<std::string> plan_features_ = {
+        "ma_otc", "ma_transportation", "ma_dental_benefit", "ma_vision",
+        "csnp", "dsnp", "ma_provider_network", "ma_drug_coverage"
+    };
+};
+0).fillna(0)
     ).clip(upper=5) * 2.5
     additional_features.append('csnp_signal_strength')
 
@@ -501,25 +546,14 @@ def evaluate_model(model, X, y_true, metadata, le, feature_columns):
 
     print("\nFeature Importance (Top 10):")
     try:
-        if isinstance(model, CalibratedClassifierCV):
-            base_estimator = model.base_estimator
-            if hasattr(base_estimator, 'feature_importances_'):
-                feature_importance = pd.DataFrame({
-                    'feature': feature_columns,
-                    'importance': base_estimator.feature_importances_
-                }).sort_values('importance', ascending=False)
-                print(feature_importance.head(10))
-            else:
-                print("Base estimator does not support feature_importances_. Skipping feature importance calculation.")
+        if hasattr(model, 'feature_importances_'):
+            feature_importance = pd.DataFrame({
+                'feature': feature_columns,
+                'importance': model.feature_importances_
+            }).sort_values('importance', ascending=False)
+            print(feature_importance.head(10))
         else:
-            if hasattr(model, 'feature_importances_'):
-                feature_importance = pd.DataFrame({
-                    'feature': feature_columns,
-                    'importance': model.feature_importances_
-                }).sort_values('importance', ascending=False)
-                print(feature_importance.head(10))
-            else:
-                print("Model does not support feature_importances_. Skipping feature importance calculation.")
+            print("Model does not support feature_importances_. Skipping feature importance calculation.")
     except Exception as e:
         print(f"Error calculating feature importance: {e}. Skipping feature importance calculation.")
 

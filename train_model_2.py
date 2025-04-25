@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.ensemble import RandomForestClassifier, StackingClassifier
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.ensemble import StackingClassifier
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -24,6 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+logging.getLogger("py4j").setLevel(logging.WARNING)  # Suppress Py4J logs
 
 # Hardcoded file paths (replace with your paths)
 BEHAVIORAL_FILE = 'path_to_behavioral.csv'
@@ -38,21 +39,15 @@ PERSONA_COEFFICIENTS = {
 }
 
 def load_data(behavioral_path, plan_path):
-    try:
-        behavioral_df = pd.read_csv(behavioral_path)
-        plan_df = pd.read_csv(plan_path)
-        
-        behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
-        behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
-        
-        logger.info(f"Behavioral data: {len(behavioral_df)} rows, Plan data: {len(plan_df)} rows")
-        return behavioral_df, plan_df
-    except Exception as e:
-        logger.error(f"Error loading data: {e}")
-        raise
+    behavioral_df = pd.read_csv(behavioral_path)
+    plan_df = pd.read_csv(plan_path)
+    
+    behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
+    behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
+    
+    return behavioral_df, plan_df
 
 def normalize_persona(df):
-    """Normalize personas, ensuring all are valid strings."""
     valid_personas = list(PERSONA_COEFFICIENTS.keys())
     original_len = len(df)
     new_rows = []
@@ -72,15 +67,6 @@ def normalize_persona(df):
         new_rows.append(row_copy)
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
-    skipped = original_len - len(result)
-    if skipped > 0:
-        logger.info(f"Skipped {skipped} rows due to empty or invalid personas")
-    logger.info(f"Normalized to {len(result)} rows")
-    
-    if not all(isinstance(p, str) for p in result['persona']):
-        logger.error(f"Non-string personas found: {result['persona'].unique()}")
-        raise ValueError("Persona column contains non-string values after normalization")
-    
     return result
 
 def prepare_features(behavioral_df, plan_df):
@@ -95,20 +81,16 @@ def prepare_features(behavioral_df, plan_df):
         plan_df.rename(columns={'StateCode': 'state'}),
         how='left', on=['zip', 'plan_id']
     ).reset_index(drop=True)
-    logger.info(f"Rows after merge: {len(training_df)}")
     
     behavioral_features = [
-        'query_dental', 'query_transportation', 'query_otc', 'query_drug', 'query_provider',
-        'query_vision', 'query_csnp', 'query_dsnp', 'filter_dental', 'filter_transportation',
-        'filter_otc', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp',
-        'filter_dsnp', 'total_session_time', 'num_pages_viewed'
+        'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
+        'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp'
     ]
-    plan_features = ['ma_otc', 'ma_transportation', 'ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp']
+    plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp']
     
     for col in behavioral_features + plan_features:
         training_df[col] = training_df.get(col, 0).fillna(0)
     
-    # Simplified features for underperforming personas
     training_df['dental_interaction'] = training_df['query_dental'] * training_df['ma_dental_benefit']
     training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
     training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
@@ -117,14 +99,13 @@ def prepare_features(behavioral_df, plan_df):
     feature_columns = behavioral_features + plan_features + additional_features
     
     training_df = training_df[training_df['persona'].isin(PERSONA_COEFFICIENTS.keys())].reset_index(drop=True)
-    logger.info(f"Rows after filtering: {len(training_df)}")
     
     X = training_df[feature_columns].fillna(0)
     y = training_df['persona']
     
-    # Feature selection: keep top 15 features by variance
+    # Feature selection: top 10 features by variance
     variances = X.var()
-    top_features = variances.nlargest(15).index.tolist()
+    top_features = variances.nlargest(10).index.tolist()
     X = X[top_features]
     
     scaler = StandardScaler()
@@ -133,7 +114,6 @@ def prepare_features(behavioral_df, plan_df):
     return X, y, scaler
 
 def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
-    """Calculate accuracy for each persona."""
     per_persona_accuracy = {}
     for cls_idx, cls_name in enumerate(class_names):
         mask = y_true == cls_idx
@@ -146,11 +126,11 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
 
 def objective(trial, X_train, y_train, X_val, y_val):
     params = {
-        'n_estimators': trial.suggest_int('n_estimators', 100, 500),
-        'max_depth': trial.suggest_int('max_depth', 5, 20),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0)
+        'n_estimators': trial.suggest_int('n_estimators', 100, 300),
+        'max_depth': trial.suggest_int('max_depth', 5, 15),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+        'subsample': trial.suggest_float('subsample', 0.7, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0)
     }
     
     model = xgb.XGBClassifier(**params, random_state=42, objective='multi:softmax')
@@ -159,8 +139,6 @@ def objective(trial, X_train, y_train, X_val, y_val):
     return accuracy_score(y_val, y_pred)
 
 def main():
-    logger.info("Starting model training...")
-    
     # Load data
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
@@ -200,7 +178,7 @@ def main():
         logger.error(f"Failed to encode labels: {e}")
         return
     
-    # SMOTE with balanced sampling
+    # SMOTE
     sampling_strategy = {
         persona: 500 if persona in ['csnp', 'dental', 'doctor', 'dsnp', 'vision'] else max(300, count)
         for persona, count in y_train.value_counts().items()
@@ -209,7 +187,6 @@ def main():
     try:
         X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
         y_train_balanced_encoded = le.transform(y_train_balanced)
-        logger.info(f"Balanced training set: {X_train_balanced.shape[0]} samples")
     except Exception as e:
         logger.error(f"SMOTE failed: {e}. Using original training data.")
         X_train_balanced, y_train_balanced = X_train, y_train
@@ -220,12 +197,10 @@ def main():
     class_weight_dict = {i: class_weights[i] for i in range(len(le.classes_))}
     
     # Hyperparameter tuning
-    logger.info("Starting hyperparameter tuning...")
     try:
         study = optuna.create_study(direction='maximize')
-        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=50)
+        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=30)
         best_params = study.best_params
-        logger.info(f"Best hyperparameters: {best_params}")
     except Exception as e:
         logger.error(f"Hyperparameter tuning failed: {e}")
         return
@@ -233,11 +208,10 @@ def main():
     # Train stacking ensemble
     try:
         xgb_model = xgb.XGBClassifier(**best_params, random_state=42, objective='multi:softmax')
-        lgb_model = lgb.LGBMClassifier(n_estimators=200, num_leaves=31, random_state=42, class_weight=class_weight_dict, verbose=-1)
-        rf_model = RandomForestClassifier(n_estimators=200, max_depth=20, random_state=42, n_jobs=-1, class_weight=class_weight_dict)
+        lgb_model = lgb.LGBMClassifier(n_estimators=100, num_leaves=31, random_state=42, class_weight=class_weight_dict, verbose=-1)
         
         stacking = StackingClassifier(
-            estimators=[('xgb', xgb_model), ('lgb', lgb_model), ('rf', rf_model)],
+            estimators=[('xgb', xgb_model), ('lgb', lgb_model)],
             final_estimator=xgb.XGBClassifier(random_state=42),
             cv=3, n_jobs=-1
         )
@@ -266,7 +240,7 @@ def main():
         logger.error(f"Evaluation failed: {e}")
         return
     
-    # Save model and artifacts
+    # Save model
     try:
         os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
         with open(MODEL_FILE, 'wb') as f:
@@ -275,7 +249,6 @@ def main():
             pickle.dump(le, f)
         with open('scaler.pkl', 'wb') as f:
             pickle.dump(scaler, f)
-        logger.info(f"Saved model, label encoder, and scaler to disk.")
     except Exception as e:
         logger.error(f"Failed to save model: {e}")
 

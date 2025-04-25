@@ -146,19 +146,37 @@ def main():
     )
     logging.info(f"Training set: {X_train.shape[0]} samples, Testing set: {X_test.shape[0]} samples")
     
-    # Balance training data
-    smoteenn = SMOTEENN(random_state=42)
-    X_train_balanced, y_train_balanced = smoteenn.fit_resample(X_train, y_train)
-    logging.info(f"Balanced training set: {X_train_balanced.shape[0]} samples")
-    
-    # Label encoding
+    # Label encoding on all labels to ensure all personas are known
     le = LabelEncoder()
-    y_train_encoded = le.fit_transform(y_train_balanced)
+    le.fit(y)  # Fit on full y to include all possible labels
+    y_train_encoded = le.transform(y_train)
+    
+    # Balance training data with SMOTE and custom sampling strategy
+    # Ensure rare classes like 'csnp' are preserved
+    sampling_strategy = {persona: max(100, count) for persona, count in y_train.value_counts().items()}
+    smote = SMOTE(sampling_strategy=sampling_strategy, random_state=42)
+    try:
+        X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
+        logging.info(f"Balanced training set: {X_train_balanced.shape[0]} samples")
+        logging.info(f"Class distribution after balancing: {pd.Series(y_train_balanced).value_counts().to_dict()}")
+        
+        # Encode balanced training labels
+        y_train_balanced_encoded = le.transform(y_train_balanced)
+    except ValueError as e:
+        logging.error(f"SMOTE failed: {e}. Falling back to original training data.")
+        X_train_balanced, y_train_balanced_encoded = X_train, y_train_encoded
+    
+    # Verify test set labels
+    unseen_labels = set(y_test) - set(le.classes_)
+    if unseen_labels:
+        logging.error(f"Test set contains unseen labels: {unseen_labels}")
+        raise ValueError(f"Test set contains labels not seen in training: {unseen_labels}")
+    
     y_test_encoded = le.transform(y_test)
     
     # Hyperparameter tuning with Optuna
     study = optuna.create_study(direction='maximize')
-    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_encoded, X_test, y_test_encoded), n_trials=20)
+    study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=20)
     best_params = study.best_params
     logging.info(f"Best hyperparameters: {best_params}")
     
@@ -173,7 +191,7 @@ def main():
         cv=5, n_jobs=-1
     )
     
-    stacking.fit(X_train_balanced, y_train_balanced)
+    stacking.fit(X_train_balanced, y_train_balanced_encoded)
     
     # Evaluate
     y_pred = stacking.predict(X_test)

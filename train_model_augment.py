@@ -128,7 +128,7 @@ def normalize_persona(df):
             row_copy['persona'] = valid_found[0]
         else:
             invalid_personas.update(personas)
-            row_copy['persona'] = 'dental'  # Retain invalid personas
+            row_copy['persona'] = 'dental'
         new_rows.append(row_copy)
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
@@ -182,7 +182,6 @@ def prepare_features(behavioral_df, plan_df):
         for col in behavioral_features:
             if col in training_df.columns:
                 training_df[col] = imputer.fit_transform(training_df[[col]]).flatten()
-                # Impute time-based features only if query/filter is non-zero
                 if 'time_' in col and col.replace('time_', 'query_') in training_df.columns:
                     query_col = col.replace('time_', 'query_')
                     mask = (training_df[col] == 0) & (training_df[query_col] > 0)
@@ -307,6 +306,15 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(lower=0, upper=5) * 3.0
         additional_features.append('vision_signal')
 
+        training_df['vision_doctor_interaction'] = (
+            training_df['ma_vision'] * (
+                training_df.get('query_vision', 0) + training_df.get('filter_vision', 0)
+            ) * 2.0 - training_df['ma_provider_network'] * (
+                training_df.get('query_provider', 0) + training_df.get('filter_provider', 0)
+            )
+        ).clip(lower=0) * 2.0
+        additional_features.append('vision_doctor_interaction')
+
         training_df['csnp_drug_interaction'] = (
             training_df['csnp'] * (
                 training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0) + 
@@ -331,7 +339,7 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('filter_dsnp', 0) +
             training_df.get('time_dsnp_pages', 0).clip(upper=5) +
             training_df.get('accordion_dsnp', 0) +
-            training_df.get('query_csnp', 0) * 0.7  # Stronger proxy
+            training_df.get('query_csnp', 0) * 0.7
         ).clip(lower=0, upper=5) * 3.0
         additional_features.append('dsnp_signal')
 
@@ -371,27 +379,24 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(lower=0) * 2.0
         additional_features.append('drug_doctor_interaction')
 
-        # Soft label validation
+        # Tightened label validation
         mismatches = training_df[
-            ((training_df['persona'] == 'dsnp') & (training_df['dsnp'] == 0)) |
-            ((training_df['persona'] == 'csnp') & (training_df['csnp'] == 0)) |
-            ((training_df['persona'] == 'dental') & (training_df['ma_dental_benefit'] == 0)) |
-            ((training_df['persona'] == 'vision') & (training_df['ma_vision'] == 0)) |
-            ((training_df['persona'] == 'drug') & (training_df['ma_drug_benefit'] == 0)) |
-            ((training_df['persona'] == 'doctor') & (training_df['ma_provider_network'] == 0))
+            ((training_df['persona'] == 'dsnp') & (training_df['dsnp'] == 0) & (training_df['query_dsnp'] > 0)) |
+            ((training_df['persona'] == 'csnp') & (training_df['csnp'] == 0) & (training_df['query_csnp'] > 0)) |
+            ((training_df['persona'] == 'dental') & (training_df['ma_dental_benefit'] == 0) & (training_df['query_dental'] > 0)) |
+            ((training_df['persona'] == 'vision') & (training_df['ma_vision'] == 0) & (training_df['query_vision'] > 0)) |
+            ((training_df['persona'] == 'drug') & (training_df['ma_drug_benefit'] == 0) & (training_df['query_drug'] > 0)) |
+            ((training_df['persona'] == 'doctor') & (training_df['ma_provider_network'] == 0) & (training_df['query_provider'] > 0))
         ]
         logger.info(f"Label mismatches: {len(mismatches)}")
-        # Only correct high-confidence mismatches
         if len(mismatches) > 0:
-            training_df.loc[
-                (training_df['persona'] == 'dsnp') & (training_df['dsnp'] == 0) & (training_df['query_dsnp'] > 0),
-                'persona'
-            ] = 'dental'
-            training_df.loc[
-                (training_df['persona'] == 'csnp') & (training_df['csnp'] == 0) & (training_df['query_csnp'] > 0),
-                'persona'
-            ] = 'dental'
-            # Avoid blanket reassignment
+            for persona in PERSONAS:
+                plan_col = PERSONA_INFO[persona]['plan_col']
+                query_col = PERSONA_INFO[persona]['query_col']
+                training_df.loc[
+                    (training_df['persona'] == persona) & (training_df[plan_col] == 0) & (training_df[query_col] > 0),
+                    'persona'
+                ] = 'dental'
             logger.info(f"Unique personas after label validation: {training_df['persona'].unique()}")
         
         # Feature selection
@@ -416,10 +421,10 @@ def prepare_features(behavioral_df, plan_df):
             logger.error(f"Only one class found in y: {y.unique()}")
             raise ValueError(f"The target 'y' needs to have more than 1 class. Got {len(y.unique())} class instead")
         
-        # Apply SMOTE with refined targets
+        # Apply SMOTE with corrected targets
         class_counts = pd.Series(y).value_counts()
         sampling_strategy = {
-            persona: 1200 if persona in ['dsnp', 'csnp'] else max(count, 2000) for persona, count in class_counts.items()
+            persona: max(count, 1200 if persona in ['dsnp', 'csnp'] else 2000) for persona, count in class_counts.items()
         }
         logger.info(f"SMOTE sampling strategy: {sampling_strategy}")
         smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy)

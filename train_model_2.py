@@ -72,8 +72,16 @@ def calculate_persona_weight(row, persona_info, persona):
 
 def load_data(behavioral_path, plan_path):
     try:
+        if not os.path.exists(behavioral_path):
+            raise FileNotFoundError(f"Behavioral file not found: {behavioral_path}")
+        if not os.path.exists(plan_path):
+            raise FileNotFoundError(f"Plan file not found: {plan_path}")
+        
         behavioral_df = pd.read_csv(behavioral_path)
         plan_df = pd.read_csv(plan_path)
+        
+        if behavioral_df.empty or plan_df.empty:
+            raise ValueError("Loaded DataFrames are empty")
         
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
         behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
@@ -139,13 +147,17 @@ def prepare_features(behavioral_df, plan_df):
         ]
         
         # Compute aggregate features
-        query_cols = [c for c in behavioral_features if c.startswith('query_')]
-        filter_cols = [c for c in behavioral_features if c.startswith('filter_')]
-        training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else 0
-        training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else 0
+        query_cols = [c for c in behavioral_features if c.startswith('query_') and c in training_df.columns]
+        filter_cols = [c for c in behavioral_features if c.startswith('filter_') and c in training_df.columns]
+        training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series(0, index=training_df.index)
+        training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else pd.Series(0, index=training_df.index)
         
+        # Initialize missing columns with zeros
         for col in behavioral_features + plan_features:
-            training_df[col] = training_df.get(col, 0).fillna(0)
+            if col not in training_df.columns:
+                training_df[col] = pd.Series(0, index=training_df.index)
+            else:
+                training_df[col] = training_df[col].fillna(0)
         
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
@@ -153,10 +165,10 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        training_df['dental_interaction'] = training_df['query_dental'] * training_df.get('ma_dental_benefit', 0)
-        training_df['csnp_interaction'] = training_df['query_csnp'] * training_df.get('csnp', 0)
-        training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df.get('dsnp', 0)
-        training_df['vision_interaction'] = training_df['query_vision'] * training_df.get('ma_vision', 0)
+        training_df['dental_interaction'] = training_df['query_dental'] * training_df['ma_dental_benefit']
+        training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
+        training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
+        training_df['vision_interaction'] = training_df['query_vision'] * training_df['ma_vision']
         additional_features = ['dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction']
         additional_features += [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         additional_features += ['query_count', 'filter_count']
@@ -280,15 +292,15 @@ def main():
     smote = BorderlineSMOTE(sampling_strategy={
         persona: 100 if persona in ['csnp', 'dental', 'dsnp', 'vision'] else max(300, count)
         for persona, count in y_train.value_counts().items()
-    }, random_state=42)
+    }, random_state=42, k_neighbors=3)
     try:
         X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
         y_train_balanced_encoded = le.transform(y_train_balanced)
-        weights_balanced = np.array([class_weights[y] for y in y_train_balanced_encode])
+        weights_balanced = np.array([class_weights[y] for y in y_train_balanced_encoded])
     except Exception as e:
         logger.error(f"SMOTE failed: {e}. Using original training data.")
         X_train_balanced, y_train_balanced = X_train, y_train
-        y_train_balanced_encode = y_train_encoded
+        y_train_balanced_encoded = y_train_encoded
         weights_balanced = weights
     
     # Hyperparameter tuning

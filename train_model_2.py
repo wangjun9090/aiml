@@ -87,7 +87,7 @@ def load_data(behavioral_path, plan_path):
         
         return behavioral_df, plan_df
     except Exception as e:
-        logger.error(f"Failed to load data: {e}")
+        logger.error>f"Failed to load data: {e}")
         raise
 
 def normalize_persona(df):
@@ -135,15 +135,14 @@ def prepare_features(behavioral_df, plan_df):
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
-            'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
-            'query_count', 'filter_count'
+            'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks'
         ]
         
         # Compute aggregate features
         query_cols = [c for c in behavioral_features if c.startswith('query_')]
         filter_cols = [c for c in behavioral_features if c.startswith('filter_')]
-        training_df['query_count'] = training_df[query_cols].sum(axis=1)
-        training_df['filter_count'] = training_df[filter_cols].sum(axis=1)
+        training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else 0
+        training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else 0
         
         for col in behavioral_features + plan_features:
             training_df[col] = training_df.get(col, 0).fillna(0)
@@ -160,6 +159,7 @@ def prepare_features(behavioral_df, plan_df):
         training_df['vision_interaction'] = training_df['query_vision'] * training_df.get('ma_vision', 0)
         additional_features = ['dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction']
         additional_features += [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
+        additional_features += ['query_count', 'filter_count']
         
         feature_columns = behavioral_features + plan_features + additional_features
         
@@ -294,8 +294,7 @@ def main():
     # Hyperparameter tuning
     try:
         study = optuna.create_study(direction='maximize')
-        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encode
-d, X_test, y_test_encoded, le), n_trials=30)
+        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded, le), n_trials=30)
         best_params = study.best_params
     except Exception as e:
         logger.error(f"Hyperparameter tuning failed: {e}")

@@ -165,8 +165,8 @@ def prepare_features(behavioral_df, plan_df):
         
         # Signal strength filter (relaxed for csnp)
         query_cols = ['query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp']
-        query_cols = [col for col in query_cols if col in df.columns]  # Ensure columns exist
-        df['signal_strength'] = df[query_cols].sum(axis=1) if query_cols else 0
+        query_cols = [col for col in query_cols if col in df.columns]
+        df['signal_strength'] = df[query_cols].sum(axis=1) if query_cols else pd.Series(0, index=df.index)
         df = df[(df['signal_strength'] > 0.3) | (df['persona'] == 'csnp')]  # Retain all csnp
         logger.info(f"Rows after signal strength filter: {len(df)}")
         
@@ -179,7 +179,7 @@ def prepare_features(behavioral_df, plan_df):
         
         for col in plan_features:
             if col not in df.columns:
-                df[col] = 0  # Initialize missing columns
+                df[col] = pd.Series(0, index=df.index)
             else:
                 df[col] = df[col].fillna(0)
         
@@ -191,9 +191,12 @@ def prepare_features(behavioral_df, plan_df):
             'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages',
             'accordion_csnp', 'accordion_dental', 'accordion_drug', 'accordion_provider', 'accordion_vision', 'accordion_dsnp'
         ]
-        behavioral_features = [col for col in behavioral_features if col in df.columns or col.startswith('time_') or col.startswith('accordion_')]
+        available_behavioral_features = [col for col in behavioral_features if col in df.columns]
+        missing_behavioral_features = [col for col in behavioral_features if col not in df.columns]
+        logger.info(f"Available behavioral features: {available_behavioral_features}")
+        logger.info(f"Missing behavioral features: {missing_behavioral_features}")
         
-        # Impute sparse features (aggressive for csnp)
+        # Initialize and impute behavioral features
         imputer = SimpleImputer(strategy='median')
         for col in behavioral_features:
             if col in df.columns:
@@ -211,10 +214,10 @@ def prepare_features(behavioral_df, plan_df):
                     mask = (df[col] == 0) & (df[query_col] > 0)
                     df.loc[mask, col] = df.loc[mask, query_col] * (0.7 if 'csnp' in col else 0.5)
             else:
-                df[col] = 0
+                df[col] = pd.Series(0, index=df.index)
         
         # Add csnp proxy
-        df['csnp_type_flag'] = df.get('csnp_type', 'N').map({'Y': 1, 'N': 0}).fillna(0).astype(int)
+        df['csnp_type_flag'] = df.get('csnp_type', pd.Series('N', index=df.index)).map({'Y': 1, 'N': 0}).fillna(0).astype(int)
         df.loc[(df['query_csnp'] == 0) & (df['csnp_type_flag'] == 1), 'query_csnp'] = 0.5
         
         # Log sparsity
@@ -226,10 +229,10 @@ def prepare_features(behavioral_df, plan_df):
         if 'start_time' in df.columns:
             df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(df['start_time'])).dt.days.fillna(30)
         else:
-            df['recency'] = 30
+            df['recency'] = pd.Series(30, index=df.index)
         
         # Plan ID embeddings
-        if 'plan_id' in df.columns:
+        if 'plan_id' in df.columns and 'userid' in df.columns:
             plan_sentences = df.groupby('userid')['plan_id'].apply(list).tolist()
             w2v_model = Word2Vec(sentences=plan_sentences, vector_size=20, window=5, min_count=1, workers=4)
             plan_embeddings = df['plan_id'].apply(
@@ -239,7 +242,7 @@ def prepare_features(behavioral_df, plan_df):
             df[embedding_cols] = pd.DataFrame(plan_embeddings.tolist(), index=df.index)
         else:
             embedding_cols = [f'plan_emb_{i}' for i in range(20)]
-            df[embedding_cols] = 0
+            df[embedding_cols] = pd.Series(0, index=df.index)
         
         # Persona weights
         for persona in PERSONAS:
@@ -267,10 +270,10 @@ def prepare_features(behavioral_df, plan_df):
         additional_features = []
         for persona in PERSONAS:
             signal = (
-                df.get(f'query_{persona}', 0) +
-                df.get(f'filter_{persona}', 0) +
-                df.get(f'time_{persona}_pages', 0).clip(upper=5) +
-                df.get(f'accordion_{persona}', 0)
+                df.get(f'query_{persona}', pd.Series(0, index=df.index)) +
+                df.get(f'filter_{persona}', pd.Series(0, index=df.index)) +
+                df.get(f'time_{persona}_pages', pd.Series(0, index=df.index)).clip(upper=5) +
+                df.get(f'accordion_{persona}', pd.Series(0, index=df.index))
             ).clip(lower=0, upper=5)
             df[f'{persona}_signal'] = signal * (8.0 if persona == 'csnp' else 6.0 if persona == 'dsnp' else 5.0)
             additional_features.append(f'{persona}_signal')
@@ -278,47 +281,57 @@ def prepare_features(behavioral_df, plan_df):
             if persona in ['csnp', 'dsnp']:
                 df[f'{persona}_dental_interaction'] = (
                     df[PERSONA_INFO[persona]['plan_col']] * (
-                        df.get(f'query_{persona}', 0) + df.get(f'filter_{persona}', 0)
-                    ) * 4.0 - df.get('ma_dental_benefit', 0) * (
-                        df.get('query_dental', 0) + df.get('filter_dental', 0)
+                        df.get(f'query_{persona}', pd.Series(0, index=df.index)) +
+                        df.get(f'filter_{persona}', pd.Series(0, index=df.index))
+                    ) * 4.0 - df.get('ma_dental_benefit', pd.Series(0, index=df.index)) * (
+                        df.get('query_dental', pd.Series(0, index=df.index)) +
+                        df.get('filter_dental', pd.Series(0, index=df.index))
                     )
                 ).clip(lower=0) * (8.0 if persona == 'csnp' else 6.0)
                 additional_features.append(f'{persona}_dental_interaction')
                 
                 df[f'{persona}_vision_interaction'] = (
                     df[PERSONA_INFO[persona]['plan_col']] * (
-                        df.get(f'query_{persona}', 0) + df.get(f'filter_{persona}', 0)
-                    ) * 4.0 - df.get('ma_vision', 0) * (
-                        df.get('query_vision', 0) + df.get('filter_vision', 0)
+                        df.get(f'query_{persona}', pd.Series(0, index=df.index)) +
+                        df.get(f'filter_{persona}', pd.Series(0, index=df.index))
+                    ) * 4.0 - df.get('ma_vision', pd.Series(0, index=df.index)) * (
+                        df.get('query_vision', pd.Series(0, index=df.index)) +
+                        df.get('filter_vision', pd.Series(0, index=df.index))
                     )
                 ).clip(lower=0) * (8.0 if persona == 'csnp' else 6.0)
                 additional_features.append(f'{persona}_vision_interaction')
                 
                 df[f'{persona}_doctor_interaction'] = (
                     df[PERSONA_INFO[persona]['plan_col']] * (
-                        df.get(f'query_{persona}', 0) + df.get(f'filter_{persona}', 0)
-                    ) * 4.0 - df.get('ma_provider_network', 0) * (
-                        df.get('query_provider', 0) + df.get('filter_provider', 0)
+                        df.get(f'query_{persona}', pd.Series(0, index=df.index)) +
+                        df.get(f'filter_{persona}', pd.Series(0, index=df.index))
+                    ) * 4.0 - df.get('ma_provider_network', pd.Series(0, index=df.index)) * (
+                        df.get('query_provider', pd.Series(0, index=df.index)) +
+                        df.get('filter_provider', pd.Series(0, index=df.index))
                     )
                 ).clip(lower=0) * (8.0 if persona == 'csnp' else 6.0)
                 additional_features.append(f'{persona}_doctor_interaction')
         
         df['csnp_drug_interaction'] = (
             df['csnp'] * (
-                df.get('query_csnp', 0) + df.get('filter_csnp', 0) + df.get('time_csnp_pages', 0)
-            ) * 4.0 - df.get('ma_drug_benefit', 0) * (
-                df.get('query_drug', 0) + df.get('filter_drug', 0) + df.get('time_drug_pages', 0)
+                df.get('query_csnp', pd.Series(0, index=df.index)) +
+                df.get('filter_csnp', pd.Series(0, index=df.index)) +
+                df.get('time_csnp_pages', pd.Series(0, index=df.index))
+            ) * 4.0 - df.get('ma_drug_benefit', pd.Series(0, index=df.index)) * (
+                df.get('query_drug', pd.Series(0, index=df.index)) +
+                df.get('filter_drug', pd.Series(0, index=df.index)) +
+                df.get('time_drug_pages', pd.Series(0, index=df.index))
             )
         ).clip(lower=0) * 8.0
         additional_features.append('csnp_drug_interaction')
         
         df['csnp_specific_signal'] = (
-            df.get('query_csnp', 0) +
-            df.get('filter_csnp', 0) +
-            df.get('csnp_drug_interaction', 0) +
-            df.get('csnp_doctor_interaction', 0) +
-            df.get('csnp_vision_interaction', 0) +
-            df.get('csnp_dental_interaction', 0)
+            df.get('query_csnp', pd.Series(0, index=df.index)) +
+            df.get('filter_csnp', pd.Series(0, index=df.index)) +
+            df.get('csnp_drug_interaction', pd.Series(0, index=df.index)) +
+            df.get('csnp_doctor_interaction', pd.Series(0, index=df.index)) +
+            df.get('csnp_vision_interaction', pd.Series(0, index=df.index)) +
+            df.get('csnp_dental_interaction', pd.Series(0, index=df.index))
         ).clip(upper=5) * 8.0
         additional_features.append('csnp_specific_signal')
         

@@ -478,4 +478,50 @@ def train_model():
     y_pred_probas = np.mean([model.predict_proba(X_test) for model in models], axis=0)
     y_pred = np.argmax(y_pred_probas, axis=1)
     
-    #
+    # Log prediction distribution
+    logger.info(f"Prediction distribution:\n{pd.Series(le.inverse_transform(y_pred)).value_counts().to_string()}")
+    
+    # Log feature importances
+    avg_importances = np.mean(feature_importances, axis=0)
+    importance_df = pd.DataFrame({
+        'Feature': X_train.columns,
+        'Importance': avg_importances
+    }).sort_values(by='Importance', ascending=False)
+    logger.info("Feature Importances:\n" + importance_df.to_string())
+    
+    # Evaluate
+    acc = accuracy_score(y_test, y_pred)
+    macro_f1 = f1_score(y_test, y_pred, average='macro')
+    logger.info(f"Overall Accuracy: {acc * 100:.2f}%")
+    logger.info(f"Macro F1 Score: {macro_f1:.2f}")
+    
+    if acc < 0.8:
+        logger.warning(f"Accuracy {acc * 100:.2f}% is below target of 80%.")
+    
+    # Per-persona accuracy
+    per_persona_accuracy = {}
+    for cls_idx, cls_name in enumerate(le.classes_):
+        mask = y_test == cls_idx
+        if mask.sum() > 0:
+            cls_accuracy = accuracy_score(y_test[mask], y_pred[mask])
+            per_persona_accuracy[cls_name] = cls_accuracy * 100
+        else:
+            per_persona_accuracy[cls_name] = 0.0
+    logger.info("Per-Persona Accuracy (%):")
+    for persona, acc in per_persona_accuracy.items():
+        logger.info(f"  {persona}: {acc:.2f}%")
+    
+    logger.info("Classification Report:\n" + classification_report(y_test, y_pred, target_names=le.classes_))
+    
+    # Save model
+    os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
+    with open(MODEL_FILE, 'wb') as f:
+        pickle.dump(models[0], f)
+    with open(LABEL_ENCODER_FILE, 'wb') as f:
+        pickle.dump(le, f)
+    with open(SCALER_FILE, 'wb') as f:
+        pickle.dump(scaler, f)
+    logger.info("Saved model, label encoder, and scaler to disk.")
+
+if __name__ == '__main__':
+    train_model()

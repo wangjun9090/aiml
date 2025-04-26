@@ -31,8 +31,8 @@ MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/d
 LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder_1.pkl'
 SCALER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/scaler.pkl'
 
-# Persona list
-PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp', 'transportation', 'otc']
+# Persona list (excluded transportation and otc)
+PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
 
 # Persona info
 PERSONA_INFO = {
@@ -41,9 +41,7 @@ PERSONA_INFO = {
     'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'click_provider'},
     'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp'},
     'drug': {'plan_col': 'ma_drug_benefit', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'click_drug'},
-    'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'},
-    'transportation': {'plan_col': 'ma_transportation_benefit', 'query_col': 'query_transportation', 'filter_col': 'filter_transportation'},
-    'otc': {'plan_col': 'ma_otc_benefit', 'query_col': 'query_otc', 'filter_col': 'filter_otc'}
+    'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'}
 }
 
 def calculate_persona_weight(row, persona_info, persona):
@@ -80,14 +78,14 @@ def load_data(behavioral_path, plan_path):
         else:
             logger.warning("Persona column missing in behavioral data")
         
-        # Map invalid personas
+        # Map invalid personas (otc will be filtered out later)
         persona_mapping = {'fitness': 'otc', 'hearing': 'vision'}
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
         
         # Impute missing values
         behavioral_df['zip'] = behavioral_df['zip'].fillna('unknown')
         behavioral_df['plan_id'] = behavioral_df['plan_id'].fillna('unknown')
-        behavioral_df['persona'] = behavioral_df['persona'].fillna('otc')
+        behavioral_df['persona'] = behavioral_df['persona'].fillna('dental')  # Default to dental
         
         behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip()
         behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip()
@@ -144,7 +142,7 @@ def prepare_features(behavioral_df, plan_df):
         if behavioral_df.empty:
             logger.warning("Behavioral_df is empty after normalization. Using plan_df only.")
             training_df = plan_df.copy()
-            training_df['persona'] = 'otc'
+            training_df['persona'] = 'dental'
         else:
             training_df = behavioral_df.merge(
                 plan_df.rename(columns={'StateCode': 'state'}),
@@ -155,13 +153,10 @@ def prepare_features(behavioral_df, plan_df):
         plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_coverage', 'ma_provider_network']
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
-            'query_transportation', 'query_otc',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
-            'filter_transportation', 'filter_otc',
             'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
-            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages', 'time_transportation_pages',
-            'accordion_csnp', 'accordion_dental', 'accordion_drug', 'accordion_provider', 'accordion_vision', 'accordion_dsnp',
-            'accordion_transportation', 'accordion_otc'
+            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages',
+            'accordion_csnp', 'accordion_dental', 'accordion_drug', 'accordion_provider', 'accordion_vision', 'accordion_dsnp'
         ]
         
         # Impute missing behavioral features
@@ -312,21 +307,6 @@ def prepare_features(behavioral_df, plan_df):
         ) * 2.0
         additional_features.append('drug_signal')
 
-        training_df['otc_signal'] = (
-            training_df['query_otc'] +
-            training_df['filter_otc'] +
-            training_df['accordion_otc']
-        ) * 2.0
-        additional_features.append('otc_signal')
-
-        training_df['transportation_signal'] = (
-            training_df['query_transportation'] +
-            training_df['filter_transportation'] +
-            training_df['time_transportation_pages'].clip(upper=5) +
-            training_df['accordion_transportation']
-        ) * 2.0
-        additional_features.append('transportation_signal')
-
         training_df['dsnp_drug_interaction'] = (
             training_df['dsnp'] * (
                 training_df['query_dsnp'] + training_df['filter_dsnp'] + 
@@ -359,10 +339,10 @@ def prepare_features(behavioral_df, plan_df):
             logger.error("No rows with valid personas after filtering")
             raise ValueError("No rows with valid personas after filtering")
         
-        # Apply SMOTE with dictionary for multi-class
+        # Apply SMOTE for 6 personas
         smote = SMOTE(random_state=42, k_neighbors=3, sampling_strategy={
-            'csnp': 1000, 'dental': 1000, 'doctor': 1000, 'drug': 1000,
-            'dsnp': 1000, 'otc': 1000, 'vision': 1000, 'transportation': 1000
+            'csnp': 1000, 'dental': 1000, 'doctor': 1000,
+            'drug': 1000, 'dsnp': 1000, 'vision': 1000
         })
         X, y = smote.fit_resample(X, y)
         logger.info(f"Rows after SMOTE: {len(X)}")

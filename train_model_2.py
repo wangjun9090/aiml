@@ -284,11 +284,11 @@ def main():
     try:
         X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
         y_train_balanced_encoded = le.transform(y_train_balanced)
-        weights_balanced = np.array([class_weights[y] for y in y_train_balanced_encoded])
+        weights_balanced = np.array([class_weights[y] for y in y_train_balanced_encode])
     except Exception as e:
         logger.error(f"SMOTE failed: {e}. Using original training data.")
         X_train_balanced, y_train_balanced = X_train, y_train
-        y_train_balanced_encoded = y_train_encoded
+        y_train_balanced_encode = y_train_encoded
         weights_balanced = weights
     
     # Hyperparameter tuning

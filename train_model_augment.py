@@ -138,6 +138,10 @@ def normalize_persona(df):
 
 def prepare_features(behavioral_df, plan_df):
     try:
+        # Pre-merge row counts
+        logger.info(f"Pre-merge behavioral_df rows: {len(behavioral_df)}")
+        logger.info(f"Pre-merge plan_df rows: {len(plan_df)}")
+        
         behavioral_df = normalize_persona(behavioral_df)
         
         if behavioral_df.empty:
@@ -177,7 +181,7 @@ def prepare_features(behavioral_df, plan_df):
                 training_df[col] = 0
         
         # Log feature sparsity
-        sparsity_cols = ['query_dsnp', 'time_dsnp_pages', 'query_drug', 'time_drug_pages', 'query_dental', 'query_provider']
+        sparsity_cols = ['query_dsnp', 'time_dsnp_pages', 'query_drug', 'time_drug_pages', 'query_dental', 'query_vision', 'query_csnp']
         sparsity_stats = training_df[sparsity_cols].describe().to_dict()
         logger.info(f"Feature sparsity stats:\n{sparsity_stats}")
         
@@ -229,7 +233,7 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        # Domain-specific features (reverted to previous set with targeted additions)
+        # Enhanced domain-specific features
         additional_features = []
         training_df['csnp_interaction'] = training_df['csnp'] * (
             training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0) + 
@@ -246,23 +250,42 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(upper=5) * 2.5
         additional_features.append('csnp_signal_strength')
 
+        training_df['csnp_doctor_interaction'] = (
+            training_df['csnp'] * (
+                training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0) + 
+                training_df.get('time_csnp_pages', 0)
+            ) * 1.5 - training_df['ma_provider_network'] * (
+                training_df.get('query_provider', 0) + training_df.get('filter_provider', 0)
+            )
+        ).clip(lower=0) * 1.5
+        additional_features.append('csnp_doctor_interaction')
+
         training_df['dental_interaction'] = (
             training_df.get('query_dental', 0) + training_df.get('filter_dental', 0)
         ) * training_df['ma_dental_benefit'] * 1.5
         additional_features.append('dental_interaction')
 
-        training_df['dental_signal_strength'] = (
+        training_df['dental_interaction_strength'] = (
             training_df.get('query_dental', 0) +
             training_df.get('filter_dental', 0) +
             training_df.get('time_dental_pages', 0).clip(upper=5) +
             training_df.get('accordion_dental', 0)
-        ).clip(lower=0, upper=5) * 2.0
-        additional_features.append('dental_signal_strength')
+        ).clip(lower=0, upper=5) * 2.5
+        additional_features.append('dental_interaction_strength')
 
         training_df['vision_interaction'] = (
-            training_df.get('query_vision', 0) + training_df.get('filter_vision', 0)
-        ) * training_df['ma_vision'] * 1.5
+            training_df.get('query_vision', 0) + training_df.get('filter_vision', 0) +
+            training_df.get('accordion_vision', 0)
+        ) * training_df['ma_vision'] * 2.0
         additional_features.append('vision_interaction')
+
+        training_df['vision_signal'] = (
+            training_df.get('query_vision', 0) +
+            training_df.get('filter_vision', 0) +
+            training_df.get('time_vision_pages', 0).clip(upper=5) +
+            training_df.get('accordion_vision', 0)
+        ).clip(lower=0, upper=5) * 2.5
+        additional_features.append('vision_signal')
 
         training_df['csnp_drug_interaction'] = (
             training_df['csnp'] * (
@@ -275,28 +298,23 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(lower=0) * 2.5
         additional_features.append('csnp_drug_interaction')
 
-        training_df['csnp_doctor_interaction'] = (
-            training_df['csnp'] * (
-                training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0)
-            ) * 1.5 - training_df['ma_provider_network'] * (
-                training_df.get('query_provider', 0) + training_df.get('filter_provider', 0)
+        training_df['dental_vision_interaction'] = (
+            training_df['ma_dental_benefit'] * (
+                training_df.get('query_dental', 0) + training_df.get('filter_dental', 0)
+            ) * 1.5 - training_df['ma_vision'] * (
+                training_df.get('query_vision', 0) + training_df.get('filter_vision', 0)
             )
         ).clip(lower=0) * 1.5
-        additional_features.append('csnp_doctor_interaction')
+        additional_features.append('dental_vision_interaction')
 
-        training_df['vision_signal'] = (
-            training_df.get('query_vision', 0) +
-            training_df.get('filter_vision', 0) +
-            training_df.get('time_vision_pages', 0).clip(upper=5)
-        ) * 2.0
-        additional_features.append('vision_signal')
-
-        training_df['dental_signal'] = (
-            training_df.get('query_dental', 0) +
-            training_df.get('filter_dental', 0) +
-            training_df.get('time_dental_pages', 0).clip(upper=5)
-        ) * 2.0
-        additional_features.append('dental_signal')
+        training_df['drug_vision_interaction'] = (
+            training_df['ma_drug_benefit'] * (
+                training_df.get('query_drug', 0) + training_df.get('filter_drug', 0)
+            ) * 1.5 - training_df['ma_vision'] * (
+                training_df.get('query_vision', 0) + training_df.get('filter_vision', 0)
+            )
+        ).clip(lower=0) * 1.5
+        additional_features.append('drug_vision_interaction')
 
         training_df['csnp_specific_signal'] = (
             training_df.get('query_csnp', 0) +
@@ -310,23 +328,17 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('query_dsnp', 0) +
             training_df.get('filter_dsnp', 0) +
             training_df.get('time_dsnp_pages', 0).clip(upper=5) +
-            training_df.get('accordion_dsnp', 0)
-        ) * 2.5
+            training_df.get('accordion_dsnp', 0) +
+            training_df.get('query_csnp', 0) * 0.5  # Proxy
+        ).clip(lower=0, upper=5) * 2.5
         additional_features.append('dsnp_signal')
-
-        training_df['dsnp_proxy_signal'] = (
-            training_df.get('query_csnp', 0) * 0.5 +  # Proxy for DSNP
-            training_df.get('filter_dsnp', 0) +
-            training_df.get('time_dsnp_pages', 0).clip(upper=5)
-        ) * 2.0
-        additional_features.append('dsnp_proxy_signal')
 
         training_df['drug_signal'] = (
             training_df.get('query_drug', 0) +
             training_df.get('filter_drug', 0) +
             training_df.get('time_drug_pages', 0).clip(upper=5) +
             training_df.get('accordion_drug', 0)
-        ) * 2.0
+        ).clip(lower=0, upper=5) * 2.0
         additional_features.append('drug_signal')
 
         training_df['doctor_signal'] = (
@@ -361,13 +373,19 @@ def prepare_features(behavioral_df, plan_df):
         mismatches = training_df[
             ((training_df['persona'] == 'dsnp') & (training_df['dsnp'] == 0)) |
             ((training_df['persona'] == 'csnp') & (training_df['csnp'] == 0)) |
-            ((training_df['persona'] == 'dental') & (training_df['ma_dental_benefit'] == 0))
+            ((training_df['persona'] == 'dental') & (training_df['ma_dental_benefit'] == 0)) |
+            ((training_df['persona'] == 'vision') & (training_df['ma_vision'] == 0)) |
+            ((training_df['persona'] == 'drug') & (training_df['ma_drug_benefit'] == 0)) |
+            ((training_df['persona'] == 'doctor') & (training_df['ma_provider_network'] == 0))
         ]
         logger.info(f"Label mismatches: {len(mismatches)}")
         if len(mismatches) > 0:
             training_df.loc[training_df['persona'] == 'dsnp', 'persona'] = training_df['dsnp'].map({1: 'dsnp', 0: 'dental'})
             training_df.loc[training_df['persona'] == 'csnp', 'persona'] = training_df['csnp'].map({1: 'csnp', 0: 'dental'})
             training_df.loc[training_df['persona'] == 'dental', 'persona'] = training_df['ma_dental_benefit'].map({1: 'dental', 0: 'vision'})
+            training_df.loc[training_df['persona'] == 'vision', 'persona'] = training_df['ma_vision'].map({1: 'vision', 0: 'dental'})
+            training_df.loc[training_df['persona'] == 'drug', 'persona'] = training_df['ma_drug_benefit'].map({1: 'drug', 0: 'dental'})
+            training_df.loc[training_df['persona'] == 'doctor', 'persona'] = training_df['ma_provider_network'].map({1: 'doctor', 0: 'dental'})
         
         # Feature selection
         feature_columns = behavioral_features + plan_features + additional_features + [
@@ -377,7 +395,7 @@ def prepare_features(behavioral_df, plan_df):
         
         X = training_df[feature_columns].fillna(0)
         variances = X.var()
-        valid_features = variances[variances > 1e-3].index.tolist()  # Stricter filtering
+        valid_features = variances[variances > 1e-3].index.tolist()
         X = X[valid_features]
         logger.info(f"Selected features after variance filtering: {valid_features}")
         
@@ -393,10 +411,10 @@ def prepare_features(behavioral_df, plan_df):
         # Apply SMOTE with refined targets
         class_counts = pd.Series(y).value_counts()
         sampling_strategy = {
-            persona: 1500 if persona == 'dsnp' else max(count, 2000) for persona, count in class_counts.items()
+            persona: 1200 if persona in ['dsnp', 'csnp'] else max(count, 2000) for persona, count in class_counts.items()
         }
         logger.info(f"SMOTE sampling strategy: {sampling_strategy}")
-        smote = SMOTE(random_state=42, k_neighbors=3, sampling_strategy=sampling_strategy)
+        smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy)
         X, y = smote.fit_resample(X, y)
         logger.info(f"Rows after SMOTE: {len(X)}")
         logger.info(f"Post-SMOTE persona distribution:\n{pd.Series(y).value_counts().to_string()}")
@@ -461,14 +479,13 @@ def main():
         X_labeled, y_labeled, test_size=0.2, random_state=42, stratify=y_labeled
     )
     logger.info(f"Training set: {X_train.shape[0]} samples, Test set: {X_test.shape[0]} samples")
+    logger.info(f"Train set label distribution:\n{pd.Series(y_train).value_counts().to_string()}")
+    logger.info(f"Test set label distribution:\n{pd.Series(y_test).value_counts().to_string()}")
     
     # Label encoding
     le = LabelEncoder()
     y_train_encoded = le.fit_transform(y_train)
     y_test_encoded = le.transform(y_test)
-    
-    # Log prediction distribution to check bias
-    logger.info(f"Test set label distribution:\n{pd.Series(y_test).value_counts().to_string()}")
     
     # Train CatBoost with pseudo-labeling and k-fold
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -482,12 +499,12 @@ def main():
         y_fold_val = y_train_encoded[val_idx]
         
         model = CatBoostClassifier(
-            iterations=250,  # Fine-tuned
-            depth=4,  # Slightly increased
-            learning_rate=0.04,  # Balanced
-            l2_leaf_reg=10,  # Reverted
+            iterations=300,
+            depth=5,
+            learning_rate=0.03,
+            l2_leaf_reg=10,
             loss_function='MultiClass',
-            auto_class_weights='Balanced',  # Reverted
+            auto_class_weights='Balanced',
             random_seed=42,
             verbose=0
         )
@@ -499,7 +516,7 @@ def main():
         model.fit(
             X_fold_train, y_fold_train,
             eval_set=(X_fold_val, y_fold_val),
-            early_stopping_rounds=50
+            early_stopping_rounds=100
         )
         models.append(model)
         feature_importances.append(model.get_feature_importance())

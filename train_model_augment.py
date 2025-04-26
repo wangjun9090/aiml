@@ -150,6 +150,7 @@ def load_data():
         plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
         plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
         
+        logger.info(f"Plan_df columns: {list(plan_df.columns)}")
         return behavioral_df, plan_df
     except Exception as e:
         logger.error(f"Failed to load data: {e}")
@@ -160,17 +161,27 @@ def prepare_features(behavioral_df, plan_df):
         # Merge data
         df = behavioral_df.merge(plan_df, on=['zip', 'plan_id'], how='left')
         logger.info(f"Rows after merge: {len(df)}")
+        logger.info(f"Merged df columns: {list(df.columns)}")
         
         # Signal strength filter (relaxed for csnp)
         query_cols = ['query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp']
-        df['signal_strength'] = df[query_cols].sum(axis=1)
+        query_cols = [col for col in query_cols if col in df.columns]  # Ensure columns exist
+        df['signal_strength'] = df[query_cols].sum(axis=1) if query_cols else 0
         df = df[(df['signal_strength'] > 0.3) | (df['persona'] == 'csnp')]  # Retain all csnp
         logger.info(f"Rows after signal strength filter: {len(df)}")
         
         # Plan features
         plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
+        available_plan_features = [col for col in plan_features if col in df.columns]
+        missing_plan_features = [col for col in plan_features if col not in df.columns]
+        logger.info(f"Available plan features: {available_plan_features}")
+        logger.info(f"Missing plan features: {missing_plan_features}")
+        
         for col in plan_features:
-            df[col] = df[col].fillna(0)
+            if col not in df.columns:
+                df[col] = 0  # Initialize missing columns
+            else:
+                df[col] = df[col].fillna(0)
         
         # Behavioral features
         behavioral_features = [
@@ -180,6 +191,7 @@ def prepare_features(behavioral_df, plan_df):
             'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages',
             'accordion_csnp', 'accordion_dental', 'accordion_drug', 'accordion_provider', 'accordion_vision', 'accordion_dsnp'
         ]
+        behavioral_features = [col for col in behavioral_features if col in df.columns or col.startswith('time_') or col.startswith('accordion_')]
         
         # Impute sparse features (aggressive for csnp)
         imputer = SimpleImputer(strategy='median')
@@ -207,6 +219,7 @@ def prepare_features(behavioral_df, plan_df):
         
         # Log sparsity
         sparsity_cols = ['query_csnp', 'query_dsnp', 'time_csnp_pages', 'time_dsnp_pages']
+        sparsity_cols = [col for col in sparsity_cols if col in df.columns]
         logger.info(f"Feature sparsity stats:\n{df[sparsity_cols].describe().to_dict()}")
         
         # Temporal features
@@ -266,7 +279,7 @@ def prepare_features(behavioral_df, plan_df):
                 df[f'{persona}_dental_interaction'] = (
                     df[PERSONA_INFO[persona]['plan_col']] * (
                         df.get(f'query_{persona}', 0) + df.get(f'filter_{persona}', 0)
-                    ) * 4.0 - df['ma_dental_benefit'] * (
+                    ) * 4.0 - df.get('ma_dental_benefit', 0) * (
                         df.get('query_dental', 0) + df.get('filter_dental', 0)
                     )
                 ).clip(lower=0) * (8.0 if persona == 'csnp' else 6.0)
@@ -275,7 +288,7 @@ def prepare_features(behavioral_df, plan_df):
                 df[f'{persona}_vision_interaction'] = (
                     df[PERSONA_INFO[persona]['plan_col']] * (
                         df.get(f'query_{persona}', 0) + df.get(f'filter_{persona}', 0)
-                    ) * 4.0 - df['ma_vision'] * (
+                    ) * 4.0 - df.get('ma_vision', 0) * (
                         df.get('query_vision', 0) + df.get('filter_vision', 0)
                     )
                 ).clip(lower=0) * (8.0 if persona == 'csnp' else 6.0)
@@ -284,7 +297,7 @@ def prepare_features(behavioral_df, plan_df):
                 df[f'{persona}_doctor_interaction'] = (
                     df[PERSONA_INFO[persona]['plan_col']] * (
                         df.get(f'query_{persona}', 0) + df.get(f'filter_{persona}', 0)
-                    ) * 4.0 - df['ma_provider_network'] * (
+                    ) * 4.0 - df.get('ma_provider_network', 0) * (
                         df.get('query_provider', 0) + df.get('filter_provider', 0)
                     )
                 ).clip(lower=0) * (8.0 if persona == 'csnp' else 6.0)
@@ -293,7 +306,7 @@ def prepare_features(behavioral_df, plan_df):
         df['csnp_drug_interaction'] = (
             df['csnp'] * (
                 df.get('query_csnp', 0) + df.get('filter_csnp', 0) + df.get('time_csnp_pages', 0)
-            ) * 4.0 - df['ma_drug_benefit'] * (
+            ) * 4.0 - df.get('ma_drug_benefit', 0) * (
                 df.get('query_drug', 0) + df.get('filter_drug', 0) + df.get('time_drug_pages', 0)
             )
         ).clip(lower=0) * 8.0
@@ -310,7 +323,11 @@ def prepare_features(behavioral_df, plan_df):
         additional_features.append('csnp_specific_signal')
         
         # Feature selection
-        feature_cols = plan_features + behavioral_features + additional_features + embedding_cols + [f'{p}_weight' for p in PERSONAS] + ['recency']
+        feature_cols = (
+            [col for col in plan_features if col in df.columns] +
+            [col for col in behavioral_features if col in df.columns] +
+            additional_features + embedding_cols + [f'{p}_weight' for p in PERSONAS] + ['recency']
+        )
         X = df[feature_cols].fillna(0)
         y = df['persona']
         

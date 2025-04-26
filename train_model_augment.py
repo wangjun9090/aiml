@@ -221,7 +221,7 @@ def prepare_features(behavioral_df, plan_df):
                 if 'time_' in col and col.replace('time_', 'query_') in df.columns:
                     query_col = col.replace('time_', 'query_')
                     mask = (df[col] == 0) & (df[query_col] > 0)
-                    df.loc[mask, col] = df.loc[mask, query_col] * (0.7 if 'csnp' in col else 0.5)
+                    df.loc[mask, col] = df.loc[mask, query_col] * (0.7 if 'csnp' in col else 0.3)
             else:
                 df[col] = pd.Series(0, index=df.index)
         
@@ -325,7 +325,7 @@ def prepare_features(behavioral_df, plan_df):
                 additional_features.append(f'{persona}_vision_interaction')
                 
                 df[f'{persona}_doctor_interaction'] = (
-                    Wdf[PERSONA_INFO[persona]['plan_col']] * (
+                    df[PERSONA_INFO[persona]['plan_col']] * (  # Fixed: Wdf -> df
                         df.get(f'query_{persona}', pd.Series(0, index=df.index)) +
                         df.get(f'filter_{persona}', pd.Series(0, index=df.index))
                     ) * 4.0 - df.get('ma_provider_network', pd.Series(0, index=df.index)) * (
@@ -357,6 +357,7 @@ def prepare_features(behavioral_df, plan_df):
             df.get('csnp_dental_interaction', pd.Series(0, index=df.index))
         ).clip(upper=5) * 8.0
         additional_features.append('csnp_specific_signal')
+        logger.info("Interaction features calculated successfully")
         
         # Feature selection
         feature_cols = (

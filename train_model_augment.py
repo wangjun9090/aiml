@@ -59,8 +59,8 @@ def load_data():
             for col in missing_behavioral_cols:
                 behavioral_df[col] = 'dummy' if col in ['zip', 'plan_id'] else 'dental'
         
-        # Clean persona
-        behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.lower().replace('nan', 'dental')
+        # Clean persona: strip whitespace, lowercase, replace 'nan'
+        behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower().replace('nan', 'dental')
         behavioral_df['persona'] = behavioral_df['persona'].apply(lambda x: x if x in PERSONAS else 'dental')
         logger.info(f"Persona value counts (after cleaning):\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
         
@@ -125,8 +125,8 @@ def prepare_features(behavioral_df, plan_df):
             logger.warning("Persona column missing or all NaN, setting to 'dental'")
             df['persona'] = 'dental'
         
-        # Ensure valid persona values
-        df['persona'] = df['persona'].astype(str).str.lower().replace('nan', 'dental')
+        # Ensure valid persona values: strip whitespace, lowercase, replace 'nan'
+        df['persona'] = df['persona'].astype(str).str.strip().str.lower().replace('nan', 'dental')
         df['persona'] = df['persona'].apply(lambda x: x if x in PERSONAS else 'dental')
         logger.info(f"Persona distribution after validation:\n{df['persona'].value_counts(dropna=False).to_string()}")
         
@@ -149,7 +149,7 @@ def prepare_features(behavioral_df, plan_df):
             })
             logger.info(f"Dummy DataFrame created:\n{df['persona'].value_counts().to_string()}")
         
-        # Ensure all personas
+        # Ensure all personas are present
         missing_personas = [p for p in PERSONAS if p not in df['persona'].unique()]
         if missing_personas:
             logger.warning(f"Missing personas: {missing_personas}")
@@ -191,6 +191,7 @@ def train_model():
     X, y = prepare_features(behavioral_df, plan_df)
     
     # Validate target classes
+    logger.info(f"y unique values in train_model: {y.unique()}")
     missing_personas = [p for p in PERSONAS if p not in y.unique()]
     if missing_personas:
         logger.error(f"Target classes missing: {missing_personas}")

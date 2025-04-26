@@ -31,7 +31,7 @@ MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/d
 LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder_1.pkl'
 SCALER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/scaler.pkl'
 
-# Persona list (excluded transportation and otc)
+# Persona list
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
 
 # Persona info
@@ -78,14 +78,14 @@ def load_data(behavioral_path, plan_path):
         else:
             logger.warning("Persona column missing in behavioral data")
         
-        # Map invalid personas (otc will be filtered out later)
+        # Map invalid personas (otc will be filtered out)
         persona_mapping = {'fitness': 'otc', 'hearing': 'vision'}
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
         
         # Impute missing values
         behavioral_df['zip'] = behavioral_df['zip'].fillna('unknown')
         behavioral_df['plan_id'] = behavioral_df['plan_id'].fillna('unknown')
-        behavioral_df['persona'] = behavioral_df['persona'].fillna('dental')  # Default to dental
+        behavioral_df['persona'] = behavioral_df['persona'].fillna('dental')
         
         behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip()
         behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip()
@@ -317,6 +317,16 @@ def prepare_features(behavioral_df, plan_df):
             )
         ).clip(lower=0) * 2.5
         additional_features.append('dsnp_drug_interaction')
+
+        training_df['drug_doctor_interaction'] = (
+            training_df['ma_drug_benefit'] * (
+                training_df['query_drug'] + training_df['filter_drug'] + 
+                training_df['time_drug_pages']
+            ) * 1.5 - training_df['ma_provider_network'] * (
+                training_df['query_provider'] + training_df['filter_provider']
+            )
+        ).clip(lower=0) * 1.5
+        additional_features.append('drug_doctor_interaction')
         
         # Feature selection
         feature_columns = behavioral_features + plan_features + additional_features + [
@@ -339,11 +349,11 @@ def prepare_features(behavioral_df, plan_df):
             logger.error("No rows with valid personas after filtering")
             raise ValueError("No rows with valid personas after filtering")
         
-        # Apply SMOTE for 6 personas
-        smote = SMOTE(random_state=42, k_neighbors=3, sampling_strategy={
-            'csnp': 1000, 'dental': 1000, 'doctor': 1000,
-            'drug': 1000, 'dsnp': 1000, 'vision': 1000
-        })
+        # Apply SMOTE with dynamic sampling strategy
+        class_counts = pd.Series(y).value_counts()
+        sampling_strategy = {persona: max(count, 1500) for persona, count in class_counts.items()}
+        logger.info(f"SMOTE sampling strategy: {sampling_strategy}")
+        smote = SMOTE(random_state=42, k_neighbors=3, sampling_strategy=sampling_strategy)
         X, y = smote.fit_resample(X, y)
         logger.info(f"Rows after SMOTE: {len(X)}")
         logger.info(f"Post-SMOTE persona distribution:\n{pd.Series(y).value_counts().to_string()}")

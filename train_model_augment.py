@@ -78,7 +78,7 @@ def load_data(behavioral_path, plan_path):
         else:
             logger.warning("Persona column missing in behavioral data")
         
-        # Map invalid personas (otc will be filtered out)
+        # Map invalid personas
         persona_mapping = {'fitness': 'otc', 'hearing': 'vision'}
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
         
@@ -97,6 +97,7 @@ def load_data(behavioral_path, plan_path):
         
         # Load plan data
         plan_df = pd.read_csv(plan_path)
+        logger.info(f"Plan_df columns: {list(plan_df.columns)}")
         plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
         plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
         logger.info(f"Plan_df rows: {len(plan_df)}")
@@ -149,8 +150,16 @@ def prepare_features(behavioral_df, plan_df):
                 how='left', on=['zip', 'plan_id']
             ).reset_index(drop=True)
             logger.info(f"Rows after merge: {len(training_df)}")
+            logger.info(f"training_df columns: {list(training_df.columns)}")
         
-        plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_coverage', 'ma_provider_network']
+        # Initialize plan_features early
+        plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
+        for col in plan_features:
+            if col not in training_df.columns:
+                training_df[col] = 0
+            else:
+                training_df[col] = training_df[col].fillna(0)
+        
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
@@ -208,13 +217,6 @@ def prepare_features(behavioral_df, plan_df):
         training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series(0, index=training_df.index)
         training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else pd.Series(0, index=training_df.index)
         
-        # Initialize missing plan features
-        for col in plan_features:
-            if col not in training_df.columns:
-                training_df[col] = pd.Series(0, index=training_df.index)
-            else:
-                training_df[col] = training_df[col].fillna(0)
-        
         # Persona weights
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
@@ -253,7 +255,7 @@ def prepare_features(behavioral_df, plan_df):
             training_df['csnp'] * (
                 training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0) + 
                 training_df.get('time_csnp_pages', 0)
-            ) * 2.0 - training_df['ma_drug_coverage'] * (
+            ) * 2.0 - training_df['ma_drug_benefit'] * (
                 training_df.get('query_drug', 0) + training_df.get('filter_drug', 0) + 
                 training_df.get('time_drug_pages', 0)
             )
@@ -270,60 +272,60 @@ def prepare_features(behavioral_df, plan_df):
         additional_features.append('csnp_doctor_interaction')
 
         training_df['vision_signal'] = (
-            training_df['query_vision'] +
-            training_df['filter_vision'] +
-            training_df['time_vision_pages'].clip(upper=5)
+            training_df.get('query_vision', 0) +
+            training_df.get('filter_vision', 0) +
+            training_df.get('time_vision_pages', 0).clip(upper=5)
         ) * 2.0
         additional_features.append('vision_signal')
 
         training_df['dental_signal'] = (
-            training_df['query_dental'] +
-            training_df['filter_dental'] +
-            training_df['time_dental_pages'].clip(upper=5)
+            training_df.get('query_dental', 0) +
+            training_df.get('filter_dental', 0) +
+            training_df.get('time_dental_pages', 0).clip(upper=5)
         ) * 2.0
         additional_features.append('dental_signal')
 
         training_df['csnp_specific_signal'] = (
-            training_df['query_csnp'] +
-            training_df['filter_csnp'] +
-            training_df['csnp_drug_interaction'] +
-            training_df['csnp_doctor_interaction']
+            training_df.get('query_csnp', 0) +
+            training_df.get('filter_csnp', 0) +
+            training_df.get('csnp_drug_interaction', 0) +
+            training_df.get('csnp_doctor_interaction', 0)
         ).clip(upper=5) * 3.0
         additional_features.append('csnp_specific_signal')
 
         training_df['dsnp_signal'] = (
-            training_df['query_dsnp'] +
-            training_df['filter_dsnp'] +
-            training_df['time_dsnp_pages'].clip(upper=5) +
-            training_df['accordion_dsnp']
+            training_df.get('query_dsnp', 0) +
+            training_df.get('filter_dsnp', 0) +
+            training_df.get('time_dsnp_pages', 0).clip(upper=5) +
+            training_df.get('accordion_dsnp', 0)
         ) * 2.5
         additional_features.append('dsnp_signal')
 
         training_df['drug_signal'] = (
-            training_df['query_drug'] +
-            training_df['filter_drug'] +
-            training_df['time_drug_pages'].clip(upper=5) +
-            training_df['accordion_drug']
+            training_df.get('query_drug', 0) +
+            training_df.get('filter_drug', 0) +
+            training_df.get('time_drug_pages', 0).clip(upper=5) +
+            training_df.get('accordion_drug', 0)
         ) * 2.0
         additional_features.append('drug_signal')
 
         training_df['dsnp_drug_interaction'] = (
             training_df['dsnp'] * (
-                training_df['query_dsnp'] + training_df['filter_dsnp'] + 
-                training_df['time_dsnp_pages']
-            ) * 2.0 - training_df['ma_drug_coverage'] * (
-                training_df['query_drug'] + training_df['filter_drug'] + 
-                training_df['time_drug_pages']
+                training_df.get('query_dsnp', 0) + training_df.get('filter_dsnp', 0) + 
+                training_df.get('time_dsnp_pages', 0)
+            ) * 2.0 - training_df['ma_drug_benefit'] * (
+                training_df.get('query_drug', 0) + training_df.get('filter_drug', 0) + 
+                training_df.get('time_drug_pages', 0)
             )
         ).clip(lower=0) * 2.5
         additional_features.append('dsnp_drug_interaction')
 
         training_df['drug_doctor_interaction'] = (
             training_df['ma_drug_benefit'] * (
-                training_df['query_drug'] + training_df['filter_drug'] + 
-                training_df['time_drug_pages']
+                training_df.get('query_drug', 0) + training_df.get('filter_drug', 0) + 
+                training_df.get('time_drug_pages', 0)
             ) * 1.5 - training_df['ma_provider_network'] * (
-                training_df['query_provider'] + training_df['filter_provider']
+                training_df.get('query_provider', 0) + training_df.get('filter_provider', 0)
             )
         ).clip(lower=0) * 1.5
         additional_features.append('drug_doctor_interaction')

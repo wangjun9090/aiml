@@ -84,16 +84,15 @@ def load_data(behavioral_path, plan_path):
         persona_mapping = {'fitness': 'otc', 'hearing': 'vision'}
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
         
-        # Impute missing zip/plan_id
+        # Impute missing values
         behavioral_df['zip'] = behavioral_df['zip'].fillna('unknown')
         behavioral_df['plan_id'] = behavioral_df['plan_id'].fillna('unknown')
-        behavioral_df['persona'] = behavioral_df['persona'].fillna('otc')  # Default to otc
+        behavioral_df['persona'] = behavioral_df['persona'].fillna('otc')
         
         behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip()
         behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip()
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.lower().str.strip()
         
-        # Impute total_session_time
         if 'total_session_time' in behavioral_df.columns:
             behavioral_df['total_session_time'] = behavioral_df['total_session_time'].fillna(0)
         logger.info(f"Behavioral_df after cleaning: {len(behavioral_df)} rows")
@@ -347,7 +346,7 @@ def prepare_features(behavioral_df, plan_df):
         
         X = training_df[feature_columns].fillna(0)
         variances = X.var()
-        valid_features = variances[variances > 1e-4].index.tolist()  # Stricter threshold
+        valid_features = variances[variances > 1e-4].index.tolist()
         X = X[valid_features]
         logger.info(f"Selected features after variance filtering: {valid_features}")
         
@@ -360,8 +359,11 @@ def prepare_features(behavioral_df, plan_df):
             logger.error("No rows with valid personas after filtering")
             raise ValueError("No rows with valid personas after filtering")
         
-        # Apply SMOTE
-        smote = SMOTE(random_state=42, k_neighbors=3, sampling_strategy=0.5)
+        # Apply SMOTE with dictionary for multi-class
+        smote = SMOTE(random_state=42, k_neighbors=3, sampling_strategy={
+            'csnp': 1000, 'dental': 1000, 'doctor': 1000, 'drug': 1000,
+            'dsnp': 1000, 'otc': 1000, 'vision': 1000, 'transportation': 1000
+        })
         X, y = smote.fit_resample(X, y)
         logger.info(f"Rows after SMOTE: {len(X)}")
         logger.info(f"Post-SMOTE persona distribution:\n{pd.Series(y).value_counts().to_string()}")
@@ -380,7 +382,7 @@ def pseudo_labeling(X_labeled, y_labeled, X_unlabeled, model):
         model.fit(X_labeled, y_labeled)
         y_unlabeled_pred = model.predict(X_unlabeled)
         confidence = model.predict_proba(X_unlabeled).max(axis=1)
-        high_conf_mask = confidence > 0.95  # Stricter threshold
+        high_conf_mask = confidence > 0.95
         X_pseudo = X_unlabeled[high_conf_mask]
         y_pseudo = y_unlabeled_pred[high_conf_mask]
         return X_pseudo, y_pseudo

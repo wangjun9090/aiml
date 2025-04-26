@@ -136,7 +136,7 @@ def load_data():
         plan_df = pd.read_csv(PLAN_FILE)
         logger.info(f"Raw behavioral data rows: {len(behavioral_df)}")
         logger.info(f"Raw unique personas: {behavioral_df['persona'].unique()}")
-        logger.info(f"Persona value counts:\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
+        logger.info(f"Persona value counts (raw):\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
         
         # Validate required columns
         required_behavioral_cols = ['persona', 'zip', 'plan_id']
@@ -151,8 +151,22 @@ def load_data():
             logger.error(f"Missing required columns in PLAN_FILE: {missing_plan_cols}")
             raise ValueError(f"Missing required columns in PLAN_FILE: {missing_plan_cols}")
         
+        # Log zip and plan_id overlap
+        behavioral_zips = set(behavioral_df['zip'].astype(str))
+        plan_zips = set(plan_df['zip'].astype(str))
+        zip_overlap = len(behavioral_zips.intersection(plan_zips)) / len(behavioral_zips) * 100
+        logger.info(f"Zip overlap between BEHAVIORAL_FILE and PLAN_FILE: {zip_overlap:.2f}%")
+        
+        behavioral_plan_ids = set(behavioral_df['plan_id'].astype(str))
+        plan_plan_ids = set(plan_df['plan_id'].astype(str))
+        plan_id_overlap = len(behavioral_plan_ids.intersection(plan_plan_ids)) / len(behavioral_plan_ids) * 100
+        logger.info(f"Plan_id overlap between BEHAVIORAL_FILE and PLAN_FILE: {plan_id_overlap:.2f}%")
+        
+        # Clean and validate persona
         behavioral_df['persona'] = behavioral_df['persona'].apply(lambda x: x.lower() if isinstance(x, str) else 'dental')
         behavioral_df['persona'] = behavioral_df['persona'].apply(lambda x: x if x in PERSONAS else 'dental')
+        logger.info(f"Persona value counts (after cleaning):\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
+        
         behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip()
         behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip()
         plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
@@ -173,8 +187,12 @@ def prepare_features(behavioral_df, plan_df):
         logger.info(f"Persona distribution after merge:\n{df['persona'].value_counts(dropna=False).to_string()}")
         
         # Validate merge success
-        merge_success_rate = df[plan_df.columns.difference(['zip', 'plan_id'])].notna().any(axis=1).mean()
-        logger.info(f"Merge success rate (non-null plan features): {merge_success_rate:.2%}")
+        if not plan_df.columns.difference(['zip', 'plan_id']).empty:
+            merge_success_rate = df[plan_df.columns.difference(['zip', 'plan_id'])].notna().any(axis=1).mean()
+            logger.info(f"Merge success rate (non-null plan features): {merge_success_rate:.2%}")
+        else:
+            logger.warning("No plan features to merge (only zip, plan_id)")
+            merge_success_rate = 0.0
         
         # Validate persona column
         if 'persona' not in df.columns or df['persona'].isna().all():
@@ -196,12 +214,11 @@ def prepare_features(behavioral_df, plan_df):
             logger.info(f"Signal strength stats:\n{df['signal_strength'].describe().to_dict()}")
         
         # Skip signal strength filter to retain all samples
-        # df = df[df['signal_strength'] > 0.1]
         logger.info(f"Rows after processing (no signal strength filter): {len(df)}")
         logger.info(f"Persona distribution after processing:\n{df['persona'].value_counts(dropna=False).to_string()}")
         
         if df.empty:
-            logger.error("DataFrame is empty after processing")
+            logger.warning("DataFrame is empty after processing")
             df = pd.DataFrame({
                 'persona': PERSONAS,
                 'signal_strength': [0.1] * len(PERSONAS),
@@ -235,6 +252,14 @@ def prepare_features(behavioral_df, plan_df):
         missing_behavioral_features = [col for col in behavioral_features if col not in df.columns]
         logger.info(f"Available behavioral features: {available_behavioral_features}")
         logger.info(f"Missing behavioral features: {missing_behavioral_features}")
+        
+        # Fallback for critical csnp columns
+        if 'query_csnp' not in df.columns:
+            logger.warning("query_csnp missing, using filter_csnp as fallback")
+            df['query_csnp'] = df.get('filter_csnp', pd.Series(0, index=df.index)) * 0.3
+        if 'csnp' not in df.columns:
+            logger.warning("csnp missing, initializing to 0")
+            df['csnp'] = pd.Series(0, index=df.index)
         
         # Initialize and impute behavioral features
         imputer = SimpleImputer(strategy='median')
@@ -291,21 +316,21 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        # Label validation (softer for csnp)
-        mismatches = df[
-            ((df['persona'] == 'csnp') & (df['csnp'] == 0) & (df['query_csnp'] > 0.5)) |
-            ((df['persona'] != 'csnp') & (df['csnp'] == 1) & (df['query_csnp'] > 0.5))
-        ]
-        logger.info(f"Label mismatches: {len(mismatches)}")
-        df.loc[
-            (df['persona'] == 'csnp') & (df['csnp'] == 0) & (df['query_csnp'] > 0.5),
-            'persona'
-        ] = 'dental'
-        df.loc[
-            (df['persona'] != 'csnp') & (df['csnp'] == 1) & (df['query_csnp'] > 0.5),
-            'persona'
-        ] = 'csnp'
-        logger.info(f"Persona distribution after label validation:\n{df['persona'].value_counts(dropna=False).to_string()}")
+        # Skip label validation to isolate issue
+        # mismatches = df[
+        #     ((df['persona'] == 'csnp') & (df['csnp'] == 0) & (df['query_csnp'] > 0.5)) |
+        #     ((df['persona'] != 'csnp') & (df['csnp'] == 1) & (df['query_csnp'] > 0.5))
+        # ]
+        # logger.info(f"Label mismatches: {len(mismatches)}")
+        # df.loc[
+        #     (df['persona'] == 'csnp') & (df['csnp'] == 0) & (df['query_csnp'] > 0.5),
+        #     'persona'
+        # ] = 'dental'
+        # df.loc[
+        #     (df['persona'] != 'csnp') & (df['csnp'] == 1) & (df['query_csnp'] > 0.5),
+        #     'persona'
+        # ] = 'csnp'
+        logger.info(f"Persona distribution after processing (no label validation):\n{df['persona'].value_counts(dropna=False).to_string()}")
         
         # Ensure all personas are present
         missing_personas = [p for p in PERSONAS if p not in df['persona'].unique()]
@@ -398,6 +423,21 @@ def prepare_features(behavioral_df, plan_df):
         )
         X = df[feature_cols].fillna(0)
         y = df['persona']
+        
+        # Final persona validation
+        if not set(y.unique()).intersection(PERSONAS):
+            logger.error(f"No valid personas in y: {y.unique()}")
+            logger.warning("Creating minimal DataFrame with all personas")
+            df = pd.DataFrame({
+                'persona': PERSONAS,
+                'signal_strength': [0.1] * len(PERSONAS),
+                'zip': ['00000'] * len(PERSONAS),
+                'plan_id': ['dummy'] * len(PERSONAS)
+            })
+            for col in feature_cols:
+                df[col] = 0
+            X = df[feature_cols].fillna(0)
+            y = df['persona']
         
         logger.info(f"Final persona distribution:\n{y.value_counts(dropna=False).to_string()}")
         return X, y

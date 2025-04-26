@@ -1,12 +1,12 @@
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from imblearn.over_sampling import BorderlineSMOTE
-import xgboost as xgb
-import optuna
+from imblearn.under_sampling import RandomUnderSampler
+from pytorch_tabnet.tab_model import TabNetClassifier
+import torch
 import logging
 import sys
 import os
@@ -53,21 +53,8 @@ def calculate_persona_weight(row, persona_info, persona):
     plan_value = row.get(plan_col, 0) if plan_col and pd.notna(row.get(plan_col, np.nan)) else 0
     click_value = row.get(click_col, 0) if click_col and pd.notna(row.get(click_col, np.nan)) else 0
     
-    # Coefficients: boost dental, dsnp, vision
-    query_coeff = 0.4 if persona in ['dental', 'dsnp', 'vision'] else 0.2
-    filter_coeff = 0.4 if persona in ['dental', 'dsnp', 'vision'] else 0.2
-    plan_coeff = 0.3 if persona in ['dental', 'dsnp', 'vision'] else 0.2
-    click_coeff = 0.3 if persona in ['doctor', 'drug'] else 0.2
-    
-    weight = (query_coeff * query_value + filter_coeff * filter_value + 
-              plan_coeff * plan_value + click_coeff * click_value)
-    
-    # Interaction boost for minority classes
-    if persona in ['csnp', 'dental', 'dsnp', 'vision']:
-        interaction = row.get(f'{persona}_interaction', 0)
-        weight += 0.3 * interaction if persona in ['dental', 'dsnp', 'vision'] else 0.2 * interaction
-    
-    # Normalize to [0, 1]
+    # Simplified: normalized sum
+    weight = (query_value + filter_value + plan_value + click_value) / 4.0
     return min(max(weight, 0), 1.0)
 
 def load_data(behavioral_path, plan_path):
@@ -159,6 +146,12 @@ def prepare_features(behavioral_df, plan_df):
             else:
                 training_df[col] = training_df[col].fillna(0)
         
+        # Add polynomial interaction features
+        for persona in ['csnp', 'dental', 'dsnp', 'vision']:
+            query_col = PERSONA_INFO[persona]['query_col']
+            filter_col = PERSONA_INFO[persona]['filter_col']
+            training_df[f'{persona}_query_filter'] = training_df[query_col] * training_df[filter_col]
+        
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
                 training_df[f'{persona}_weight'] = training_df.apply(
@@ -169,7 +162,10 @@ def prepare_features(behavioral_df, plan_df):
         training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
         training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
         training_df['vision_interaction'] = training_df['query_vision'] * training_df['ma_vision']
-        additional_features = ['dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction']
+        additional_features = [
+            'dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction',
+            'csnp_query_filter', 'dental_query_filter', 'dsnp_query_filter', 'vision_query_filter'
+        ]
         additional_features += [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         additional_features += ['query_count', 'filter_count']
         
@@ -216,29 +212,6 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
 
-def focal_loss_objective(y_true, y_pred):
-    # Custom focal loss for XGBoost
-    gamma = 2.0
-    alpha = 0.25
-    p = 1 / (1 + np.exp(-y_pred))
-    grad = alpha * (p - y_true) * (1 - p)**gamma * np.log(p + 1e-8)
-    hess = alpha * (1 - p)**gamma * (np.log(p + 1e-8) * (1 - p) + p * (1 - p)**gamma / (p + 1e-8))
-    return grad, hess
-
-def objective(trial, X_train, y_train, X_val, y_val, le):
-    params = {
-        'n_estimators': trial.suggest_int('n_estimators', 100, 300),
-        'max_depth': trial.suggest_int('max_depth', 3, 10),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
-        'subsample': trial.suggest_float('subsample', 0.7, 1.0),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0)
-    }
-    
-    model = xgb.XGBClassifier(**params, random_state=42, objective='multi:softmax', num_class=len(le.classes_))
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_val)
-    return accuracy_score(y_val, y_pred)
-
 def main():
     # Load data
     try:
@@ -279,51 +252,47 @@ def main():
         logger.error(f"Failed to encode labels: {e}")
         return
     
-    # Custom class weights
-    class_counts = y_train.value_counts()
-    class_weights = {le.transform([k])[0]: 1.0 / class_counts[k] for k in class_counts.index}
-    # Boost weights for dental, dsnp, vision
-    for k in class_counts.index:
-        if k in ['dental', 'dsnp', 'vision']:
-            class_weights[le.transform([k])[0]] *= 1.5
-    weights = np.array([class_weights[y] for y in y_train_encoded])
-    
-    # Borderline-SMOTE
-    smote = BorderlineSMOTE(sampling_strategy={
-        persona: 100 if persona in ['csnp', 'dental', 'dsnp', 'vision'] else max(300, count)
-        for persona, count in y_train.value_counts().items()
-    }, random_state=42, k_neighbors=3)
+    # Undersampling
+    undersampler = RandomUnderSampler(sampling_strategy={
+        persona: 100 for persona in y_train.unique()
+    }, random_state=42)
     try:
-        X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
+        X_train_balanced, y_train_balanced = undersampler.fit_resample(X_train, y_train)
         y_train_balanced_encoded = le.transform(y_train_balanced)
-        weights_balanced = np.array([class_weights[y] for y in y_train_balanced_encoded])
     except Exception as e:
-        logger.error(f"SMOTE failed: {e}. Using original training data.")
+        logger.error(f"Undersampling failed: {e}. Using original training data.")
         X_train_balanced, y_train_balanced = X_train, y_train
         y_train_balanced_encoded = y_train_encoded
-        weights_balanced = weights
     
-    # Hyperparameter tuning
+    # Train TabNet with stratified k-fold
     try:
-        study = optuna.create_study(direction='maximize')
-        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded, le), n_trials=30)
-        best_params = study.best_params
-    except Exception as e:
-        logger.error(f"Hyperparameter tuning failed: {e}")
-        return
-    
-    # Train XGBoost
-    try:
-        model = xgb.XGBClassifier(**best_params, random_state=42, objective='multi:softmax', num_class=len(le.classes_))
-        model.fit(X_train_balanced, y_train_balanced_encoded, sample_weight=weights_balanced)
-    except Exception as e:
-        logger.error(f"Model training failed: {e}")
-        return
-    
-    # Evaluate
-    logger.info("Evaluating on test set...")
-    try:
-        y_pred = model.predict(X_test)
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        models = []
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_balanced, y_train_balanced_encoded)):
+            X_fold_train, X_fold_val = X_train_balanced.iloc[train_idx], X_train_balanced.iloc[val_idx]
+            y_fold_train, y_fold_val = y_train_balanced_encoded[train_idx], y_train_balanced_encoded[val_idx]
+            
+            model = TabNetClassifier(
+                n_d=16, n_a=16, n_steps=5, gamma=1.5, lambda_sparse=1e-4,
+                optimizer_fn=torch.optim.Adam, optimizer_params=dict(lr=2e-2),
+                scheduler_params={"step_size":10, "gamma":0.9},
+                scheduler_fn=torch.optim.lr_scheduler.StepLR,
+                verbose=0
+            )
+            
+            model.fit(
+                X_train=X_fold_train.values, y_train=y_fold_train,
+                eval_set=[(X_fold_val.values, y_fold_val)],
+                eval_metric=['accuracy'],
+                max_epochs=100, patience=10, batch_size=256, virtual_batch_size=128
+            )
+            models.append(model)
+            logger.info(f"Fold {fold+1} training completed")
+        
+        # Ensemble predictions
+        y_pred_probas = np.mean([model.predict_proba(X_test.values) for model in models], axis=0)
+        y_pred = np.argmax(y_pred_probas, axis=1)
+        
         overall_accuracy = accuracy_score(y_test_encoded, y_pred)
         logger.info(f"Overall Accuracy on Test Set (20% of data): {overall_accuracy * 100:.2f}%")
         
@@ -336,8 +305,11 @@ def main():
             logger.info(f"  {persona}: {acc:.2f}%")
         
         logger.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
+        
+        # Save the first model (for consistency)
+        model = models[0]
     except Exception as e:
-        logger.error(f"Evaluation failed: {e}")
+        logger.error(f"Model training/evaluation failed: {e}")
         return
     
     # Save model

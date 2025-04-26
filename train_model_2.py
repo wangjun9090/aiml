@@ -23,11 +23,11 @@ logger.setLevel(logging.INFO)
 logging.getLogger("py4j").setLevel(logging.WARNING)  # Suppress Py4J logs
 
 # File paths (Databricks-compatible)
-BEHAVIORAL_FILE = '/dbfs/path_to_behavioral.csv'  # Adjust to your DBFS path
-PLAN_FILE = '/dbfs/path_to_plan.csv'              # Adjust to your DBFS path
-MODEL_FILE = '/dbfs/model-persona-0.2.0.pkl'
-LABEL_ENCODER_FILE = '/dbfs/label_encoder.pkl'
-SCALER_FILE = '/dbfs/scaler.pkl'
+BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
+PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
+MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-1.0.0.pkl'
+LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder_1.pkl'
+SCALER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/scaler.pkl'
 
 # Persona list
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp', 'transportation', 'otc']
@@ -87,7 +87,7 @@ def load_data(behavioral_path, plan_path):
         
         return behavioral_df, plan_df
     except Exception as e:
-        logger.error>f"Failed to load data: {e}")
+        logger.error(f"Failed to load data: {e}")
         raise
 
 def normalize_persona(df):
@@ -341,8 +341,8 @@ def main():
     except Exception as e:
         logger.error(f"Failed to save model to DBFS: {e}. Trying /tmp directory...")
         try:
-            tmp_model_file = '/tmp/model-persona-0.2.0.pkl'
-            tmp_label_file = '/tmp/label_encoder.pkl'
+            tmp_model_file = '/tmp/model-persona-1.0.0.pkl'
+            tmp_label_file = '/tmp/label_encoder_1.pkl'
             tmp_scaler_file = '/tmp/scaler.pkl'
             with open(tmp_model_file, 'wb') as f:
                 pickle.dump(model, f)

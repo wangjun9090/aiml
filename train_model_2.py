@@ -5,7 +5,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from imblearn.over_sampling import BorderlineSMOTE
-from catboost import CatBoostClassifier
+import lightgbm as lgb
 import optuna
 import logging
 import os
@@ -33,17 +33,17 @@ SCALER_FILE = '/dbfs/scaler.pkl'
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp', 'transportation', 'otc']
 
 # Default coefficients
-W_CSNP_HIGH = 1.5
-W_CSNP_BASE = 1.0
-W_DSNP_HIGH = 1.5
-W_DSNP_BASE = 1.0
+W_CSNP_HIGH = 1.2  # Reduced to balance csnp
+W_CSNP_BASE = 0.8
+W_DSNP_HIGH = 1.2
+W_DSNP_BASE = 0.8
 k1 = 0.1
 k3 = 0.2
 k4 = 0.2
 k7 = 0.3
 k8 = 0.3
-k9 = 0.4
-k10 = 0.4
+k9 = 0.3  # Reduced for csnp
+k10 = 0.3  # Reduced for csnp
 
 # Persona info
 PERSONA_INFO = {
@@ -63,7 +63,7 @@ def calculate_persona_weight(row, persona_info, persona, plan_df):
     
     base_weight = 0
     if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
-        base_weight = min(row[plan_col], 0.7 if persona == 'csnp' else 0.5)
+        base_weight = min(row[plan_col], 0.5)  # Reduced cap
         if persona == 'csnp' and 'csnp_type' in row and row['csnp_type'] == 'Y':
             base_weight *= W_CSNP_HIGH
         elif persona == 'csnp':
@@ -76,7 +76,7 @@ def calculate_persona_weight(row, persona_info, persona, plan_df):
         compared_ids = row['compared_plan_ids'].split(',')
         compared_plans = plan_df[plan_df['plan_id'].isin(compared_ids) & (plan_df['zip'] == row['zip'])]
         if not compared_plans.empty:
-            base_weight = min(compared_plans[plan_col].mean(), 0.7 if persona == 'csnp' else 0.5)
+            base_weight = min(compared_plans[plan_col].mean(), 0.5)
             if persona == 'csnp':
                 csnp_type_y_ratio = (compared_plans.get('csnp_type', pd.Series(['N']*len(compared_plans))) == 'Y').mean()
                 base_weight *= (W_CSNP_BASE + (W_CSNP_HIGH - W_CSNP_BASE) * csnp_type_y_ratio)
@@ -96,27 +96,27 @@ def calculate_persona_weight(row, persona_info, persona, plan_df):
     behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
     
     if persona == 'doctor':
-        if click_value >= 1.5: behavioral_score += 0.4
-        elif click_value >= 0.5: behavioral_score += 0.2
+        if click_value >= 1.5: behavioral_score += 0.2  # Reduced boost
+        elif click_value >= 0.5: behavioral_score += 0.1
     elif persona == 'drug':
-        if click_value >= 5: behavioral_score += 0.4
-        elif click_value >= 2: behavioral_score += 0.2
+        if click_value >= 5: behavioral_score += 0.2
+        elif click_value >= 2: behavioral_score += 0.1
     elif persona == 'dental':
         signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-        if signal_count >= 2: behavioral_score += 0.3
-        elif signal_count >= 1: behavioral_score += 0.15
+        if signal_count >= 2: behavioral_score += 0.2
+        elif signal_count >= 1: behavioral_score += 0.1
     elif persona == 'vision':
         signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-        if signal_count >= 1: behavioral_score += 0.35
+        if signal_count >= 1: behavioral_score += 0.2
     elif persona == 'csnp':
         signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-        if signal_count >= 2: behavioral_score += 0.6
-        elif signal_count >= 1: behavioral_score += 0.5
-        if row.get('csnp_interaction', 0) > 0: behavioral_score += 0.3
-        if row.get('csnp_type_flag', 0) == 1: behavioral_score += 0.2
+        if signal_count >= 2: behavioral_score += 0.3  # Reduced boost
+        elif signal_count >= 1: behavioral_score += 0.2
+        if row.get('csnp_interaction', 0) > 0: behavioral_score += 0.2
+        if row.get('csnp_type_flag', 0) == 1: behavioral_score += 0.1
     
     adjusted_weight = base_weight + behavioral_score
-    return min(adjusted_weight, 2.0 if persona == 'csnp' else 1.0)
+    return min(adjusted_weight, 1.0)  # Unified cap
 
 def load_data(behavioral_path, plan_path):
     try:
@@ -125,18 +125,13 @@ def load_data(behavioral_path, plan_path):
         
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
         behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
-        logger.info(f"Behavioral_df rows: {len(behavioral_df)}, Unique personas: {behavioral_df['persona'].unique()}")
-        logger.info(f"Plan_df rows: {len(plan_df)}")
-        
-        # Check zip/plan_id overlap
         behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip()
         behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip()
         plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
         plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
-        common_zips = set(behavioral_df['zip']).intersection(set(plan_df['zip']))
-        common_plan_ids = set(behavioral_df['plan_id']).intersection(set(plan_df['plan_id']))
-        logger.info(f"Common zip values: {len(common_zips)}/{len(set(behavioral_df['zip']))} behavioral, {len(set(plan_df['zip']))} plan")
-        logger.info(f"Common plan_id values: {len(common_plan_ids)}/{len(set(behavioral_df['plan_id']))} behavioral, {len(set(plan_df['plan_id']))} plan")
+        
+        logger.info(f"Behavioral_df rows: {len(behavioral_df)}, Unique personas: {behavioral_df['persona'].unique()}")
+        logger.info(f"Plan_df rows: {len(plan_df)}")
         
         return behavioral_df, plan_df
     except Exception as e:
@@ -163,8 +158,8 @@ def normalize_persona(df):
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
     if result.empty:
-        logger.error(f"No valid personas found after normalization. Valid personas: {valid_personas}")
-        raise ValueError("No valid personas found after normalization")
+        logger.error(f"No valid personas found. Valid personas: {valid_personas}")
+        raise ValueError("No valid personas found")
     logger.info(f"Rows after normalization: {len(result)}")
     return result
 
@@ -172,14 +167,12 @@ def prepare_features(behavioral_df, plan_df):
     try:
         behavioral_df = normalize_persona(behavioral_df)
         
-        # Try merge
         training_df = behavioral_df.merge(
             plan_df.rename(columns={'StateCode': 'state'}),
             how='left', on=['zip', 'plan_id']
         ).reset_index(drop=True)
         logger.info(f"Rows after merge: {len(training_df)}")
         
-        # Fallback if merge fails
         if training_df.empty or len(training_df) < 10:
             logger.warning("Merge yielded insufficient data. Using behavioral_df features only.")
             training_df = behavioral_df.copy()
@@ -190,13 +183,12 @@ def prepare_features(behavioral_df, plan_df):
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
-            'num_pages_viewed'
+            'num_pages_viewed', 'total_session_time'
         ]
         
         for col in behavioral_features + plan_features:
             training_df[col] = training_df.get(col, 0).fillna(0)
         
-        # Add persona weights
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
                 training_df[f'{persona}_weight'] = training_df.apply(
@@ -226,7 +218,6 @@ def prepare_features(behavioral_df, plan_df):
             logger.error(f"Feature matrix empty: X shape={X.shape}, y shape={y.shape}")
             raise ValueError("Feature matrix or target empty")
         
-        # Validate feature variance
         variances = X.var()
         valid_features = variances[variances > 1e-5].index.tolist()
         if not valid_features:
@@ -256,14 +247,14 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
 
 def objective(trial, X_train, y_train, X_val, y_val):
     params = {
-        'iterations': trial.suggest_int('iterations', 100, 500),
-        'depth': trial.suggest_int('depth', 4, 10),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
-        'border_count': trial.suggest_int('border_count', 32, 128)
+        'n_estimators': trial.suggest_int('n_estimators', 100, 300),
+        'num_leaves': trial.suggest_int('num_leaves', 20, 100),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+        'subsample': trial.suggest_float('subsample', 0.7, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0)
     }
     
-    model = CatBoostClassifier(**params, random_seed=42, verbose=0, auto_class_weights='Balanced')
+    model = lgb.LGBMClassifier(**params, random_state=42, verbose=-1)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_val)
     return accuracy_score(y_val, y_pred)
@@ -308,39 +299,46 @@ def main():
         logger.error(f"Failed to encode labels: {e}")
         return
     
+    # Custom class weights
+    class_counts = y_train.value_counts()
+    class_weights = {le.transform([k])[0]: 1.0 / class_counts[k] for k in class_counts.index}
+    weights = np.array([class_weights[y] for y in y_train_encoded])
+    
     # Borderline-SMOTE
     smote = BorderlineSMOTE(sampling_strategy={
-        persona: 300 if persona in ['csnp', 'dental', 'doctor', 'dsnp', 'vision'] else max(200, count)
+        persona: 200 if persona in ['csnp', 'dental', 'dsnp', 'vision'] else max(300, count)
         for persona, count in y_train.value_counts().items()
     }, random_state=42)
     try:
         X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
         y_train_balanced_encoded = le.transform(y_train_balanced)
+        weights_balanced = np.array([class_weights[y] for y in y_train_balanced_encoded])
     except Exception as e:
         logger.error(f"SMOTE failed: {e}. Using original training data.")
         X_train_balanced, y_train_balanced = X_train, y_train
         y_train_balanced_encoded = y_train_encoded
+        weights_balanced = weights
     
     # Hyperparameter tuning
     try:
         study = optuna.create_study(direction='maximize')
-        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=50)
+        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=30)
         best_params = study.best_params
     except Exception as e:
         logger.error(f"Hyperparameter tuning failed: {e}")
         return
     
-    # Train CatBoost
+    # Train LightGBM
     try:
-        model = CatBoostClassifier(**best_params, random_seed=42, verbose=0, auto_class_weights='Balanced')
-        model.fit(X_train_balanced, y_train_balanced_encoded)
+        model = lgb.LGBMClassifier(**best_params, random_state=42, verbose=-1)
+        model.fit(X_train_balanced, y_train_balanced_encoded, sample_weight=weights_balanced)
         
         # Feature selection by importance
-        importances = model.get_feature_importance()
+        importances = model.feature_importances_
         feature_importance = pd.Series(importances, index=X_train_balanced.columns).nlargest(15).index.tolist()
         X_train_balanced = X_train_balanced[feature_importance]
         X_test = X_test[feature_importance]
-        model.fit(X_train_balanced, y_train_balanced_encoded)
+        model.fit(X_train_balanced, y_train_balanced_encoded, sample_weight=weights_balanced)
     except Exception as e:
         logger.error(f"Model training failed: {e}")
         return

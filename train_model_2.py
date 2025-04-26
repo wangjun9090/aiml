@@ -4,9 +4,7 @@ import pickle
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from imblearn.under_sampling import RandomUnderSampler
-from pytorch_tabnet.tab_model import TabNetClassifier
-import torch
+from catboost import CatBoostClassifier, Pool
 import logging
 import sys
 import os
@@ -53,8 +51,15 @@ def calculate_persona_weight(row, persona_info, persona):
     plan_value = row.get(plan_col, 0) if plan_col and pd.notna(row.get(plan_col, np.nan)) else 0
     click_value = row.get(click_col, 0) if click_col and pd.notna(row.get(click_col, np.nan)) else 0
     
-    # Simplified: normalized sum
-    weight = (query_value + filter_value + plan_value + click_value) / 4.0
+    # Normalize inputs to [0, 1]
+    max_val = max([query_value, filter_value, plan_value, click_value, 1])
+    if max_val > 0:
+        query_value /= max_val
+        filter_value /= max_val
+        plan_value /= max_val
+        click_value /= max_val
+    
+    weight = 0.25 * (query_value + filter_value + plan_value + click_value)
     return min(max(weight, 0), 1.0)
 
 def load_data(behavioral_path, plan_path):
@@ -146,12 +151,6 @@ def prepare_features(behavioral_df, plan_df):
             else:
                 training_df[col] = training_df[col].fillna(0)
         
-        # Add polynomial interaction features
-        for persona in ['csnp', 'dental', 'dsnp', 'vision']:
-            query_col = PERSONA_INFO[persona]['query_col']
-            filter_col = PERSONA_INFO[persona]['filter_col']
-            training_df[f'{persona}_query_filter'] = training_df[query_col] * training_df[filter_col]
-        
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
                 training_df[f'{persona}_weight'] = training_df.apply(
@@ -162,10 +161,7 @@ def prepare_features(behavioral_df, plan_df):
         training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
         training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
         training_df['vision_interaction'] = training_df['query_vision'] * training_df['ma_vision']
-        additional_features = [
-            'dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction',
-            'csnp_query_filter', 'dental_query_filter', 'dsnp_query_filter', 'vision_query_filter'
-        ]
+        additional_features = ['dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction']
         additional_features += [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         additional_features += ['query_count', 'filter_count']
         
@@ -184,6 +180,10 @@ def prepare_features(behavioral_df, plan_df):
         if X.empty or y.empty:
             logger.error(f"Feature matrix empty: X shape={X.shape}, y shape={y.shape}")
             raise ValueError("Feature matrix or target empty")
+        
+        # Log feature statistics
+        logger.info("Feature statistics:")
+        logger.info(X.describe().to_string())
         
         variances = X.var()
         valid_features = variances[variances > 1e-5].index.tolist()
@@ -232,6 +232,10 @@ def main():
         logger.error(f"Non-string labels found in y: {y.unique()}")
         return
     
+    # Log class distribution
+    logger.info("Class distribution:")
+    logger.info(y.value_counts().to_string())
+    
     # Split data
     try:
         X_train, X_test, y_train, y_test = train_test_split(
@@ -252,46 +256,49 @@ def main():
         logger.error(f"Failed to encode labels: {e}")
         return
     
-    # Undersampling
-    undersampler = RandomUnderSampler(sampling_strategy={
-        persona: 100 for persona in y_train.unique()
-    }, random_state=42)
-    try:
-        X_train_balanced, y_train_balanced = undersampler.fit_resample(X_train, y_train)
-        y_train_balanced_encoded = le.transform(y_train_balanced)
-    except Exception as e:
-        logger.error(f"Undersampling failed: {e}. Using original training data.")
-        X_train_balanced, y_train_balanced = X_train, y_train
-        y_train_balanced_encoded = y_train_encoded
-    
-    # Train TabNet with stratified k-fold
+    # Train CatBoost with stratified k-fold
     try:
         skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         models = []
-        for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_balanced, y_train_balanced_encoded)):
-            X_fold_train, X_fold_val = X_train_balanced.iloc[train_idx], X_train_balanced.iloc[val_idx]
-            y_fold_train, y_fold_val = y_train_balanced_encoded[train_idx], y_train_balanced_encoded[val_idx]
+        feature_importances = []
+        
+        class_counts = y_train.value_counts()
+        class_weights = {le.transform([k])[0]: max(1.0 / class_counts[k], 1e-3) for k in class_counts.index}
+        
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train_encoded)):
+            X_fold_train, X_fold_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+            y_fold_train, y_fold_val = y_train_encoded[train_idx], y_train_encoded[val_idx]
             
-            model = TabNetClassifier(
-                n_d=16, n_a=16, n_steps=5, gamma=1.5, lambda_sparse=1e-4,
-                optimizer_fn=torch.optim.Adam, optimizer_params=dict(lr=2e-2),
-                scheduler_params={"step_size":10, "gamma":0.9},
-                scheduler_fn=torch.optim.lr_scheduler.StepLR,
+            model = CatBoostClassifier(
+                iterations=500,
+                depth=6,
+                learning_rate=0.05,
+                loss_function='MultiClass',
+                class_weights=class_weights,
+                random_seed=42,
                 verbose=0
             )
             
             model.fit(
-                X_train=X_fold_train.values, y_train=y_fold_train,
-                eval_set=[(X_fold_val.values, y_fold_val)],
-                eval_metric=['accuracy'],
-                max_epochs=100, patience=10, batch_size=256, virtual_batch_size=128
+                X_fold_train, y_fold_train,
+                eval_set=(X_fold_val, y_fold_val),
+                early_stopping_rounds=50
             )
             models.append(model)
+            feature_importances.append(model.get_feature_importance())
             logger.info(f"Fold {fold+1} training completed")
         
         # Ensemble predictions
-        y_pred_probas = np.mean([model.predict_proba(X_test.values) for model in models], axis=0)
+        y_pred_probas = np.mean([model.predict_proba(X_test) for model in models], axis=0)
         y_pred = np.argmax(y_pred_probas, axis=1)
+        
+        # Log feature importances
+        avg_importances = np.mean(feature_importances, axis=0)
+        importance_df = pd.DataFrame({
+            'Feature': X_train.columns,
+            'Importance': avg_importances
+        }).sort_values(by='Importance', ascending=False)
+        logger.info("Feature Importances:\n" + importance_df.to_string())
         
         overall_accuracy = accuracy_score(y_test_encoded, y_pred)
         logger.info(f"Overall Accuracy on Test Set (20% of data): {overall_accuracy * 100:.2f}%")
@@ -306,7 +313,7 @@ def main():
         
         logger.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
         
-        # Save the first model (for consistency)
+        # Save the first model
         model = models[0]
     except Exception as e:
         logger.error(f"Model training/evaluation failed: {e}")

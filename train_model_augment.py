@@ -66,22 +66,46 @@ def calculate_persona_weight(row, persona_info, persona):
 
 def load_data(behavioral_path, plan_path):
     try:
-        behavioral_df = pd.read_csv(behavioral_path)
-        plan_df = pd.read_csv(plan_path)
+        # Check file existence
+        if not os.path.exists(behavioral_path):
+            raise FileNotFoundError(f"Behavioral file not found: {behavioral_path}")
+        if not os.path.exists(plan_path):
+            raise FileNotFoundError(f"Plan file not found: {plan_path}")
         
-        # Clean data
-        behavioral_df = behavioral_df.dropna(subset=['persona', 'zip', 'plan_id'])
-        behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
-        behavioral_df['persona'] = behavioral_df['persona'].replace('nan', '')
+        # Load behavioral data
+        behavioral_df = pd.read_csv(behavioral_path)
+        logger.info(f"Raw behavioral data rows: {len(behavioral_df)}")
+        logger.info(f"Raw behavioral columns: {list(behavioral_df.columns)}")
+        
+        # Log unique personas before cleaning
+        if 'persona' in behavioral_df.columns:
+            logger.info(f"Raw unique personas: {behavioral_df['persona'].unique()}")
+        else:
+            logger.warning("Persona column missing in behavioral data")
+        
+        # Clean behavioral data
+        # Relaxed dropna to optional columns
+        required_cols = ['zip', 'plan_id']  # Persona handled separately
+        behavioral_df = behavioral_df.dropna(subset=required_cols)
+        
+        # Standardize columns
         behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip()
         behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip()
+        if 'persona' in behavioral_df.columns:
+            behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
+            behavioral_df['persona'] = behavioral_df['persona'].replace(['nan', ''], np.nan)
+        else:
+            behavioral_df['persona'] = np.nan
+        
+        # Soften session time filter
+        if 'total_session_time' in behavioral_df.columns:
+            behavioral_df = behavioral_df[behavioral_df['total_session_time'].fillna(0).between(0, 7200)]  # 0s to 2hr
+        logger.info(f"Behavioral_df after cleaning: {len(behavioral_df)} rows")
+        
+        # Load plan data
+        plan_df = pd.read_csv(plan_path)
         plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
-        
-        # Filter outliers (e.g., unrealistic session times)
-        behavioral_df = behavioral_df[behavioral_df['total_session_time'].between(15, 3600)]  # 15s to 1hr
-        
-        logger.info(f"Behavioral_df rows: {len(behavioral_df)}, Unique personas: {behavioral_df['persona'].unique()}")
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).strip()
         logger.info(f"Plan_df rows: {len(plan_df)}")
         
         return behavioral_df, plan_df
@@ -94,13 +118,16 @@ def normalize_persona(df):
     new_rows = []
     
     for _, row in df.iterrows():
-        if not row['persona'] or row['persona'] == '':
+        persona = row['persona']
+        if pd.isna(persona) or not persona:
+            logger.debug(f"Skipping row with missing persona: {row.to_dict()}")
             continue
         
-        personas = [p.strip() for p in row['persona'].split(',')]
+        personas = [p.strip().lower() for p in str(persona).split(',')]
         valid_found = [p for p in personas if p in valid_personas]
         
         if not valid_found:
+            logger.debug(f"No valid personas in: {personas}")
             continue
         
         row_copy = row.copy()
@@ -108,64 +135,82 @@ def normalize_persona(df):
         new_rows.append(row_copy)
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
+    logger.info(f"Rows after persona normalization: {len(result)}")
     if result.empty:
-        logger.error(f"No valid personas found. Valid personas: {valid_personas}")
-        raise ValueError("No valid personas found")
-    logger.info(f"Rows after normalization: {len(result)}")
+        logger.warning(f"No valid personas found. Valid personas: {valid_personas}")
+        # Fallback: Assign default persona or proceed with plan data
+        return result
     return result
 
 def prepare_features(behavioral_df, plan_df):
     try:
+        # Normalize personas
         behavioral_df = normalize_persona(behavioral_df)
         
-        # Merge data
-        training_df = behavioral_df.merge(
-            plan_df.rename(columns={'StateCode': 'state'}),
-            how='left', on=['zip', 'plan_id']
-        ).reset_index(drop=True)
-        logger.info(f"Rows after merge: {len(training_df)}")
-        
-        if training_df.empty or len(training_df) < 10:
-            logger.warning("Merge yielded insufficient data. Using behavioral_df features only.")
-            training_df = behavioral_df.copy()
-            plan_features = []
+        # Check if behavioral_df is empty
+        if behavioral_df.empty:
+            logger.warning("Behavioral_df is empty after normalization. Using plan_df only.")
+            training_df = plan_df.copy()
+            training_df['persona'] = np.nan  # Placeholder for pseudo-labeling
         else:
-            plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp']
+            # Merge data
+            training_df = behavioral_df.merge(
+                plan_df.rename(columns={'StateCode': 'state'}),
+                how='left', on=['zip', 'plan_id']
+            ).reset_index(drop=True)
+            logger.info(f"Rows after merge: {len(training_df)}")
         
+        # Define features
+        plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_coverage', 'ma_provider_network']
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
-            'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks'
+            'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
+            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'accordion_csnp'
         ]
         
-        # New temporal features
-        training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['timestamp'])).dt.days
-        training_df['visit_frequency'] = training_df.groupby('user_id')['timestamp'].transform('count') / 30  # Visits per month
-        training_df['time_of_day'] = pd.to_datetime(training_df['timestamp']).dt.hour // 6  # 0-3 (morning, afternoon, evening, night)
+        # Temporal features
+        if 'timestamp' in training_df.columns:
+            training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['timestamp'])).dt.days.fillna(30)
+            training_df['visit_frequency'] = training_df.groupby('user_id')['timestamp'].transform('count').fillna(1) / 30
+            training_df['time_of_day'] = pd.to_datetime(training_df['timestamp']).dt.hour.fillna(12) // 6
+        else:
+            training_df['recency'] = 30
+            training_df['visit_frequency'] = 1
+            training_df['time_of_day'] = 2
         
         # Clustering feature
         cluster_features = ['num_pages_viewed', 'total_session_time', 'num_clicks']
         if all(col in training_df.columns for col in cluster_features):
             kmeans = KMeans(n_clusters=5, random_state=42)
             training_df['user_cluster'] = kmeans.fit_predict(training_df[cluster_features].fillna(0))
+        else:
+            training_df['user_cluster'] = 0
         
-        # Sequence feature (simplified navigation path)
-        training_df['nav_path'] = training_df.groupby('user_id')['page'].transform(lambda x: '_'.join(x.head(3)))  # First 3 pages
+        # Sequence feature
+        if 'page' in training_df.columns:
+            training_df['nav_path'] = training_df.groupby('user_id')['page'].transform(lambda x: '_'.join(x.head(3)))
+        else:
+            training_df['nav_path'] = 'unknown'
         
         # Robust aggregates
-        training_df['dental_time_ratio'] = training_df['time_dental_pages'] / (training_df['total_session_time'] + 1e-5)
-        training_df['click_ratio'] = training_df['num_clicks'] / (training_df['num_pages_viewed'] + 1e-5)
+        training_df['dental_time_ratio'] = training_df.get('time_dental_pages', 0) / (training_df.get('total_session_time', 1) + 1e-5)
+        training_df['click_ratio'] = training_df.get('num_clicks', 0) / (training_df.get('num_pages_viewed', 1) + 1e-5)
         
         # Plan ID embeddings
-        plan_sentences = training_df.groupby('user_id')['plan_id'].apply(list).tolist()
-        w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
-        plan_embeddings = training_df['plan_id'].apply(
-            lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(10)
-        )
-        embedding_cols = [f'plan_emb_{i}' for i in range(10)]
-        training_df[embedding_cols] = pd.DataFrame(plan_embeddings.tolist(), index=training_df.index)
+        if 'plan_id' in training_df.columns:
+            plan_sentences = training_df.groupby('user_id')['plan_id'].apply(list).tolist()
+            w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
+            plan_embeddings = training_df['plan_id'].apply(
+                lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(10)
+            )
+            embedding_cols = [f'plan_emb_{i}' for i in range(10)]
+            training_df[embedding_cols] = pd.DataFrame(plan_embeddings.tolist(), index=training_df.index)
+        else:
+            embedding_cols = [f'plan_emb_{i}' for i in range(10)]
+            training_df[embedding_cols] = 0
         
-        # Compute aggregate features
+        # Aggregate features
         query_cols = [c for c in behavioral_features if c.startswith('query_') and c in training_df.columns]
         filter_cols = [c for c in behavioral_features if c.startswith('filter_') and c in training_df.columns]
         training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series(0, index=training_df.index)
@@ -185,28 +230,87 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        # Interaction features
-        training_df['dental_interaction'] = training_df['query_dental'] * training_df['ma_dental_benefit']
-        training_df['csnp_interaction'] = training_df['query_csnp'] * training_df['csnp']
-        training_df['dsnp_interaction'] = training_df['query_dsnp'] * training_df['dsnp']
-        training_df['vision_interaction'] = training_df['query_vision'] * training_df['ma_vision']
+        # Domain-specific features
+        additional_features = []
+        training_df['csnp_interaction'] = training_df['csnp'] * (
+            training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
+            training_df.get('time_csnp_pages', 0).fillna(0) + training_df.get('accordion_csnp', 0).fillna(0)
+        ) * 2.5
+        additional_features.append('csnp_interaction')
+
+        training_df['csnp_type_flag'] = training_df.get('csnp_type', 'N').map({'Y': 1, 'N': 0}).fillna(0).astype(int)
+        additional_features.append('csnp_type_flag')
+
+        training_df['csnp_signal_strength'] = (
+            training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
+            training_df.get('accordion_csnp', 0).fillna(0) + training_df.get('time_csnp_pages', 0).fillna(0)
+        ).clip(upper=5) * 2.5
+        additional_features.append('csnp_signal_strength')
+
+        training_df['dental_interaction'] = (
+            training_df.get('query_dental', 0).fillna(0) + training_df.get('filter_dental', 0).fillna(0)
+        ) * training_df['ma_dental_benefit'] * 1.5
+        additional_features.append('dental_interaction')
+
+        training_df['vision_interaction'] = (
+            training_df.get('query_vision', 0).fillna(0) + training_df.get('filter_vision', 0).fillna(0)
+        ) * training_df['ma_vision'] * 1.5
+        additional_features.append('vision_interaction')
+
+        training_df['csnp_drug_interaction'] = (
+            training_df['csnp'] * (
+                training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0) + 
+                training_df.get('time_csnp_pages', 0).fillna(0)
+            ) * 2.0 - training_df['ma_drug_coverage'] * (
+                training_df.get('query_drug', 0).fillna(0) + training_df.get('filter_drug', 0).fillna(0) + 
+                training_df.get('time_drug_pages', 0).fillna(0)
+            )
+        ).clip(lower=0) * 2.5
+        additional_features.append('csnp_drug_interaction')
+
+        training_df['csnp_doctor_interaction'] = (
+            training_df['csnp'] * (
+                training_df.get('query_csnp', 0).fillna(0) + training_df.get('filter_csnp', 0).fillna(0)
+            ) * 1.5 - training_df['ma_provider_network'] * (
+                training_df.get('query_provider', 0).fillna(0) + training_df.get('filter_provider', 0).fillna(0)
+            )
+        ).clip(lower=0) * 1.5
+        additional_features.append('csnp_doctor_interaction')
+
+        training_df['vision_signal'] = (
+            training_df['query_vision'].fillna(0) +
+            training_df['filter_vision'].fillna(0) +
+            training_df['time_vision_pages'].fillna(0).clip(upper=5)
+        ) * 2.0
+        additional_features.append('vision_signal')
+
+        training_df['dental_signal'] = (
+            training_df['query_dental'].fillna(0) +
+            training_df['filter_dental'].fillna(0) +
+            training_df['time_dental_pages'].fillna(0).clip(upper=5)
+        ) * 2.0
+        additional_features.append('dental_signal')
+
+        training_df['csnp_specific_signal'] = (
+            training_df['query_csnp'].fillna(0) +
+            training_df['filter_csnp'].fillna(0) +
+            training_df['csnp_drug_interaction'].fillna(0) +
+            training_df['csnp_doctor_interaction'].fillna(0)
+        ).clip(upper=5) * 3.0
+        additional_features.append('csnp_specific_signal')
         
         # Compile features
-        additional_features = [
-            'dental_interaction', 'csnp_interaction', 'dsnp_interaction', 'vision_interaction',
-            'query_count', 'filter_count', 'recency', 'visit_frequency', 'time_of_day',
-            'user_cluster', 'dental_time_ratio', 'click_ratio'
-        ] + embedding_cols
-        additional_features += [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
+        feature_columns = behavioral_features + plan_features + additional_features + [
+            'recency', 'visit_frequency', 'time_of_day', 'user_cluster', 
+            'dental_time_ratio', 'click_ratio'
+        ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         
-        feature_columns = behavioral_features + plan_features + additional_features
-        
-        training_df = training_df[training_df['persona'].isin(PERSONAS)].reset_index(drop=True)
+        training_df = training_df[training_df['persona'].notna()].reset_index(drop=True)
         logger.info(f"Rows after filtering: {len(training_df)}")
         
         if training_df.empty:
-            logger.error("No rows left after persona filtering")
-            raise ValueError("No rows left after persona filtering")
+            logger.error("No rows with valid personas after filtering")
+            raise ValueError("No rows with valid personas after filtering")
         
         X = training_df[feature_columns].fillna(0)
         y = training_df['persona']
@@ -294,12 +398,11 @@ def main():
         X_fold_val = X_train.iloc[val_idx]
         y_fold_val = y_train_encoded[val_idx]
         
-        # Pseudo-labeling
         model = CatBoostClassifier(
             iterations=500,
-            depth=5,  # Reduced depth for small data
-            learning_rate=0.03,  # Lower learning rate
-            l2_leaf_reg=5,  # Increased regularization
+            depth=5,
+            learning_rate=0.03,
+            l2_leaf_reg=5,
             loss_function='MultiClass',
             class_weights=class_weights,
             random_seed=42,

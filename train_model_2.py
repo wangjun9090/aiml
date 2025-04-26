@@ -5,11 +5,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from imblearn.over_sampling import BorderlineSMOTE
-import lightgbm as lgb
+import xgboost as xgb
 import optuna
 import logging
-import os
 import sys
+import os
 
 # Set up logging
 logging.basicConfig(
@@ -32,19 +32,6 @@ SCALER_FILE = '/dbfs/scaler.pkl'
 # Persona list
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp', 'transportation', 'otc']
 
-# Default coefficients
-W_CSNP_HIGH = 1.2  # Reduced to balance csnp
-W_CSNP_BASE = 0.8
-W_DSNP_HIGH = 1.2
-W_DSNP_BASE = 0.8
-k1 = 0.1
-k3 = 0.2
-k4 = 0.2
-k7 = 0.3
-k8 = 0.3
-k9 = 0.3  # Reduced for csnp
-k10 = 0.3  # Reduced for csnp
-
 # Persona info
 PERSONA_INFO = {
     'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp'},
@@ -55,68 +42,33 @@ PERSONA_INFO = {
     'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision'}
 }
 
-def calculate_persona_weight(row, persona_info, persona, plan_df):
-    plan_col = persona_info['plan_col']
+def calculate_persona_weight(row, persona_info, persona):
     query_col = persona_info['query_col']
     filter_col = persona_info['filter_col']
+    plan_col = persona_info.get('plan_col', None)
     click_col = persona_info.get('click_col', None)
     
-    base_weight = 0
-    if pd.notna(row['plan_id']) and plan_col in row and pd.notna(row[plan_col]):
-        base_weight = min(row[plan_col], 0.5)  # Reduced cap
-        if persona == 'csnp' and 'csnp_type' in row and row['csnp_type'] == 'Y':
-            base_weight *= W_CSNP_HIGH
-        elif persona == 'csnp':
-            base_weight *= W_CSNP_BASE
-        elif persona == 'dsnp' and 'dsnp_type' in row and row['dsnp_type'] == 'Y':
-            base_weight *= W_DSNP_HIGH
-        elif persona == 'dsnp':
-            base_weight *= W_DSNP_BASE
-    elif pd.isna(row['plan_id']) and pd.notna(row['compared_plan_ids']) and isinstance(row['compared_plan_ids'], str) and row.get('num_plans_compared', 0) > 0:
-        compared_ids = row['compared_plan_ids'].split(',')
-        compared_plans = plan_df[plan_df['plan_id'].isin(compared_ids) & (plan_df['zip'] == row['zip'])]
-        if not compared_plans.empty:
-            base_weight = min(compared_plans[plan_col].mean(), 0.5)
-            if persona == 'csnp':
-                csnp_type_y_ratio = (compared_plans.get('csnp_type', pd.Series(['N']*len(compared_plans))) == 'Y').mean()
-                base_weight *= (W_CSNP_BASE + (W_CSNP_HIGH - W_CSNP_BASE) * csnp_type_y_ratio)
-            elif persona == 'dsnp':
-                dsnp_type_y_ratio = (compared_plans.get('dsnp_type', pd.Series(['N']*len(compared_plans))) == 'Y').mean()
-                base_weight *= (W_DSNP_BASE + (W_DSNP_HIGH - W_DSNP_BASE) * dsnp_type_y_ratio)
-    
-    pages_viewed = min(row.get('num_pages_viewed', 0), 3) if pd.notna(row.get('num_pages_viewed', np.nan)) else 0
     query_value = row.get(query_col, 0) if pd.notna(row.get(query_col, np.nan)) else 0
     filter_value = row.get(filter_col, 0) if pd.notna(row.get(filter_col, np.nan)) else 0
+    plan_value = row.get(plan_col, 0) if plan_col and pd.notna(row.get(plan_col, np.nan)) else 0
     click_value = row.get(click_col, 0) if click_col and pd.notna(row.get(click_col, np.nan)) else 0
     
-    query_coeff = k9 if persona == 'csnp' else k3
-    filter_coeff = k10 if persona == 'csnp' else k4
-    click_coefficient = k8 if persona == 'doctor' else k7 if persona == 'drug' else 0
+    # Coefficients: boost dental, dsnp, vision
+    query_coeff = 0.4 if persona in ['dental', 'dsnp', 'vision'] else 0.2
+    filter_coeff = 0.4 if persona in ['dental', 'dsnp', 'vision'] else 0.2
+    plan_coeff = 0.3 if persona in ['dental', 'dsnp', 'vision'] else 0.2
+    click_coeff = 0.3 if persona in ['doctor', 'drug'] else 0.2
     
-    behavioral_score = query_coeff * query_value + filter_coeff * filter_value + k1 * pages_viewed + click_coefficient * click_value
+    weight = (query_coeff * query_value + filter_coeff * filter_value + 
+              plan_coeff * plan_value + click_coeff * click_value)
     
-    if persona == 'doctor':
-        if click_value >= 1.5: behavioral_score += 0.2  # Reduced boost
-        elif click_value >= 0.5: behavioral_score += 0.1
-    elif persona == 'drug':
-        if click_value >= 5: behavioral_score += 0.2
-        elif click_value >= 2: behavioral_score += 0.1
-    elif persona == 'dental':
-        signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-        if signal_count >= 2: behavioral_score += 0.2
-        elif signal_count >= 1: behavioral_score += 0.1
-    elif persona == 'vision':
-        signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-        if signal_count >= 1: behavioral_score += 0.2
-    elif persona == 'csnp':
-        signal_count = sum([1 for val in [query_value, filter_value, pages_viewed] if val > 0])
-        if signal_count >= 2: behavioral_score += 0.3  # Reduced boost
-        elif signal_count >= 1: behavioral_score += 0.2
-        if row.get('csnp_interaction', 0) > 0: behavioral_score += 0.2
-        if row.get('csnp_type_flag', 0) == 1: behavioral_score += 0.1
+    # Interaction boost for minority classes
+    if persona in ['csnp', 'dental', 'dsnp', 'vision']:
+        interaction = row.get(f'{persona}_interaction', 0)
+        weight += 0.3 * interaction if persona in ['dental', 'dsnp', 'vision'] else 0.2 * interaction
     
-    adjusted_weight = base_weight + behavioral_score
-    return min(adjusted_weight, 1.0)  # Unified cap
+    # Normalize to [0, 1]
+    return min(max(weight, 0), 1.0)
 
 def load_data(behavioral_path, plan_path):
     try:
@@ -183,8 +135,15 @@ def prepare_features(behavioral_df, plan_df):
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
-            'num_pages_viewed', 'total_session_time'
+            'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
+            'query_count', 'filter_count'
         ]
+        
+        # Compute aggregate features
+        query_cols = [c for c in behavioral_features if c.startswith('query_')]
+        filter_cols = [c for c in behavioral_features if c.startswith('filter_')]
+        training_df['query_count'] = training_df[query_cols].sum(axis=1)
+        training_df['filter_count'] = training_df[filter_cols].sum(axis=1)
         
         for col in behavioral_features + plan_features:
             training_df[col] = training_df.get(col, 0).fillna(0)
@@ -192,7 +151,7 @@ def prepare_features(behavioral_df, plan_df):
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
                 training_df[f'{persona}_weight'] = training_df.apply(
-                    lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona, plan_df), axis=1
+                    lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
         training_df['dental_interaction'] = training_df['query_dental'] * training_df.get('ma_dental_benefit', 0)
@@ -245,16 +204,25 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
 
-def objective(trial, X_train, y_train, X_val, y_val):
+def focal_loss_objective(y_true, y_pred):
+    # Custom focal loss for XGBoost
+    gamma = 2.0
+    alpha = 0.25
+    p = 1 / (1 + np.exp(-y_pred))
+    grad = alpha * (p - y_true) * (1 - p)**gamma * np.log(p + 1e-8)
+    hess = alpha * (1 - p)**gamma * (np.log(p + 1e-8) * (1 - p) + p * (1 - p)**gamma / (p + 1e-8))
+    return grad, hess
+
+def objective(trial, X_train, y_train, X_val, y_val, le):
     params = {
         'n_estimators': trial.suggest_int('n_estimators', 100, 300),
-        'num_leaves': trial.suggest_int('num_leaves', 20, 100),
+        'max_depth': trial.suggest_int('max_depth', 3, 10),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
         'subsample': trial.suggest_float('subsample', 0.7, 1.0),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0)
     }
     
-    model = lgb.LGBMClassifier(**params, random_state=42, verbose=-1)
+    model = xgb.XGBClassifier(**params, random_state=42, objective='multi:softmax', num_class=len(le.classes_))
     model.fit(X_train, y_train)
     y_pred = model.predict(X_val)
     return accuracy_score(y_val, y_pred)
@@ -302,11 +270,15 @@ def main():
     # Custom class weights
     class_counts = y_train.value_counts()
     class_weights = {le.transform([k])[0]: 1.0 / class_counts[k] for k in class_counts.index}
+    # Boost weights for dental, dsnp, vision
+    for k in class_counts.index:
+        if k in ['dental', 'dsnp', 'vision']:
+            class_weights[le.transform([k])[0]] *= 1.5
     weights = np.array([class_weights[y] for y in y_train_encoded])
     
     # Borderline-SMOTE
     smote = BorderlineSMOTE(sampling_strategy={
-        persona: 200 if persona in ['csnp', 'dental', 'dsnp', 'vision'] else max(300, count)
+        persona: 100 if persona in ['csnp', 'dental', 'dsnp', 'vision'] else max(300, count)
         for persona, count in y_train.value_counts().items()
     }, random_state=42)
     try:
@@ -322,22 +294,16 @@ def main():
     # Hyperparameter tuning
     try:
         study = optuna.create_study(direction='maximize')
-        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encoded, X_test, y_test_encoded), n_trials=30)
+        study.optimize(lambda trial: objective(trial, X_train_balanced, y_train_balanced_encode
+d, X_test, y_test_encoded, le), n_trials=30)
         best_params = study.best_params
     except Exception as e:
         logger.error(f"Hyperparameter tuning failed: {e}")
         return
     
-    # Train LightGBM
+    # Train XGBoost
     try:
-        model = lgb.LGBMClassifier(**best_params, random_state=42, verbose=-1)
-        model.fit(X_train_balanced, y_train_balanced_encoded, sample_weight=weights_balanced)
-        
-        # Feature selection by importance
-        importances = model.feature_importances_
-        feature_importance = pd.Series(importances, index=X_train_balanced.columns).nlargest(15).index.tolist()
-        X_train_balanced = X_train_balanced[feature_importance]
-        X_test = X_test[feature_importance]
+        model = xgb.XGBClassifier(**best_params, random_state=42, objective='multi:softmax', num_class=len(le.classes_))
         model.fit(X_train_balanced, y_train_balanced_encoded, sample_weight=weights_balanced)
     except Exception as e:
         logger.error(f"Model training failed: {e}")

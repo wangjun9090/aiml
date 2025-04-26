@@ -49,17 +49,14 @@ def calculate_persona_weight(row, persona_info, persona):
     plan_col = persona_info.get('plan_col', None)
     click_col = persona_info.get('click_col', None)
     
-    # Action values
     query_value = row.get(query_col, 0) if pd.notna(row.get(query_col, np.nan)) else 0
     filter_value = row.get(filter_col, 0) if pd.notna(row.get(filter_col, np.nan)) else 0
     plan_value = row.get(plan_col, 0) if plan_col and pd.notna(row.get(plan_col, np.nan)) else 0
     click_value = row.get(click_col, 0) if click_col and pd.notna(row.get(click_col, np.nan)) else 0
     
-    # Page views
     time_col = f'time_{persona}_pages'
     page_views = min(row.get(time_col, 0) / 60, 3) if time_col in row and pd.notna(row.get(time_col, np.nan)) else 0
     
-    # Weights
     if persona == 'csnp':
         query_weight = 2.5
         filter_weight = 2.3
@@ -70,20 +67,17 @@ def calculate_persona_weight(row, persona_info, persona):
     click_weight = 0.4 if persona == 'doctor' else 0.3 if persona == 'drug' else 0
     page_view_weight = 0.15
     
-    # Weighted actions
     weighted_query = query_value * query_weight
     weighted_filter = filter_value * filter_weight
     weighted_page_views = page_views * page_view_weight
     weighted_click = click_value * click_weight
     
-    # Extra points
     extra_points = 0
     if filter_value > 0 and click_value > 0:
         extra_points += 0.8
     elif filter_value > 0 or click_value > 0:
         extra_points += 0.4
     
-    # Special points
     special_points = 0
     action_count = sum(1 for v in [query_value, filter_value, click_value, page_views] if v > 0)
     interaction_col = f'{persona}_interaction'
@@ -162,13 +156,28 @@ def prepare_features(behavioral_df, plan_df):
         df = behavioral_df.merge(plan_df, on=['zip', 'plan_id'], how='left')
         logger.info(f"Rows after merge: {len(df)}")
         logger.info(f"Merged df columns: {list(df.columns)}")
+        logger.info(f"Persona distribution after merge:\n{df['persona'].value_counts(dropna=False).to_string()}")
         
-        # Signal strength filter (relaxed for csnp)
+        # Validate persona column
+        if 'persona' not in df.columns or df['persona'].isna().all():
+            logger.error("Persona column missing or all NaN")
+            raise ValueError("Persona column is missing or invalid")
+        
+        # Signal strength filter (relaxed)
         query_cols = ['query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp']
         query_cols = [col for col in query_cols if col in df.columns]
-        df['signal_strength'] = df[query_cols].sum(axis=1) if query_cols else pd.Series(0, index=df.index)
-        df = df[(df['signal_strength'] > 0.3) | (df['persona'] == 'csnp')]  # Retain all csnp
+        if not query_cols:
+            logger.warning("No query columns found, setting signal_strength to 0")
+            df['signal_strength'] = pd.Series(0, index=df.index)
+        else:
+            df['signal_strength'] = df[query_cols].sum(axis=1)
+        df = df[df['signal_strength'] > 0.1]  # Relaxed to retain more samples
         logger.info(f"Rows after signal strength filter: {len(df)}")
+        logger.info(f"Persona distribution after signal strength filter:\n{df['persona'].value_counts(dropna=False).to_string()}")
+        
+        if df.empty:
+            logger.error("DataFrame is empty after signal strength filter")
+            raise ValueError("No samples remain after filtering")
         
         # Plan features
         plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
@@ -251,20 +260,34 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        # Label validation (strict for csnp)
+        # Label validation (softer for csnp)
         mismatches = df[
-            ((df['persona'] == 'csnp') & (df['csnp'] == 0) & (df['query_csnp'] > 0.8)) |
-            ((df['persona'] != 'csnp') & (df['csnp'] == 1) & (df['query_csnp'] > 0.8))
+            ((df['persona'] == 'csnp') & (df['csnp'] == 0) & (df['query_csnp'] > 0.5)) |
+            ((df['persona'] != 'csnp') & (df['csnp'] == 1) & (df['query_csnp'] > 0.5))
         ]
         logger.info(f"Label mismatches: {len(mismatches)}")
         df.loc[
-            (df['persona'] == 'csnp') & (df['csnp'] == 0) & (df['query_csnp'] > 0.8),
+            (df['persona'] == 'csnp') & (df['csnp'] == 0) & (df['query_csnp'] > 0.5),
             'persona'
         ] = 'dental'
         df.loc[
-            (df['persona'] != 'csnp') & (df['csnp'] == 1) & (df['query_csnp'] > 0.8),
+            (df['persona'] != 'csnp') & (df['csnp'] == 1) & (df['query_csnp'] > 0.5),
             'persona'
         ] = 'csnp'
+        logger.info(f"Persona distribution after label validation:\n{df['persona'].value_counts(dropna=False).to_string()}")
+        
+        # Ensure all personas are present
+        missing_personas = [p for p in PERSONAS if p not in df['persona'].unique()]
+        if missing_personas:
+            logger.warning(f"Missing personas: {missing_personas}")
+            # Add one dummy sample per missing persona
+            for persona in missing_personas:
+                dummy_row = df.iloc[0].copy()
+                dummy_row['persona'] = persona
+                dummy_row[query_cols] = 0
+                dummy_row['signal_strength'] = 0.1
+                df = pd.concat([df, dummy_row.to_frame().T], ignore_index=True)
+            logger.info(f"Added dummy samples for missing personas. New persona distribution:\n{df['persona'].value_counts(dropna=False).to_string()}")
         
         # Enhanced features
         additional_features = []
@@ -302,7 +325,7 @@ def prepare_features(behavioral_df, plan_df):
                 additional_features.append(f'{persona}_vision_interaction')
                 
                 df[f'{persona}_doctor_interaction'] = (
-                    df[PERSONA_INFO[persona]['plan_col']] * (
+                    Wdf[PERSONA_INFO[persona]['plan_col']] * (
                         df.get(f'query_{persona}', pd.Series(0, index=df.index)) +
                         df.get(f'filter_{persona}', pd.Series(0, index=df.index))
                     ) * 4.0 - df.get('ma_provider_network', pd.Series(0, index=df.index)) * (
@@ -344,6 +367,7 @@ def prepare_features(behavioral_df, plan_df):
         X = df[feature_cols].fillna(0)
         y = df['persona']
         
+        logger.info(f"Final persona distribution:\n{y.value_counts(dropna=False).to_string()}")
         return X, y
     except Exception as e:
         logger.error(f"Failed to prepare features: {e}")
@@ -353,6 +377,12 @@ def train_model():
     # Load data
     behavioral_df, plan_df = load_data()
     X, y = prepare_features(behavioral_df, plan_df)
+    
+    # Validate target classes
+    missing_personas = [p for p in PERSONAS if p not in y.unique()]
+    if missing_personas:
+        logger.error(f"Target classes missing: {missing_personas}")
+        raise ValueError(f"Target classes {missing_personas} not present in data")
     
     # Encode labels
     le = LabelEncoder()

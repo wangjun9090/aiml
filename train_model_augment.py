@@ -80,32 +80,35 @@ def load_data(behavioral_path, plan_path):
         # Log unique personas before cleaning
         if 'persona' in behavioral_df.columns:
             logger.info(f"Raw unique personas: {behavioral_df['persona'].unique()}")
+            logger.info(f"Persona value counts:\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
         else:
             logger.warning("Persona column missing in behavioral data")
         
         # Clean behavioral data
-        # Relaxed dropna to optional columns
-        required_cols = ['zip', 'plan_id']  # Persona handled separately
+        required_cols = ['zip', 'plan_id']
+        initial_rows = len(behavioral_df)
         behavioral_df = behavioral_df.dropna(subset=required_cols)
+        logger.info(f"Rows after dropna: {len(behavioral_df)} (dropped {initial_rows - len(behavioral_df)})")
         
         # Standardize columns
         behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip()
         behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip()
         if 'persona' in behavioral_df.columns:
-            behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.strip().str.lower()
+            behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.lower().str.strip()
             behavioral_df['persona'] = behavioral_df['persona'].replace(['nan', ''], np.nan)
         else:
             behavioral_df['persona'] = np.nan
         
-        # Soften session time filter
+        # Relaxed session time filter
         if 'total_session_time' in behavioral_df.columns:
-            behavioral_df = behavioral_df[behavioral_df['total_session_time'].fillna(0).between(0, 7200)]  # 0s to 2hr
+            behavioral_df['total_session_time'] = behavioral_df['total_session_time'].fillna(0)
+            behavioral_df = behavioral_df[behavioral_df['total_session_time'].between(0, 7200)]  # 0s to 2hr
         logger.info(f"Behavioral_df after cleaning: {len(behavioral_df)} rows")
         
         # Load plan data
         plan_df = pd.read_csv(plan_path)
         plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).strip()
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()  # Fixed typo: .strip() → .str.strip()
         logger.info(f"Plan_df rows: {len(plan_df)}")
         
         return behavioral_df, plan_df
@@ -116,18 +119,20 @@ def load_data(behavioral_path, plan_path):
 def normalize_persona(df):
     valid_personas = PERSONAS
     new_rows = []
+    invalid_personas = set()
     
     for _, row in df.iterrows():
         persona = row['persona']
         if pd.isna(persona) or not persona:
-            logger.debug(f"Skipping row with missing persona: {row.to_dict()}")
+            logger.debug(f"Skipping row with missing persona: {row.get('userid', 'unknown')}")
             continue
         
         personas = [p.strip().lower() for p in str(persona).split(',')]
         valid_found = [p for p in personas if p in valid_personas]
         
         if not valid_found:
-            logger.debug(f"No valid personas in: {personas}")
+            invalid_personas.update(personas)
+            logger.debug(f"No valid personas in: {personas} for user {row.get('userid', 'unknown')}")
             continue
         
         row_copy = row.copy()
@@ -136,10 +141,10 @@ def normalize_persona(df):
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
     logger.info(f"Rows after persona normalization: {len(result)}")
+    if invalid_personas:
+        logger.info(f"Invalid personas found: {invalid_personas}")
     if result.empty:
         logger.warning(f"No valid personas found. Valid personas: {valid_personas}")
-        # Fallback: Assign default persona or proceed with plan data
-        return result
     return result
 
 def prepare_features(behavioral_df, plan_df):
@@ -151,7 +156,7 @@ def prepare_features(behavioral_df, plan_df):
         if behavioral_df.empty:
             logger.warning("Behavioral_df is empty after normalization. Using plan_df only.")
             training_df = plan_df.copy()
-            training_df['persona'] = np.nan  # Placeholder for pseudo-labeling
+            training_df['persona'] = np.nan
         else:
             # Merge data
             training_df = behavioral_df.merge(
@@ -166,14 +171,15 @@ def prepare_features(behavioral_df, plan_df):
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
             'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
-            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'accordion_csnp'
+            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'accordion_csnp',
+            'accordion_dental', 'accordion_drug', 'accordion_provider', 'accordion_vision', 'accordion_dsnp'
         ]
         
         # Temporal features
-        if 'timestamp' in training_df.columns:
-            training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['timestamp'])).dt.days.fillna(30)
-            training_df['visit_frequency'] = training_df.groupby('user_id')['timestamp'].transform('count').fillna(1) / 30
-            training_df['time_of_day'] = pd.to_datetime(training_df['timestamp']).dt.hour.fillna(12) // 6
+        if 'start_time' in training_df.columns:  # Use start_time instead of timestamp
+            training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])).dt.days.fillna(30)
+            training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30
+            training_df['time_of_day'] = pd.to_datetime(training_df['start_time']).dt.hour.fillna(12) // 6
         else:
             training_df['recency'] = 30
             training_df['visit_frequency'] = 1
@@ -188,10 +194,7 @@ def prepare_features(behavioral_df, plan_df):
             training_df['user_cluster'] = 0
         
         # Sequence feature
-        if 'page' in training_df.columns:
-            training_df['nav_path'] = training_df.groupby('user_id')['page'].transform(lambda x: '_'.join(x.head(3)))
-        else:
-            training_df['nav_path'] = 'unknown'
+        training_df['nav_path'] = 'unknown'  # Simplified due to missing 'page' column
         
         # Robust aggregates
         training_df['dental_time_ratio'] = training_df.get('time_dental_pages', 0) / (training_df.get('total_session_time', 1) + 1e-5)
@@ -199,7 +202,7 @@ def prepare_features(behavioral_df, plan_df):
         
         # Plan ID embeddings
         if 'plan_id' in training_df.columns:
-            plan_sentences = training_df.groupby('user_id')['plan_id'].apply(list).tolist()
+            plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist()
             w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
             plan_embeddings = training_df['plan_id'].apply(
                 lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(10)
@@ -307,6 +310,7 @@ def prepare_features(behavioral_df, plan_df):
         
         training_df = training_df[training_df['persona'].notna()].reset_index(drop=True)
         logger.info(f"Rows after filtering: {len(training_df)}")
+        logger.info(f"Final persona distribution:\n{training_df['persona'].value_counts(dropna=False).to_string()}")
         
         if training_df.empty:
             logger.error("No rows with valid personas after filtering")

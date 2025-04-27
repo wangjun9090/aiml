@@ -423,113 +423,76 @@ def prepare_features(behavioral_df, plan_df):
         logger.info(f"Selected features after variance filtering: {valid_features}")
 
         y = training_df['persona']
-        training_df = training_df[training_df['persona'].notna()].reset_index(drop=True)
-        logger.info(f"Rows after filtering for valid persona: {len(training_df)}")
-        logger.info(f"Pre-SMOTE persona distribution:\n{training_df['persona'].value_counts(dropna=False).to_string()}")
 
-        if training_df.empty:
-            logger.error("No rows with valid personas after filtering")
-            raise ValueError("No rows with valid personas after filtering")
+        # Separate labeled and unlabeled data based on persona being NaN
+        labeled_mask = y.notna()
+        X_labeled = X[labeled_mask]
+        y_labeled = y[labeled_mask]
+        X_unlabeled = X[~labeled_mask]
 
-        # Critical personas that must be present
+        logger.info(f"Labeled data rows: {len(X_labeled)}")
+        logger.info(f"Unlabeled data rows: {len(X_unlabeled)}")
+
+
+        logger.info(f"Pre-SMOTE persona distribution (Labeled Data):\n{y_labeled.value_counts(dropna=False).to_string()}")
+
+        if X_labeled.empty:
+            logger.error("No labeled data with valid personas after filtering")
+            raise ValueError("No labeled data with valid personas after filtering")
+
+        # Critical personas that must be present in labeled data for stratification
         critical_personas = ['dental', 'csnp', 'dsnp']
-        missing_critical_personas = [p for p in critical_personas if p not in y.unique()]
+        missing_critical_personas_labeled = [p for p in critical_personas if p not in y_labeled.unique()]
 
-        if missing_critical_personas:
-            logger.warning(f"Critical personas missing: {missing_critical_personas}. Adding synthetic samples.")
 
-            # Create synthetic samples for each missing critical persona
-            synthetic_data = []
-            for persona in missing_critical_personas:
-                logger.info(f"Adding synthetic data for {persona}")
-
-                # Create 100 samples for each missing persona (Increased synthetic sample count)
-                for i in range(100):
-                    sample = {col: 0 for col in X.columns}
-
-                    # Set base values
-                    if 'recency' in X.columns:
-                        sample['recency'] = np.random.randint(1, 30)
-                    if 'visit_frequency' in X.columns:
-                        sample['visit_frequency'] = np.random.uniform(0.1, 0.5)
-                    if 'time_of_day' in X.columns:
-                        sample['time_of_day'] = np.random.randint(0, 4)
-                    if 'user_cluster' in X.columns:
-                        sample['user_cluster'] = np.random.randint(0, 5)
-
-                    # Set persona-specific features
-                    if persona == 'dental':
-                        for feature in [f for f in X.columns if 'dental' in f]:
-                            sample[feature] = np.random.uniform(3.0, 5.0)
-                        if 'ma_dental_benefit' in X.columns:
-                            sample['ma_dental_benefit'] = 1
-
-                    elif persona == 'csnp':
-                        for feature in [f for f in X.columns if 'csnp' in f]:
-                            sample[feature] = np.random.uniform(3.0, 5.0)
-                        if 'csnp' in X.columns:
-                            sample['csnp'] = 1
-
-                    elif persona == 'dsnp':
-                        for feature in [f for f in X.columns if 'dsnp' in f]:
-                            sample[feature] = np.random.uniform(3.0, 5.0)
-                        if 'dsnp' in X.columns:
-                            sample['dsnp'] = 1
-
-                    synthetic_data.append(sample)
-
-            # Convert synthetic data to DataFrame and add it to X
-            if synthetic_data:
-                synthetic_df = pd.DataFrame(synthetic_data)
-                # Ensure synthetic_df has the same columns as X after variance filtering
-                synthetic_df = synthetic_df.reindex(columns=X.columns, fill_value=0)
-                X = pd.concat([X, synthetic_df], ignore_index=True)
-
-                # Add corresponding y values
-                synthetic_y = []
-                for persona in missing_critical_personas:
-                    synthetic_y.extend([persona] * 100) # Match increased synthetic sample count
-                y = pd.concat([y, pd.Series(synthetic_y)], ignore_index=True)
-
-                logger.info(f"Added {len(synthetic_data)} synthetic samples for {missing_critical_personas}")
-                logger.info(f"Updated distribution:\n{y.value_counts().to_string()}")
-
-        # Apply SMOTE with refined targets focusing on low-performing classes
-        class_counts = pd.Series(y).value_counts()
-        sampling_strategy = {
-            'dsnp': max(class_counts.get('dsnp', 0), 2000), # Ensure minimum for dsnp
-            'doctor': max(class_counts.get('doctor', 0), 3000), # Increased target for doctor
-            'drug': max(class_counts.get('drug', 0), 3000),     # Increased target for drug
-            'vision': max(class_counts.get('vision', 0), 3000), # Increased target for vision
-            'csnp': max(class_counts.get('csnp', 0), 2000),
-            'dental': max(class_counts.get('dental', 0), 2000)
+        # Apply SMOTE with refined targets focusing on low-performing classes in labeled data
+        class_counts_labeled = pd.Series(y_labeled).value_counts()
+        sampling_strategy_labeled = {
+            'dsnp': max(class_counts_labeled.get('dsnp', 0), 2000), # Ensure minimum for dsnp
+            'doctor': max(class_counts_labeled.get('doctor', 0), 3000), # Increased target for doctor
+            'drug': max(class_counts_labeled.get('drug', 0), 3000),     # Increased target for drug
+            'vision': max(class_counts_labeled.get('vision', 0), 3000), # Increased target for vision
+            'csnp': max(class_counts_labeled.get('csnp', 0), 2000),
+            'dental': max(class_counts_labeled.get('dental', 0), 2000)
         }
-        logger.info(f"SMOTE sampling strategy: {sampling_strategy}")
-        smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy) # Increased k_neighbors
-        X, y = smote.fit_resample(X, y)
-        logger.info(f"Rows after SMOTE: {len(X)}")
-        logger.info(f"Post-SMOTE persona distribution:\n{pd.Series(y).value_counts().to_string()}")
+        logger.info(f"SMOTE sampling strategy (Labeled Data): {sampling_strategy_labeled}")
+        smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy_labeled) # Increased k_neighbors
+        X_labeled_resampled, y_labeled_resampled = smote.fit_resample(X_labeled, y_labeled)
 
-        # Final check for critical personas after SMOTE
-        missing_critical_after_smote = [p for p in critical_personas if p not in y.unique()]
+        logger.info(f"Labeled data rows after SMOTE: {len(X_labeled_resampled)}")
+        logger.info(f"Post-SMOTE persona distribution (Labeled Data):\n{pd.Series(y_labeled_resampled).value_counts().to_string()}")
+
+        # Final check for critical personas in resampled labeled data
+        missing_critical_after_smote = [p for p in critical_personas if p not in y_labeled_resampled.unique()]
         if missing_critical_after_smote:
-            logger.error(f"Critical personas still missing after SMOTE: {missing_critical_after_smote}")
-            raise ValueError(f"Failed to ensure critical personas {missing_critical_after_smote} are in dataset")
+            logger.error(f"Critical personas still missing in labeled data after SMOTE: {missing_critical_after_smote}")
+            # Decide how to handle this - potentially add synthetic samples here if absolutely necessary
+            # For now, we will raise an error as stratification will fail
+            raise ValueError(f"Failed to ensure critical personas {missing_critical_after_smote} are in labeled dataset after SMOTE")
         else:
-            logger.info("All critical personas successfully included in dataset after SMOTE")
+            logger.info("All critical personas successfully included in labeled dataset after SMOTE")
 
 
-        # Scale features
+        # Scale features for both labeled and unlabeled data separately after SMOTE on labeled
         scaler = StandardScaler()
-        X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
+        X_labeled_scaled = pd.DataFrame(scaler.fit_transform(X_labeled_resampled), columns=X_labeled_resampled.columns)
+        if not X_unlabeled.empty:
+             X_unlabeled_scaled = pd.DataFrame(scaler.transform(X_unlabeled), columns=X_unlabeled.columns)
+        else:
+             X_unlabeled_scaled = pd.DataFrame(columns=X_labeled_scaled.columns) # Create empty df with correct columns
 
-        return X, y, scaler
+
+        return X_labeled_scaled, y_labeled_resampled, X_unlabeled_scaled, scaler
     except Exception as e:
         logger.error(f"Failed to prepare features: {e}")
         raise
 
 def pseudo_labeling(X_labeled, y_labeled, X_unlabeled, model, confidence_threshold=0.95):
     try:
+        if X_labeled.empty or X_unlabeled.empty:
+            logger.warning("Labeled or unlabeled data is empty. Skipping pseudo-labeling.")
+            return pd.DataFrame(), np.array([])
+
         model.fit(X_labeled, y_labeled)
         y_unlabeled_pred_proba = model.predict_proba(X_unlabeled)
         confidence = y_unlabeled_pred_proba.max(axis=1)
@@ -549,16 +512,21 @@ def pseudo_labeling(X_labeled, y_labeled, X_unlabeled, model, confidence_thresho
 def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
     per_persona_accuracy = {}
     for cls_idx, cls_name in enumerate(class_names):
-        # Ensure that the class index exists in both y_true and y_pred before filtering
-        if cls_idx in y_true and cls_idx in y_pred:
+        # Ensure that the class index exists in y_true before filtering
+        if cls_idx in y_true:
             mask = y_true == cls_idx
             if mask.sum() > 0:
-                cls_accuracy = accuracy_score(y_true[mask], y_pred[mask])
-                per_persona_accuracy[cls_name] = cls_accuracy * 100
+                # Ensure that the class index exists in y_pred before calculating accuracy
+                if cls_idx in y_pred[mask]:
+                     cls_accuracy = accuracy_score(y_true[mask], y_pred[mask])
+                     per_persona_accuracy[cls_name] = cls_accuracy * 100
+                else:
+                     # If the class is in y_true but not predicted for any of the masked samples
+                     per_persona_accuracy[cls_name] = 0.0
             else:
                 per_persona_accuracy[cls_name] = 0.0
         else:
-             per_persona_accuracy[cls_name] = 0.0 # Assign 0 if class index is not in both arrays
+             per_persona_accuracy[cls_name] = 0.0 # Assign 0 if class index is not in y_true
     return per_persona_accuracy
 
 
@@ -570,24 +538,16 @@ def main():
         logger.error(f"Failed to load data: {e}")
         return
 
-    # Prepare features
+    # Prepare features and handle labeled/unlabeled data
     try:
-        X, y, scaler = prepare_features(behavioral_df, plan_df)
+        X_labeled_scaled, y_labeled_resampled, X_unlabeled_scaled, scaler = prepare_features(behavioral_df, plan_df)
     except Exception as e:
         logger.error(f"Failed to prepare features: {e}")
         return
 
-    # Semi-supervised learning
-    # Filter out any remaining NaNs in y before splitting
-    valid_y_mask = y.notna()
-    X = X[valid_y_mask]
-    y = y[valid_y_mask]
-
-
-    # Split data ensuring all classes are present in both train and test if possible
-    # Increased test size slightly
+    # Split labeled data
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=42, stratify=y
+        X_labeled_scaled, y_labeled_resampled, test_size=0.25, random_state=42, stratify=y_labeled_resampled
     )
     logger.info(f"Training set: {X_train.shape[0]} samples, Test set: {X_test.shape[0]} samples")
 
@@ -605,21 +565,26 @@ def main():
     feature_importances = []
 
     # Determine a dynamic pseudo-labeling threshold or per-class thresholds
-    # Simple dynamic threshold based on overall accuracy
-    initial_model = CatBoostClassifier(
-        iterations=100, # Quick initial model
-        depth=4,
-        learning_rate=0.05,
-        loss_function='MultiClass',
-        auto_class_weights='Balanced',
-        random_seed=42,
-        verbose=0
-    )
-    initial_model.fit(X_train, y_train_encoded)
-    initial_preds = initial_model.predict(X_test)
-    initial_accuracy = accuracy_score(y_test_encoded, initial_preds)
-    pseudo_label_threshold = max(0.8, initial_accuracy * 0.9) # Threshold based on initial accuracy
-    logger.info(f"Setting pseudo-labeling confidence threshold to: {pseudo_label_threshold:.2f}")
+    # Simple dynamic threshold based on initial model accuracy on a subset
+    if not X_train.empty and not X_test.empty:
+        initial_model = CatBoostClassifier(
+            iterations=100, # Quick initial model
+            depth=4,
+            learning_rate=0.05,
+            loss_function='MultiClass',
+            auto_class_weights='Balanced',
+            random_seed=42,
+            verbose=0
+        )
+        initial_model.fit(X_train, y_train_encoded)
+        initial_preds_proba = initial_model.predict_proba(X_test)
+        initial_preds_encoded = np.argmax(initial_preds_proba, axis=1)
+        initial_accuracy = accuracy_score(y_test_encoded, initial_preds_encoded)
+        pseudo_label_threshold = max(0.8, initial_accuracy * 0.9) # Threshold based on initial accuracy
+        logger.info(f"Setting pseudo-labeling confidence threshold to: {pseudo_label_threshold:.2f}")
+    else:
+        logger.warning("Training or test set is empty. Cannot determine dynamic pseudo-labeling threshold. Using default 0.95.")
+        pseudo_label_threshold = 0.95
 
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train_encoded)):
@@ -642,7 +607,7 @@ def main():
             eval_metric='Accuracy'
         )
         # Pass the dynamic threshold to pseudo_labeling
-        X_pseudo, y_pseudo_labels = pseudo_labeling(X_fold_train, y_fold_train, X_unlabeled, model, confidence_threshold=pseudo_label_threshold)
+        X_pseudo, y_pseudo_labels = pseudo_labeling(X_fold_train, y_fold_train, X_unlabeled_scaled, model, confidence_threshold=pseudo_label_threshold)
 
         if not X_pseudo.empty:
              # Ensure y_pseudo_labels are encoded before concatenating
@@ -657,6 +622,7 @@ def main():
             early_stopping_rounds=70 # Increased early stopping rounds
         )
         models.append(model)
+        # Get feature importances from the trained model before ensemble
         feature_importances.append(model.get_feature_importance())
         logger.info(f"Fold {fold+1} training completed")
 
@@ -670,15 +636,16 @@ def main():
     logger.info(f"Prediction distribution:\n{pd.Series(y_pred).value_counts().to_string()}")
 
     # Log feature importances
-    if feature_importances:
+    if feature_importances and X_train.columns.tolist(): # Check if feature_importances is not empty and get columns from X_train
         avg_importances = np.mean(feature_importances, axis=0)
         importance_df = pd.DataFrame({
-            'Feature': X.columns, # Use columns from X after filtering
+            'Feature': X_train.columns.tolist(), # Use columns from X_train after split
             'Importance': avg_importances
         }).sort_values(by='Importance', ascending=False)
         logger.info("Feature Importances:\n" + importance_df.to_string())
     else:
-        logger.warning("No feature importances to display.")
+        logger.warning("No feature importances to display or X_train columns are not available.")
+
 
     # Evaluate
     overall_accuracy = accuracy_score(y_test_encoded, y_pred_encoded)
@@ -699,7 +666,9 @@ def main():
 
     # Save model
     if models:
-        model = models[0] # Save the first fold's model, or consider saving the ensemble if needed later
+        # Consider saving the ensemble or a single best model based on validation performance
+        # For simplicity, saving the first fold's model for now
+        model = models[0]
         os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
         with open(MODEL_FILE, 'wb') as f:
             pickle.dump(model, f)

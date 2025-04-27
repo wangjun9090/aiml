@@ -27,7 +27,7 @@ logging.getLogger("py4j").setLevel(logging.ERROR)
 # File paths
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-1.0.0.pkl'
+MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-1.1.0.pkl'
 LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder_1.pkl'
 SCALER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/scaler.pkl'
 
@@ -191,9 +191,9 @@ def prepare_features(behavioral_df, plan_df):
         # Temporal features
         if 'start_time' in training_df.columns and pd.api.types.is_datetime64_any_dtype(training_df['start_time']):
             training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])\
-                                      .replace(second=0, microsecond=0, nanosecond=0) # Handle potential datetime format issues
-                                     ).dt.days.fillna(30).clip(lower=0) # Ensure non-negative recency
-            training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / (training_df['recency'] + 1) # Frequency based on recency
+                                      .replace(second=0, microsecond=0, nanosecond=0)
+                                     ).dt.days.fillna(30).clip(lower=0)
+            training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / (training_df['recency'] + 1)
             training_df['time_of_day'] = pd.to_datetime(training_df['start_time']).dt.hour.fillna(12) // 6
         else:
             logger.warning("start_time column not found or not in datetime format. Temporal features will be defaulted.")
@@ -208,7 +208,7 @@ def prepare_features(behavioral_df, plan_df):
 
         if len(cluster_features_present) == len(cluster_features):
             try:
-                kmeans = KMeans(n_clusters=5, random_state=42, n_init=10) # Added n_init for KMeans
+                kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
                 training_df['user_cluster'] = kmeans.fit_predict(training_df[cluster_features].fillna(0))
             except Exception as e:
                 logger.warning(f"KMeans clustering failed: {e}. User cluster will be defaulted.")
@@ -221,13 +221,13 @@ def prepare_features(behavioral_df, plan_df):
         training_df['dental_time_ratio'] = training_df.get('time_dental_pages', 0) / (training_df.get('total_session_time', 0) + 1e-5)
         training_df['click_ratio'] = training_df.get('num_clicks', 0) / (training_df.get('num_pages_viewed', 0) + 1e-5)
 
-        # Plan ID embeddings - Reverted vector size
+        # Plan ID embeddings
         if 'plan_id' in training_df.columns:
             plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist()
             if plan_sentences:
-                w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4) # Reverted vector size
+                w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
                 plan_embeddings = training_df['plan_id'].apply(
-                    lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(10) # Match reverted vector size
+                    lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(10)
                 )
                 embedding_cols = [f'plan_emb_{i}' for i in range(10)]
                 training_df[embedding_cols] = pd.DataFrame(plan_embeddings.tolist(), index=training_df.index)
@@ -253,14 +253,14 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
 
-        # Domain-specific features - Reverted some weight adjustments
+        # Domain-specific features
         additional_features = []
 
         # CSNP Features
         training_df['csnp_interaction'] = training_df.get('csnp', 0) * (
             training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0) +
             training_df.get('time_csnp_pages', 0) + training_df.get('accordion_csnp', 0)
-        ) * 2.0 # Reverted weight slightly
+        ) * 2.0
         additional_features.append('csnp_interaction')
 
         training_df['csnp_type_flag'] = training_df.get('csnp_type', 'N').map({'Y': 1, 'N': 0}).fillna(0).astype(int)
@@ -269,13 +269,13 @@ def prepare_features(behavioral_df, plan_df):
         training_df['csnp_signal_strength'] = (
             training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0) +
             training_df.get('accordion_csnp', 0) + training_df.get('time_csnp_pages', 0)
-        ).clip(upper=5) * 2.0 # Reverted weight slightly
+        ).clip(upper=5) * 2.0
         additional_features.append('csnp_signal_strength')
 
         # Dental Features
         training_df['dental_interaction'] = (
             training_df.get('query_dental', 0) + training_df.get('filter_dental', 0)
-        ) * training_df.get('ma_dental_benefit', 0) * 1.5 # Reverted weight
+        ) * training_df.get('ma_dental_benefit', 0) * 1.5
         additional_features.append('dental_interaction')
 
         training_df['dental_signal_strength'] = (
@@ -283,13 +283,13 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('filter_dental', 0) +
             training_df.get('time_dental_pages', 0).clip(upper=5) +
             training_df.get('accordion_dental', 0)
-        ).clip(lower=0, upper=5) * 2.0 # Reverted weight
+        ).clip(lower=0, upper=5) * 2.0
         additional_features.append('dental_signal_strength')
 
         # Vision Features
         training_df['vision_interaction'] = (
             training_df.get('query_vision', 0) + training_df.get('filter_vision', 0) + training_df.get('time_vision_pages', 0)
-        ) * training_df.get('ma_vision', 0) * 1.5 # Reverted weight
+        ) * training_df.get('ma_vision', 0) * 1.5
         additional_features.append('vision_interaction')
 
         training_df['vision_signal'] = (
@@ -297,13 +297,13 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('filter_vision', 0) +
             training_df.get('time_vision_pages', 0).clip(upper=5) +
             training_df.get('accordion_vision', 0)
-        ) * 2.0 # Reverted weight
+        ) * 2.0
         additional_features.append('vision_signal')
 
         # Drug Features
         training_df['drug_interaction'] = (
              training_df.get('query_drug', 0) + training_df.get('filter_drug', 0) + training_df.get('time_drug_pages', 0)
-        ) * training_df.get('ma_drug_benefit', 0) * 1.5 # Reverted weight
+        ) * training_df.get('ma_drug_benefit', 0) * 1.5
         additional_features.append('drug_interaction')
 
         training_df['drug_signal'] = (
@@ -311,41 +311,41 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('filter_drug', 0) +
             training_df.get('time_drug_pages', 0).clip(upper=5) +
             training_df.get('accordion_drug', 0)
-        ) * 2.0 # Reverted weight
+        ) * 2.0
         additional_features.append('drug_signal')
 
-        # Doctor Features - Reverted some weight adjustments and removed dental time proxy
+        # Doctor Features
         training_df['doctor_interaction'] = (
             training_df.get('query_provider', 0) + training_df.get('filter_provider', 0) + training_df.get('click_provider', 0)
-        ) * training_df.get('ma_provider_network', 0) * 1.5 # Reverted weight and removed dental time
+        ) * training_df.get('ma_provider_network', 0) * 1.5
         additional_features.append('doctor_interaction')
 
         training_df['doctor_signal'] = (
             training_df.get('query_provider', 0) +
             training_df.get('filter_provider', 0) +
             training_df.get('click_provider', 0)
-        ).clip(lower=0, upper=5) * 2.0 # Reverted weight and upper clip
+        ).clip(lower=0, upper=5) * 2.0
         additional_features.append('doctor_signal')
 
-        # Interactions between different personas - Reverted some weight adjustments
+        # Interactions between different personas
         training_df['csnp_drug_interaction'] = (
             training_df.get('csnp', 0) * (
                 training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0) +
                 training_df.get('time_csnp_pages', 0)
-            ) * 1.5 - training_df.get('ma_drug_benefit', 0) * ( # Reverted weight
+            ) * 1.5 - training_df.get('ma_drug_benefit', 0) * (
                 training_df.get('query_drug', 0) + training_df.get('filter_drug', 0) +
                 training_df.get('time_drug_pages', 0)
             )
-        ).clip(lower=0) * 2.0 # Reverted weight
+        ).clip(lower=0) * 2.0
         additional_features.append('csnp_drug_interaction')
 
         training_df['csnp_doctor_interaction'] = (
             training_df.get('csnp', 0) * (
                 training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0)
-            ) * 1.0 - training_df.get('ma_provider_network', 0) * ( # Reverted weight
+            ) * 1.0 - training_df.get('ma_provider_network', 0) * (
                 training_df.get('query_provider', 0) + training_df.get('filter_provider', 0)
             )
-        ).clip(lower=0) * 1.0 # Reverted weight
+        ).clip(lower=0) * 1.0
         additional_features.append('csnp_doctor_interaction')
 
 
@@ -354,7 +354,7 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('filter_csnp', 0) +
             training_df.get('csnp_drug_interaction', 0) +
             training_df.get('csnp_doctor_interaction', 0)
-        ).clip(upper=5) * 2.5 # Reverted weight
+        ).clip(upper=5) * 2.5
         additional_features.append('csnp_specific_signal')
 
         training_df['dsnp_signal'] = (
@@ -362,14 +362,14 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('filter_dsnp', 0) +
             training_df.get('time_dsnp_pages', 0).clip(upper=5) +
             training_df.get('accordion_dsnp', 0)
-        ) * 2.0 # Reverted weight
+        ) * 2.0
         additional_features.append('dsnp_signal')
 
         training_df['dsnp_proxy_signal'] = (
             training_df.get('query_csnp', 0) * 0.5 +
             training_df.get('filter_dsnp', 0) +
             training_df.get('time_dsnp_pages', 0).clip(upper=5)
-        ) * 1.5 # Reverted weight
+        ) * 1.5
         additional_features.append('dsnp_proxy_signal')
 
 
@@ -377,21 +377,21 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('dsnp', 0) * (
                 training_df.get('query_dsnp', 0) + training_df.get('filter_dsnp', 0) +
                 training_df.get('time_dsnp_pages', 0)
-            ) * 1.5 - training_df.get('ma_drug_benefit', 0) * ( # Reverted weight
+            ) * 1.5 - training_df.get('ma_drug_benefit', 0) * (
                 training_df.get('query_drug', 0) + training_df.get('filter_drug', 0) +
                 training_df.get('time_drug_pages', 0)
             )
-        ).clip(lower=0) * 2.0 # Reverted weight
+        ).clip(lower=0) * 2.0
         additional_features.append('dsnp_drug_interaction')
 
         training_df['drug_doctor_interaction'] = (
             training_df.get('ma_drug_benefit', 0) * (
                 training_df.get('query_drug', 0) + training_df.get('filter_drug', 0) +
                 training_df.get('time_drug_pages', 0)
-            ) * 1.0 - training_df.get('ma_provider_network', 0) * ( # Reverted weight
+            ) * 1.0 - training_df.get('ma_provider_network', 0) * (
                 training_df.get('query_provider', 0) + training_df.get('filter_provider', 0)
             )
-        ).clip(lower=0) * 1.0 # Reverted weight
+        ).clip(lower=0) * 1.0
         additional_features.append('drug_doctor_interaction')
 
 
@@ -421,7 +421,7 @@ def prepare_features(behavioral_df, plan_df):
         X = training_df[feature_columns_present].fillna(0) # Ensure no NaNs in features before variance check
 
         variances = X.var()
-        valid_features = variances[variances > 1e-4].index.tolist()  # Reverted variance threshold
+        valid_features = variances[variances > 1e-4].index.tolist()
         X = X[valid_features]
         logger.info(f"Selected features after variance filtering: {valid_features}")
 
@@ -429,9 +429,9 @@ def prepare_features(behavioral_df, plan_df):
 
         # Separate labeled and unlabeled data based on persona being NaN
         labeled_mask = y.notna()
-        X_labeled = X[labeled_mask].copy() # Use .copy() to avoid SettingWithCopyWarning
-        y_labeled = y[labeled_mask].copy() # Use .copy() to avoid SettingWithCopyWarning
-        X_unlabeled = X[~labeled_mask].copy() # Use .copy() to avoid SettingWithCopyWarning
+        X_labeled = X[labeled_mask].copy()
+        y_labeled = y[labeled_mask].copy()
+        X_unlabeled = X[~labeled_mask].copy()
 
         logger.info(f"Labeled data rows: {len(X_labeled)}")
         logger.info(f"Unlabeled data rows: {len(X_unlabeled)}")
@@ -453,7 +453,7 @@ def prepare_features(behavioral_df, plan_df):
             synthetic_data_labeled = []
             for persona in missing_critical_personas_labeled:
                 logger.info(f"Adding synthetic data for missing labeled persona: {persona}")
-                # Add a small number of synthetic samples (e.g., 10) - Reverted synthetic sample count
+                # Add a small number of synthetic samples (e.g., 10)
                 for i in range(10):
                     sample = {col: 0 for col in X_labeled.columns}
                     # Set some basic feature values and persona-specific indicators
@@ -496,15 +496,15 @@ def prepare_features(behavioral_df, plan_df):
         class_counts_labeled = pd.Series(y_labeled).value_counts()
         # Reverted sampling strategy to be closer to original, but ensuring minimums
         sampling_strategy_labeled = {
-            'dsnp': max(class_counts_labeled.get('dsnp', 0), 1500), # Reverted target
-            'doctor': max(class_counts_labeled.get('doctor', 0), 2000), # Reverted target
-            'drug': max(class_counts_labeled.get('drug', 0), 2000),     # Reverted target
-            'vision': max(class_counts_labeled.get('vision', 0), 2000), # Reverted target
-            'csnp': max(class_counts_labeled.get('csnp', 0), 1500), # Reverted target
-            'dental': max(class_counts_labeled.get('dental', 0), 2000)  # Reverted target
+            'dsnp': max(class_counts_labeled.get('dsnp', 0), 1500),
+            'doctor': max(class_counts_labeled.get('doctor', 0), 2000),
+            'drug': max(class_counts_labeled.get('drug', 0), 2000),
+            'vision': max(class_counts_labeled.get('vision', 0), 2000),
+            'csnp': max(class_counts_labeled.get('csnp', 0), 1500),
+            'dental': max(class_counts_labeled.get('dental', 0), 2000)
         }
         logger.info(f"SMOTE sampling strategy (Labeled Data): {sampling_strategy_labeled}")
-        smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy_labeled) # Reverted k_neighbors
+        smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy_labeled)
         X_labeled_resampled, y_labeled_resampled = smote.fit_resample(X_labeled_scaled, y_labeled) # Apply SMOTE on scaled data
 
         logger.info(f"Labeled data rows after SMOTE: {len(X_labeled_resampled)}")
@@ -606,12 +606,12 @@ def main():
     logger.info(f"Test set label distribution:\n{pd.Series(y_test).value_counts().to_string()}")
 
     # Train CatBoost with pseudo-labeling and k-fold
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42) # Reverted splits
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     models = []
     feature_importances = []
 
-    # Fixed pseudo-labeling confidence threshold - Reverted
-    pseudo_label_threshold = 0.95 # Reverted threshold
+    # Fixed pseudo-labeling confidence threshold
+    pseudo_label_threshold = 0.95
     logger.info(f"Using fixed pseudo-labeling confidence threshold: {pseudo_label_threshold:.2f}")
 
 
@@ -622,12 +622,12 @@ def main():
         y_fold_val = y_train_encoded[val_idx]
 
         model = CatBoostClassifier(
-            iterations=300,  # Reverted iterations
-            depth=6,  # Reverted depth
-            learning_rate=0.05,  # Reverted learning rate
-            l2_leaf_reg=3,  # Reverted L2 regularization
+            iterations=300,
+            depth=6,
+            learning_rate=0.05,
+            l2_leaf_reg=3,
             loss_function='MultiClass',
-            auto_class_weights='Balanced', # Reverted to auto-balancing
+            auto_class_weights='Balanced',
             random_seed=42,
             verbose=0,
             one_hot_max_size=10,
@@ -646,7 +646,7 @@ def main():
         model.fit(
             X_fold_train, y_fold_train,
             eval_set=(X_fold_val, y_fold_val),
-            early_stopping_rounds=50 # Reverted early stopping rounds
+            early_stopping_rounds=50
         )
         models.append(model)
         # Get feature importances from the trained model before ensemble
@@ -703,7 +703,7 @@ def main():
         with open(LABEL_ENCODER_FILE, 'wb') as f:
             pickle.dump(le, f)
         with open(SCALER_FILE, 'wb') as f:
-            pickle.dump(scaler)
+            pickle.dump(scaler, f) # Corrected pickle.dump call
         logger.info("Saved model, label encoder, and scaler to disk.")
     else:
         logger.error("No models were trained successfully.")

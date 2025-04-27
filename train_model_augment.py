@@ -7,6 +7,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 from catboost import CatBoostClassifier, Pool
 from imblearn.over_sampling import SMOTE
+# Consider adding other imblearn techniques if needed, e.g., from imblearn.combine import SMOTEENN
 import logging
 import sys
 import os
@@ -27,7 +28,7 @@ logging.getLogger("py4j").setLevel(logging.ERROR)
 # File paths
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
-MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-1.0.0.pkl'
+MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-1.1.0.pkl'
 LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder_1.pkl'
 SCALER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/scaler.pkl'
 
@@ -190,7 +191,9 @@ def prepare_features(behavioral_df, plan_df):
 
         # Temporal features
         if 'start_time' in training_df.columns and pd.api.types.is_datetime64_any_dtype(training_df['start_time']):
-            training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])).dt.days.fillna(30).clip(lower=0) # Ensure non-negative recency
+            training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])\
+                                      .replace(second=0, microsecond=0, nanosecond=0) # Handle potential datetime format issues
+                                     ).dt.days.fillna(30).clip(lower=0) # Ensure non-negative recency
             training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / (training_df['recency'] + 1) # Frequency based on recency
             training_df['time_of_day'] = pd.to_datetime(training_df['start_time']).dt.hour.fillna(12) // 6
         else:
@@ -198,6 +201,7 @@ def prepare_features(behavioral_df, plan_df):
             training_df['recency'] = 30
             training_df['visit_frequency'] = 1
             training_df['time_of_day'] = 2
+
 
         # Clustering feature
         cluster_features = ['num_pages_viewed', 'total_session_time', 'num_clicks']
@@ -222,19 +226,19 @@ def prepare_features(behavioral_df, plan_df):
         if 'plan_id' in training_df.columns:
             plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist()
             if plan_sentences:
-                w2v_model = Word2Vec(sentences=plan_sentences, vector_size=20, window=5, min_count=1, workers=4) # Increased vector size
+                w2v_model = Word2Vec(sentences=plan_sentences, vector_size=25, window=5, min_count=1, workers=4) # Increased vector size
                 plan_embeddings = training_df['plan_id'].apply(
-                    lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(20) # Match increased vector size
+                    lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(25) # Match increased vector size
                 )
-                embedding_cols = [f'plan_emb_{i}' for i in range(20)]
+                embedding_cols = [f'plan_emb_{i}' for i in range(25)]
                 training_df[embedding_cols] = pd.DataFrame(plan_embeddings.tolist(), index=training_df.index)
             else:
                  logger.warning("No plan ID sentences for Word2Vec. Plan embeddings will be zero.")
-                 embedding_cols = [f'plan_emb_{i}' for i in range(20)]
+                 embedding_cols = [f'plan_emb_{i}' for i in range(25)]
                  training_df[embedding_cols] = 0
         else:
             logger.warning("plan_id column not found. Plan embeddings will be zero.")
-            embedding_cols = [f'plan_emb_{i}' for i in range(20)]
+            embedding_cols = [f'plan_emb_{i}' for i in range(25)]
             training_df[embedding_cols] = 0
 
         # Aggregate features
@@ -271,16 +275,16 @@ def prepare_features(behavioral_df, plan_df):
 
         # Dental Features
         training_df['dental_interaction'] = (
-            training_df.get('query_dental', 0) + training_df.get('filter_dental', 0)
-        ) * training_df.get('ma_dental_benefit', 0) * 1.5
+            training_df.get('query_dental', 0) + training_df.get('filter_dental', 0) + training_df.get('time_dental_pages', 0)
+        ) * training_df.get('ma_dental_benefit', 0) * 2.0 # Increased weight
         additional_features.append('dental_interaction')
 
         training_df['dental_signal_strength'] = (
-            training_df.get('query_dental', 0) +
-            training_df.get('filter_dental', 0) +
+            training_df.get('query_dental', 0) * 1.5 + # Increased weight for query
+            training_df.get('filter_dental', 0) * 1.2 + # Increased weight for filter
             training_df.get('time_dental_pages', 0).clip(upper=5) +
             training_df.get('accordion_dental', 0)
-        ).clip(lower=0, upper=5) * 2.0
+        ).clip(lower=0, upper=5) * 3.0 # Increased overall signal weight
         additional_features.append('dental_signal_strength')
 
         # Vision Features (Enhanced)
@@ -313,15 +317,16 @@ def prepare_features(behavioral_df, plan_df):
 
         # Doctor Features (Enhanced)
         training_df['doctor_interaction'] = (
-            training_df.get('query_provider', 0) + training_df.get('filter_provider', 0) + training_df.get('click_provider', 0)
-        ) * training_df.get('ma_provider_network', 0) * 2.0 # Increased weight
+            training_df.get('query_provider', 0) + training_df.get('filter_provider', 0) + training_df.get('click_provider', 0) + training_df.get('time_dental_pages', 0) # Added dental time as potential proxy
+        ) * training_df.get('ma_provider_network', 0) * 2.5 # Increased weight
         additional_features.append('doctor_interaction')
 
         training_df['doctor_signal'] = (
-            training_df.get('query_provider', 0) * 1.5 + # Increased weight for query
-            training_df.get('filter_provider', 0) * 1.2 + # Increased weight for filter
-            training_df.get('click_provider', 0)
-        ).clip(lower=0, upper=5) * 2.5 # Increased overall signal weight
+            training_df.get('query_provider', 0) * 2.0 + # Increased weight for query
+            training_df.get('filter_provider', 0) * 1.5 + # Increased weight for filter
+            training_df.get('click_provider', 0) +
+            training_df.get('time_dental_pages', 0).clip(upper=5) * 0.8 # Added weighted dental time
+        ).clip(lower=0, upper=7) * 3.0 # Increased overall signal weight and upper clip
         additional_features.append('doctor_signal')
 
         # Interactions between different personas (Refined)
@@ -418,7 +423,7 @@ def prepare_features(behavioral_df, plan_df):
         X = training_df[feature_columns_present].fillna(0) # Ensure no NaNs in features before variance check
 
         variances = X.var()
-        valid_features = variances[variances > 1e-4].index.tolist()  # Adjusted variance threshold
+        valid_features = variances[variances > 1e-5].index.tolist()  # Adjusted variance threshold slightly
         X = X[valid_features]
         logger.info(f"Selected features after variance filtering: {valid_features}")
 
@@ -450,8 +455,8 @@ def prepare_features(behavioral_df, plan_df):
             synthetic_data_labeled = []
             for persona in missing_critical_personas_labeled:
                 logger.info(f"Adding synthetic data for missing labeled persona: {persona}")
-                # Add a small number of synthetic samples (e.g., 10)
-                for i in range(10):
+                # Add a small number of synthetic samples (e.g., 15) - Increased synthetic samples slightly
+                for i in range(15):
                     sample = {col: 0 for col in X_labeled.columns}
                     # Set some basic feature values and persona-specific indicators
                     if 'recency' in X_labeled.columns:
@@ -479,7 +484,8 @@ def prepare_features(behavioral_df, plan_df):
                 synthetic_df_labeled = synthetic_df_labeled.reindex(columns=X_labeled.columns, fill_value=0)
 
                 X_labeled = pd.concat([X_labeled, synthetic_df_labeled], ignore_index=True)
-                y_labeled = pd.concat([y_labeled, pd.Series([persona for persona in missing_critical_personas_labeled for _ in range(10)])], ignore_index=True)
+                # Adjusted synthetic sample count in y_labeled concat as well
+                y_labeled = pd.concat([y_labeled, pd.Series([persona for persona in missing_critical_personas_labeled for _ in range(15)])], ignore_index=True)
 
                 logger.info(f"Added {len(synthetic_data_labeled)} synthetic samples to labeled data.")
                 logger.info(f"Labeled data distribution after adding synthetic samples:\n{y_labeled.value_counts().to_string()}")
@@ -488,16 +494,16 @@ def prepare_features(behavioral_df, plan_df):
         scaler = StandardScaler()
         X_labeled_scaled = pd.DataFrame(scaler.fit_transform(X_labeled), columns=X_labeled.columns)
 
-        # Apply SMOTE with refined targets focusing on low-performing classes in labeled data
+        # Apply SMOTE with refined targets - prioritize dental and doctor
         class_counts_labeled = pd.Series(y_labeled).value_counts()
-        # Adjusted sampling strategy: slightly lower targets compared to previous attempt
+        # Adjusted sampling strategy: Prioritize dental and doctor slightly more
         sampling_strategy_labeled = {
-            'dsnp': max(class_counts_labeled.get('dsnp', 0), 1500),
-            'doctor': max(class_counts_labeled.get('doctor', 0), 2000), # Reduced target
-            'drug': max(class_counts_labeled.get('drug', 0), 2000),     # Reduced target
-            'vision': max(class_counts_labeled.get('vision', 0), 2000), # Reduced target
-            'csnp': max(class_counts_labeled.get('csnp', 0), 1500),
-            'dental': max(class_counts_labeled.get('dental', 0), 2000)  # Adjusted target
+            'dsnp': max(class_counts_labeled.get('dsnp', 0), 1200),
+            'doctor': max(class_counts_labeled.get('doctor', 0), 1800), # Increased target for doctor
+            'drug': max(class_counts_labeled.get('drug', 0), 1500),
+            'vision': max(class_counts_labeled.get('vision', 0), 1500),
+            'csnp': max(class_counts_labeled.get('csnp', 0), 1200),
+            'dental': max(class_counts_labeled.get('dental', 0), 1800)  # Increased target for dental
         }
         logger.info(f"SMOTE sampling strategy (Labeled Data): {sampling_strategy_labeled}")
         smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy_labeled)
@@ -505,6 +511,7 @@ def prepare_features(behavioral_df, plan_df):
 
         logger.info(f"Labeled data rows after SMOTE: {len(X_labeled_resampled)}")
         logger.info(f"Post-SMOTE persona distribution (Labeled Data):\n{pd.Series(y_labeled_resampled).value_counts().to_string()}")
+
 
         # Scale unlabeled data using the same scaler fitted on labeled data
         if not X_unlabeled.empty:
@@ -548,8 +555,12 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             mask = y_true == cls_idx
             if mask.sum() > 0:
                 # Ensure that the class index exists in y_pred before calculating accuracy
-                if cls_idx in y_pred[mask]:
-                     cls_accuracy = accuracy_score(y_true[mask], y_pred[mask])
+                # Map predicted encoded labels back to original class names for accurate comparison
+                y_pred_names = np.array([classes[i] for i in y_pred]) # Map encoded predictions to class names
+                y_true_names = np.array([classes[i] for i in y_true]) # Map encoded true labels to class names
+
+                if cls_name in y_pred_names[mask]:
+                     cls_accuracy = accuracy_score(y_true_names[mask], y_pred_names[mask])
                      per_persona_accuracy[cls_name] = cls_accuracy * 100
                 else:
                      # If the class is in y_true but not predicted for any of the masked samples
@@ -587,16 +598,38 @@ def main():
     y_train_encoded = le.fit_transform(y_train)
     y_test_encoded = le.transform(y_test)
 
+    # Calculate manual class weights
+    class_counts = pd.Series(y_train).value_counts()
+    # Base weight can be the inverse of the frequency of the most frequent class
+    base_weight = 1.0 / class_counts.max()
+    class_weights = {}
+    for persona in le.classes_:
+        # Start with base weight and adjust based on current performance and targets
+        weight = base_weight * (class_counts.get(persona, 0) / class_counts.min()) # Example: Inverse frequency ratio
+        # Increase weights for low-performing classes ('doctor', 'dental')
+        if persona in ['doctor', 'dental']:
+             weight *= 3.0 # Manually increased weight for focus
+        elif persona in ['drug', 'vision']:
+             weight *= 2.0 # Slightly increased weight for other lower performers
+        else: # 'csnp', 'dsnp'
+             weight *= 1.0 # Keep base weight for high performers
+
+        class_weights[le.transform([persona])[0]] = weight # Assign weight using encoded label
+
+
+    logger.info(f"Manual Class Weights: {class_weights}")
+
+
     # Log prediction distribution to check bias
     logger.info(f"Test set label distribution:\n{pd.Series(y_test).value_counts().to_string()}")
 
     # Train CatBoost with pseudo-labeling and k-fold
-    skf = StratifiedKFold(n_splits=7, shuffle=True, random_state=42) # Increased splits
+    skf = StratifiedKFold(n_splits=7, shuffle=True, random_state=42)
     models = []
     feature_importances = []
 
     # Fixed pseudo-labeling confidence threshold
-    pseudo_label_threshold = 0.98 # Increased confidence threshold
+    pseudo_label_threshold = 0.95
     logger.info(f"Using fixed pseudo-labeling confidence threshold: {pseudo_label_threshold:.2f}")
 
 
@@ -607,12 +640,12 @@ def main():
         y_fold_val = y_train_encoded[val_idx]
 
         model = CatBoostClassifier(
-            iterations=400,  # Slightly reduced iterations
-            depth=5,  # Slightly reduced depth
+            iterations=400,  # Adjusted iterations
+            depth=5,  # Adjusted depth
             learning_rate=0.04,  # Adjusted learning rate
-            l2_leaf_reg=5,  # Adjusted L2 regularization
+            l2_leaf_reg=6,  # Adjusted L2 regularization
             loss_function='MultiClass',
-            auto_class_weights='Balanced',
+            class_weights=class_weights, # Use manual class weights
             random_seed=42,
             verbose=0,
             one_hot_max_size=10,
@@ -687,7 +720,7 @@ def main():
         with open(LABEL_ENCODER_FILE, 'wb') as f:
             pickle.dump(le, f)
         with open(SCALER_FILE, 'wb') as f:
-            pickle.dump(scaler, f)
+            pickle.dump(scaler)
         logger.info("Saved model, label encoder, and scaler to disk.")
     else:
         logger.error("No models were trained successfully.")

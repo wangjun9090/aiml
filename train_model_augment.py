@@ -816,6 +816,7 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
     return per_persona_accuracy
 
 # Modified main function with enhanced blending and override strategies
+# Modified main function with 80/20 split and per-persona test sample counts
 def main():
     # Load data
     try:
@@ -831,11 +832,12 @@ def main():
         logger.error(f"Failed to prepare features: {e}")
         return
     
-    # Split data
+    # Split data into 80% training and 20% testing
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
-    logger.info(f"Training set: {X_train.shape[0]} samples, Test set: {X_test.shape[0]} samples")
+    logger.info(f"Training set: {X_train.shape[0]} samples ({X_train.shape[0]/len(X)*100:.1f}%)")
+    logger.info(f"Test set: {X_test.shape[0]} samples ({X_test.shape[0]/len(X)*100:.1f}%)")
     
     # Label encoding
     le = LabelEncoder()
@@ -897,50 +899,43 @@ def main():
     # Get binary classifier probabilities for each persona
     binary_probas = {}
     for persona, classifier in binary_classifiers.items():
-        # Use the same feature set that was used for training
         binary_probas[persona] = classifier.predict_proba(X_test)[:,1]
     
     # Blend probabilities - custom blending for high priority personas
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
-            if persona in ['doctor', 'csnp']:  # Strongest binary influence for doctor and csnp
-                blend_ratio = 0.35  # 35% multi-class, 65% binary - extremely strong binary influence
+            if persona in ['doctor', 'csnp']:
+                blend_ratio = 0.35
             elif persona in ['drug', 'dsnp']:
-                blend_ratio = 0.4   # 40% multi-class, 60% binary
+                blend_ratio = 0.4
             elif persona in ['dental']:
-                blend_ratio = 0.5   # 50-50 blend
+                blend_ratio = 0.5
             else:
-                blend_ratio = 0.6   # 60% multi-class, 40% binary for others
+                blend_ratio = 0.6
                 
             y_pred_probas_multi[:, i] = blend_ratio * y_pred_probas_multi[:, i] + (1-blend_ratio) * binary_probas[persona]
     
     # Initial class prediction based on highest probability
     y_pred = np.argmax(y_pred_probas_multi, axis=1)
     
-    # Super-aggressive overrides for high priority personas, with special focus on csnp and doctor
+    # Super-aggressive overrides for high priority personas
     for persona, classifier in binary_classifiers.items():
         persona_idx = np.where(le.classes_ == persona)[0][0]
         confidence_threshold = PERSONA_THRESHOLD.get(persona, 0.3)
         
-        if persona in ['doctor', 'csnp']:  # Most aggressive overrides for doctor and csnp
-            # Ultra-aggressive override for doctor and csnp
-            high_confidence = binary_probas[persona] >= confidence_threshold * 1.2  # Very low threshold
-            medium_confidence = binary_probas[persona] >= confidence_threshold * 0.8  # Even lower medium threshold
+        if persona in ['doctor', 'csnp']:
+            high_confidence = binary_probas[persona] >= confidence_threshold * 1.2
+            medium_confidence = binary_probas[persona] >= confidence_threshold * 0.8
             
-            # Two-level confidence override with more aggressive thresholds
             strong_signal_mask = high_confidence & (y_pred_probas_multi[:, persona_idx] > confidence_threshold * 0.6)
             y_pred[strong_signal_mask] = persona_idx
             
-            # Apply a very aggressive second-pass override with medium confidence
-            # But avoid overriding the other critical personas (drug and dsnp)
             critical_personas = ['drug', 'dsnp'] if persona == 'csnp' else ['drug', 'dsnp', 'csnp'] if persona == 'doctor' else []
             weaker_classes = [j for j, p in enumerate(le.classes_) if p not in critical_personas]
             in_weaker_class = np.isin(y_pred, weaker_classes)
             medium_signal_mask = medium_confidence & ~strong_signal_mask & in_weaker_class
             y_pred[medium_signal_mask] = persona_idx
             
-            # Apply a third-pass override that's just for extremely borderline cases
-            # This applies only to vision/csnp for maximum accuracy boost without hurting others
             if persona == 'csnp' or persona == 'doctor':
                 lowest_confidence = binary_probas[persona] >= confidence_threshold * 0.7
                 borderline_classes = [j for j, p in enumerate(le.classes_) if p in ['vision'] and p != persona]
@@ -949,16 +944,12 @@ def main():
                 y_pred[borderline_signal_mask] = persona_idx
         
         elif persona in ['drug', 'dsnp']:
-            # Extremely aggressive override for top priority personas
-            high_confidence = binary_probas[persona] >= confidence_threshold * 1.4  # Very low threshold
+            high_confidence = binary_probas[persona] >= confidence_threshold * 1.4
             medium_confidence = binary_probas[persona] >= confidence_threshold
             
-            # Two-level confidence override - first strong signals, then moderate signals
             strong_signal_mask = high_confidence & (y_pred_probas_multi[:, persona_idx] > confidence_threshold * 0.7)
             y_pred[strong_signal_mask] = persona_idx
             
-            # Apply a second-pass override with medium confidence
-            # But only override 'weaker' classes (not drug, dental, doctor if we're dsnp and vice versa)
             priority_personas = ['drug', 'dsnp', 'dental', 'doctor']
             weaker_classes = [j for j, p in enumerate(le.classes_) if p not in priority_personas or p == persona]
             in_weaker_class = np.isin(y_pred, weaker_classes)
@@ -979,19 +970,25 @@ def main():
     logger.info(f"Overall Accuracy on Test Set: {overall_accuracy * 100:.2f}%")
     logger.info(f"Macro F1 Score: {macro_f1:.2f}")
     
-    # Calculate per-persona metrics
+    # Calculate per-persona metrics and test sample counts
     per_persona_accuracy = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
-    logger.info("Per-Persona Accuracy (%):")
-    for persona, acc in per_persona_accuracy.items():
-        logger.info(f"  {persona}: {acc:.2f}%")
+    test_sample_counts = pd.Series(y_test).value_counts()
+    
+    # Log per-persona test sample counts and accuracy in a table-like format
+    logger.info("\nPer-Persona Test Metrics:")
+    logger.info(f"{'Persona':<12} {'Test Samples':<12} {'Accuracy (%)':<12}")
+    logger.info("-" * 36)
+    for persona in PERSONAS:
+        sample_count = test_sample_counts.get(persona, 0)
+        accuracy = per_persona_accuracy.get(persona, 0.0)
+        logger.info(f"{persona:<12} {sample_count:<12} {accuracy:.2f}")
     
     # Save models and data
-    model = models[0]  # Use first model from ensemble for simplicity
+    model = models[0]
     os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
     with open(MODEL_FILE, 'wb') as f:
         pickle.dump(model, f)
         
-    # Save binary classifiers
     for persona, clf in binary_classifiers.items():
         binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary.pkl')
         with open(binary_model_path, 'wb') as f:

@@ -1,11 +1,10 @@
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.preprocessing import LabelEncoder, PowerTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.calibration import CalibratedClassifierCV
 from catboost import CatBoostClassifier
 from imblearn.combine import SMOTETomek
 from sklearn.cluster import KMeans
@@ -41,20 +40,20 @@ PERSONA_THRESHOLD = {'drug': 0.28, 'dental': 0.25, 'doctor': 0.22, 'dsnp': 0.25,
 HIGH_PRIORITY_PERSONAS = ['drug', 'dsnp', 'dental', 'doctor', 'csnp']
 SUPER_PRIORITY_PERSONAS = ['drug', 'dsnp', 'doctor', 'csnp']
 PERSONA_FEATURES = {
-    'dental': ['query_dental', 'filter_dental', 'time_dental_pages', 'accordion_dental', 'ma_dental_benefit'],
+    'dental': ['query_dental', 'filter_dental', 'time_dental_pages', 'ma_dental_benefit'],
     'doctor': ['query_provider', 'filter_provider', 'click_provider', 'ma_provider_network'],
-    'dsnp': ['query_dsnp', 'filter_dsnp', 'time_dsnp_pages', 'accordion_dsnp', 'dsnp'],
-    'drug': ['query_drug', 'filter_drug', 'time_drug_pages', 'accordion_drug', 'click_drug', 'ma_drug_benefit'],
-    'vision': ['query_vision', 'filter_vision', 'time_vision_pages', 'accordion_vision', 'ma_vision'],
-    'csnp': ['query_csnp', 'filter_csnp', 'time_csnp_pages', 'accordion_csnp', 'csnp']
+    'dsnp': ['query_dsnp', 'filter_dsnp', 'time_dsnp_pages', 'dsnp'],
+    'drug': ['query_drug', 'filter_drug', 'time_drug_pages', 'click_drug', 'ma_drug_benefit'],
+    'vision': ['query_vision', 'filter_vision', 'time_vision_pages', 'ma_vision'],
+    'csnp': ['query_csnp', 'filter_csnp', 'time_csnp_pages', 'csnp']
 }
 PERSONA_INFO = {
-    'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp', 'time_col': 'time_csnp_pages', 'accordion_col': 'accordion_csnp'},
-    'dental': {'plan_col': 'ma_dental_benefit', 'query_col': 'query_dental', 'filter_col': 'filter_dental', 'time_col': 'time_dental_pages', 'accordion_col': 'accordion_dental'},
+    'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp', 'time_col': 'time_csnp_pages'},
+    'dental': {'plan_col': 'ma_dental_benefit', 'query_col': 'query_dental', 'filter_col': 'filter_dental', 'time_col': 'time_dental_pages'},
     'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'click_provider'},
-    'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp', 'time_col': 'time_dsnp_pages', 'accordion_col': 'accordion_dsnp'},
-    'drug': {'plan_col': 'ma_drug_benefit', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'click_drug', 'time_col': 'time_drug_pages', 'accordion_col': 'accordion_drug'},
-    'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'time_col': 'time_vision_pages', 'accordion_col': 'accordion_vision'}
+    'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp', 'time_col': 'time_dsnp_pages'},
+    'drug': {'plan_col': 'ma_drug_benefit', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'click_drug', 'time_col': 'time_drug_pages'},
+    'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'time_col': 'time_vision_pages'}
 }
 
 # Helper functions
@@ -70,7 +69,6 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
     
     for _ in range(num_samples):
         sample = {col: 0 for col in feature_columns}
-        
         if 'recency' in feature_columns:
             sample['recency'] = np.random.randint(1, 30)
         if 'visit_frequency' in feature_columns:
@@ -222,7 +220,7 @@ def load_data(behavioral_path, plan_path):
         logger.error(f"Failed to load data: {e}")
         raise
 
-# MODIFIED: Ensure all expected features are generated
+# MODIFIED: Remove accordion_* features to match training feature set
 def prepare_features(behavioral_df, plan_df):
     try:
         behavioral_df = normalize_persona(behavioral_df)
@@ -245,12 +243,12 @@ def prepare_features(behavioral_df, plan_df):
             else:
                 training_df[col] = training_df[col].fillna(0)
         
+        # MODIFIED: Exclude accordion_* features causing feature mismatch
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
             'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
-            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages',
-            'accordion_csnp', 'accordion_dental', 'accordion_drug', 'accordion_provider', 'accordion_vision', 'accordion_dsnp'
+            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages'
         ]
         
         imputer = SimpleImputer(strategy='median')
@@ -310,7 +308,6 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        # MODIFIED: Generate all persona-specific features explicitly
         additional_features = []
         for persona in PERSONAS:
             persona_info = PERSONA_INFO.get(persona, {})
@@ -318,7 +315,6 @@ def prepare_features(behavioral_df, plan_df):
             filter_col = get_feature_as_series(training_df, persona_info.get('filter_col'))
             click_col = get_feature_as_series(training_df, persona_info.get('click_col', 'dummy_col'))
             time_col = get_feature_as_series(training_df, persona_info.get('time_col', 'dummy_col'))
-            accordion_col = get_feature_as_series(training_df, persona_info.get('accordion_col', 'dummy_col'))
             plan_col = get_feature_as_series(training_df, persona_info.get('plan_col'))
             
             signal_weights = 3.5 if persona == 'drug' else 3.0
@@ -326,7 +322,6 @@ def prepare_features(behavioral_df, plan_df):
                 query_col * 2.0 +
                 filter_col * 2.0 +
                 time_col.clip(upper=5) * 1.5 +
-                accordion_col * 1.0 +
                 click_col * 2.0
             ) * signal_weights
             additional_features.append(f'{persona}_signal')
@@ -334,8 +329,7 @@ def prepare_features(behavioral_df, plan_df):
             has_interaction = (
                 (query_col > 0) | 
                 (filter_col > 0) | 
-                (click_col > 0) | 
-                (accordion_col > 0)
+                (click_col > 0)
             )
             training_df[f'{persona}_interaction'] = safe_bool_to_int(has_interaction, training_df) * 3.0
             additional_features.append(f'{persona}_interaction')
@@ -353,11 +347,9 @@ def prepare_features(behavioral_df, plan_df):
             ) * 2.0
             additional_features.append(f'{persona}_plan_correlation')
         
-        # Dental-specific features
         dental_query = get_feature_as_series(training_df, 'query_dental')
         dental_filter = get_feature_as_series(training_df, 'filter_dental')
         dental_time = get_feature_as_series(training_df, 'time_dental_pages')
-        dental_accordion = get_feature_as_series(training_df, 'accordion_dental')
         dental_benefit = get_feature_as_series(training_df, 'ma_dental_benefit')
         
         training_df['dental_time_intensity'] = (
@@ -369,18 +361,16 @@ def prepare_features(behavioral_df, plan_df):
             dental_query * 3.0 +
             dental_filter * 3.0 +
             dental_time.clip(upper=5) * 2.0 +
-            dental_accordion * 2.0 +
             dental_benefit * 4.0
         ) * 3.0
         additional_features.append('dental_engagement_score')
         
         training_df['dental_benefit_multiplier'] = (
-            (dental_query + dental_filter + dental_accordion) * 
+            (dental_query + dental_filter) * 
             (dental_benefit + 0.5) * 5.0
         ).clip(lower=0, upper=20)
         additional_features.append('dental_benefit_multiplier')
         
-        # Doctor-specific features
         provider_query = get_feature_as_series(training_df, 'query_provider')
         provider_filter = get_feature_as_series(training_df, 'filter_provider')
         provider_click = get_feature_as_series(training_df, 'click_provider')
@@ -411,11 +401,9 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(0, 20)
         additional_features.append('doctor_page_depth')
         
-        # DSNP-specific features
         dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
         dsnp_filter = get_feature_as_series(training_df, 'filter_dsnp')
         dsnp_time = get_feature_as_series(training_df, 'time_dsnp_pages')
-        dsnp_accordion = get_feature_as_series(training_df, 'accordion_dsnp')
         dsnp_plan = get_feature_as_series(training_df, 'dsnp')
         csnp_query = get_feature_as_series(training_df, 'query_csnp')
         
@@ -428,22 +416,19 @@ def prepare_features(behavioral_df, plan_df):
             dsnp_query * 3.0 +
             dsnp_filter * 3.0 +
             dsnp_time.clip(upper=5) * 2.0 +
-            dsnp_accordion * 2.0 +
             dsnp_plan * 5.0
         ) * 3.0
         additional_features.append('dsnp_engagement_score')
         
         training_df['dsnp_plan_multiplier'] = (
-            (dsnp_query + dsnp_filter + dsnp_accordion) *
+            (dsnp_query + dsnp_filter) *
             (dsnp_plan + 0.5) * 5.0
         ).clip(lower=0, upper=20)
         additional_features.append('dsnp_plan_multiplier')
         
-        # Drug-specific features
         drug_query = get_feature_as_series(training_df, 'query_drug')
         drug_filter = get_feature_as_series(training_df, 'filter_drug')
         drug_time = get_feature_as_series(training_df, 'time_drug_pages')
-        drug_accordion = get_feature_as_series(training_df, 'accordion_drug')
         drug_click = get_feature_as_series(training_df, 'click_drug')
         drug_benefit = get_feature_as_series(training_df, 'ma_drug_benefit')
         
@@ -451,7 +436,6 @@ def prepare_features(behavioral_df, plan_df):
             drug_query * 3.0 +
             drug_filter * 3.0 +
             drug_time.clip(upper=5) * 2.0 +
-            drug_accordion * 2.0 +
             drug_click * 4.0 +
             drug_benefit * 4.0
         ) * 3.5
@@ -464,7 +448,7 @@ def prepare_features(behavioral_df, plan_df):
         additional_features.append('drug_interest_ratio')
         
         training_df['drug_benefit_boost'] = (
-            (drug_query + drug_filter + drug_click + drug_accordion) *
+            (drug_query + drug_filter + drug_click) *
             (drug_benefit + 0.5) * 5.0
         ).clip(lower=0, upper=25)
         additional_features.append('drug_benefit_boost')
@@ -474,11 +458,9 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(upper=0.8) * 6.0
         additional_features.append('drug_time_intensity')
         
-        # CSNP-specific features
         csnp_query = get_feature_as_series(training_df, 'query_csnp')
         csnp_filter = get_feature_as_series(training_df, 'filter_csnp')
         csnp_time = get_feature_as_series(training_df, 'time_csnp_pages')
-        csnp_accordion = get_feature_as_series(training_df, 'accordion_csnp')
         csnp_plan = get_feature_as_series(training_df, 'csnp')
         dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
         
@@ -499,13 +481,12 @@ def prepare_features(behavioral_df, plan_df):
             csnp_query * 3.0 +
             csnp_filter * 3.0 +
             csnp_time.clip(upper=5) * 2.0 +
-            csnp_accordion * 2.0 +
             csnp_plan * 5.0
         ) * 4.0
         additional_features.append('csnp_engagement_score')
         
         training_df['csnp_plan_multiplier'] = (
-            (csnp_query + csnp_filter + csnp_accordion) *
+            (csnp_query + csnp_filter) *
             (csnp_plan + 0.5) * 6.0
         ).clip(lower=0, upper=24)
         additional_features.append('csnp_plan_multiplier')
@@ -520,7 +501,6 @@ def prepare_features(behavioral_df, plan_df):
             'dental_time_ratio', 'click_ratio'
         ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         
-        # MODIFIED: Do not filter features by variance to ensure all expected features are included
         X = training_df[feature_columns].fillna(0)
         logger.info(f"Generated feature columns: {list(X.columns)}")
         
@@ -621,7 +601,7 @@ def main():
     
     y_pred = np.argmax(y_pred_probas_multi, axis=1)
     
-    # [Override logic omitted for brevity]
+    # [Override logic omitted]
     
     overall_accuracy = accuracy_score(y_test_encoded, y_pred)
     macro_f1 = f1_score(y_test_encoded, y_pred, average='macro')

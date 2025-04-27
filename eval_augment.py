@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import pickle
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score, roc_auc_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.preprocessing import LabelEncoder, PowerTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.calibration import CalibratedClassifierCV
@@ -27,14 +27,13 @@ logger.setLevel(logging.INFO)
 logging.getLogger("py4j").setLevel(logging.ERROR)
 
 # File paths
-# MODIFIED: Updated BEHAVIORAL_FILE path
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-1.1.0.pkl'
 LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder_1.pkl'
 TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/power_transformer.pkl'
 
-# Persona constants (unchanged, abbreviated)
+# Persona constants
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
 PERSONA_OVERSAMPLING_RATIO = {'drug': 4.5, 'dental': 3.5, 'doctor': 4.8, 'dsnp': 4.0, 'vision': 2.5, 'csnp': 4.5}
 PERSONA_CLASS_WEIGHT = {'drug': 5.0, 'dental': 4.5, 'doctor': 5.5, 'dsnp': 4.8, 'vision': 3.0, 'csnp': 5.2}
@@ -58,11 +57,74 @@ PERSONA_INFO = {
     'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'time_col': 'time_vision_pages', 'accordion_col': 'accordion_vision'}
 }
 
-# Helper functions (unchanged, abbreviated)
+# Helper functions
 def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples=1000):
     synthetic_examples = []
-    # ... (omitted)
-    return pd.DataFrame(synthetic_examples)
+    persona_features = [col for col in feature_columns if persona in col.lower()]
+    specific_features = PERSONA_FEATURES.get(persona, [])
+    
+    if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
+        num_samples = int(num_samples * 1.8)
+    elif persona in ['dental']:
+        num_samples = int(num_samples * 1.5)
+    
+    for _ in range(num_samples):
+        sample = {col: 0 for col in feature_columns}
+        
+        if 'recency' in feature_columns:
+            sample['recency'] = np.random.randint(1, 30)
+        if 'visit_frequency' in feature_columns:
+            sample['visit_frequency'] = np.random.uniform(0.1, 0.5)
+        if 'time_of_day' in feature_columns:
+            sample['time_of_day'] = np.random.randint(0, 4)
+        if 'user_cluster' in feature_columns:
+            sample['user_cluster'] = np.random.randint(0, 5)
+            
+        for feature in persona_features:
+            if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
+                sample[feature] = np.random.uniform(4.0, 7.0)
+            elif persona in ['dental']:
+                sample[feature] = np.random.uniform(3.0, 6.0)
+            else:
+                sample[feature] = np.random.uniform(2.0, 5.0)
+            
+        for feature in specific_features:
+            if feature in feature_columns:
+                if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
+                    sample[feature] = np.random.uniform(7.0, 12.0)
+                elif persona in ['dental']:
+                    sample[feature] = np.random.uniform(6.0, 10.0)
+                else:
+                    sample[feature] = np.random.uniform(4.0, 8.0)
+        
+        plan_col = PERSONA_INFO.get(persona, {}).get('plan_col')
+        if plan_col and plan_col in feature_columns:
+            sample[plan_col] = 1
+            
+        if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
+            for other_persona in PERSONAS:
+                if other_persona != persona:
+                    other_features = [col for col in feature_columns if other_persona in col.lower()]
+                    for feature in other_features:
+                        sample[feature] = np.random.uniform(0.0, 0.1)
+        elif persona in ['dental', 'doctor']:
+            for other_persona in PERSONAS:
+                if other_persona != persona:
+                    other_features = [col for col in feature_columns if other_persona in col.lower()]
+                    for feature in other_features:
+                        sample[feature] = np.random.uniform(0.0, 0.2)
+        else:
+            for other_persona in PERSONAS:
+                if other_persona != persona:
+                    other_features = [col for col in feature_columns if other_persona in col.lower()]
+                    for feature in other_features:
+                        sample[feature] = np.random.uniform(0.0, 0.5)
+                    
+        synthetic_examples.append(sample)
+    
+    synthetic_df = pd.DataFrame(synthetic_examples)
+    logger.info(f"Generated {len(synthetic_examples)} synthetic {persona} examples")
+    return synthetic_df
 
 def safe_bool_to_int(boolean_value, df):
     if isinstance(boolean_value, pd.Series):
@@ -104,7 +166,6 @@ def normalize_persona(df):
         logger.warning(f"No valid personas found. Valid personas: {valid_personas}")
     return result
 
-# MODIFIED: Fix NameError in calculate_persona_weight
 def calculate_persona_weight(row, persona_info, persona):
     query_col = persona_info['query_col']
     filter_col = persona_info['filter_col']
@@ -123,7 +184,6 @@ def calculate_persona_weight(row, persona_info, persona):
         plan_value /= max_val
         click_value /= max_val
     
-    # MODIFIED: Define weight explicitly to fix NameError
     weight = 0.25 * (query_value + filter_value + plan_value + click_value)
     return min(max(weight, 0), 1.0)
 
@@ -134,7 +194,6 @@ def load_data(behavioral_path, plan_path):
         logger.info(f"Raw behavioral columns: {list(behavioral_df.columns)}")
         
         # HIGHLIGHT: Load and process 'persona' column for ground truth labels during evaluation
-        # Note: 'persona' column is used only for ground truth, not as input for prediction
         if 'persona' in behavioral_df.columns:
             logger.info(f"Raw unique personas: {behavioral_df['persona'].unique()}")
             logger.info(f"Persona value counts:\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
@@ -163,6 +222,7 @@ def load_data(behavioral_path, plan_path):
         logger.error(f"Failed to load data: {e}")
         raise
 
+# MODIFIED: Ensure all expected features are generated
 def prepare_features(behavioral_df, plan_df):
     try:
         behavioral_df = normalize_persona(behavioral_df)
@@ -250,22 +310,219 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
+        # MODIFIED: Generate all persona-specific features explicitly
         additional_features = []
         for persona in PERSONAS:
             persona_info = PERSONA_INFO.get(persona, {})
             query_col = get_feature_as_series(training_df, persona_info.get('query_col'))
-            # ... (omitted for brevity)
+            filter_col = get_feature_as_series(training_df, persona_info.get('filter_col'))
+            click_col = get_feature_as_series(training_df, persona_info.get('click_col', 'dummy_col'))
+            time_col = get_feature_as_series(training_df, persona_info.get('time_col', 'dummy_col'))
+            accordion_col = get_feature_as_series(training_df, persona_info.get('accordion_col', 'dummy_col'))
+            plan_col = get_feature_as_series(training_df, persona_info.get('plan_col'))
+            
+            signal_weights = 3.5 if persona == 'drug' else 3.0
+            training_df[f'{persona}_signal'] = (
+                query_col * 2.0 +
+                filter_col * 2.0 +
+                time_col.clip(upper=5) * 1.5 +
+                accordion_col * 1.0 +
+                click_col * 2.0
+            ) * signal_weights
+            additional_features.append(f'{persona}_signal')
+            
+            has_interaction = (
+                (query_col > 0) | 
+                (filter_col > 0) | 
+                (click_col > 0) | 
+                (accordion_col > 0)
+            )
+            training_df[f'{persona}_interaction'] = safe_bool_to_int(has_interaction, training_df) * 3.0
+            additional_features.append(f'{persona}_interaction')
+            
+            training_df[f'{persona}_primary'] = (
+                safe_bool_to_int(query_col > 0, training_df) * 2.0 +
+                safe_bool_to_int(filter_col > 0, training_df) * 2.0 +
+                safe_bool_to_int(click_col > 0, training_df) * 2.0 +
+                safe_bool_to_int(time_col > 2, training_df) * 1.5
+            ) * 2.0
+            additional_features.append(f'{persona}_primary')
+            
+            training_df[f'{persona}_plan_correlation'] = plan_col * (
+                query_col + filter_col + click_col + time_col.clip(upper=3)
+            ) * 2.0
+            additional_features.append(f'{persona}_plan_correlation')
+        
+        # Dental-specific features
+        dental_query = get_feature_as_series(training_df, 'query_dental')
+        dental_filter = get_feature_as_series(training_df, 'filter_dental')
+        dental_time = get_feature_as_series(training_df, 'time_dental_pages')
+        dental_accordion = get_feature_as_series(training_df, 'accordion_dental')
+        dental_benefit = get_feature_as_series(training_df, 'ma_dental_benefit')
+        
+        training_df['dental_time_intensity'] = (
+            (training_df.get('time_dental_pages', 0) / (training_df.get('total_session_time', 1) + 1e-5))
+        ).clip(upper=0.8) * 5.0
+        additional_features.append('dental_time_intensity')
+        
+        training_df['dental_engagement_score'] = (
+            dental_query * 3.0 +
+            dental_filter * 3.0 +
+            dental_time.clip(upper=5) * 2.0 +
+            dental_accordion * 2.0 +
+            dental_benefit * 4.0
+        ) * 3.0
+        additional_features.append('dental_engagement_score')
+        
+        training_df['dental_benefit_multiplier'] = (
+            (dental_query + dental_filter + dental_accordion) * 
+            (dental_benefit + 0.5) * 5.0
+        ).clip(lower=0, upper=20)
+        additional_features.append('dental_benefit_multiplier')
+        
+        # Doctor-specific features
+        provider_query = get_feature_as_series(training_df, 'query_provider')
+        provider_filter = get_feature_as_series(training_df, 'filter_provider')
+        provider_click = get_feature_as_series(training_df, 'click_provider')
+        provider_network = get_feature_as_series(training_df, 'ma_provider_network')
+        
+        training_df['doctor_interaction_score'] = (
+            provider_query * 3.0 +
+            provider_filter * 3.0 +
+            provider_click * 5.0 +
+            provider_network * 4.0
+        ) * 4.0
+        additional_features.append('doctor_interaction_score')
+        
+        training_df['doctor_specificity'] = (
+            provider_query * 3.0 - 
+            (training_df.get('query_dental', 0) + training_df.get('query_vision', 0)) * 0.7
+        ).clip(lower=0) * 4.0
+        additional_features.append('doctor_specificity')
+        
+        training_df['doctor_network_boost'] = (
+            (provider_query + provider_filter + provider_click) *
+            (provider_network + 0.5) * 6.0
+        ).clip(lower=0, upper=25)
+        additional_features.append('doctor_network_boost')
+        
+        training_df['doctor_page_depth'] = (
+            (provider_click / (provider_query + 0.1)) * 10.0
+        ).clip(0, 20)
+        additional_features.append('doctor_page_depth')
+        
+        # DSNP-specific features
+        dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
+        dsnp_filter = get_feature_as_series(training_df, 'filter_dsnp')
+        dsnp_time = get_feature_as_series(training_df, 'time_dsnp_pages')
+        dsnp_accordion = get_feature_as_series(training_df, 'accordion_dsnp')
+        dsnp_plan = get_feature_as_series(training_df, 'dsnp')
+        csnp_query = get_feature_as_series(training_df, 'query_csnp')
+        
+        training_df['dsnp_csnp_ratio'] = (
+            (dsnp_query + 0.8) / (csnp_query + dsnp_query + 1e-5)
+        ).clip(0, 1) * 5.0
+        additional_features.append('dsnp_csnp_ratio')
+        
+        training_df['dsnp_engagement_score'] = (
+            dsnp_query * 3.0 +
+            dsnp_filter * 3.0 +
+            dsnp_time.clip(upper=5) * 2.0 +
+            dsnp_accordion * 2.0 +
+            dsnp_plan * 5.0
+        ) * 3.0
+        additional_features.append('dsnp_engagement_score')
+        
+        training_df['dsnp_plan_multiplier'] = (
+            (dsnp_query + dsnp_filter + dsnp_accordion) *
+            (dsnp_plan + 0.5) * 5.0
+        ).clip(lower=0, upper=20)
+        additional_features.append('dsnp_plan_multiplier')
+        
+        # Drug-specific features
+        drug_query = get_feature_as_series(training_df, 'query_drug')
+        drug_filter = get_feature_as_series(training_df, 'filter_drug')
+        drug_time = get_feature_as_series(training_df, 'time_drug_pages')
+        drug_accordion = get_feature_as_series(training_df, 'accordion_drug')
+        drug_click = get_feature_as_series(training_df, 'click_drug')
+        drug_benefit = get_feature_as_series(training_df, 'ma_drug_benefit')
+        
+        training_df['drug_engagement_score'] = (
+            drug_query * 3.0 +
+            drug_filter * 3.0 +
+            drug_time.clip(upper=5) * 2.0 +
+            drug_accordion * 2.0 +
+            drug_click * 4.0 +
+            drug_benefit * 4.0
+        ) * 3.5
+        additional_features.append('drug_engagement_score')
+        
+        training_df['drug_interest_ratio'] = (
+            (drug_query + drug_filter) /
+            (training_df.get('query_count', 1) + training_df.get('filter_count', 1) + 1e-5)
+        ).clip(upper=0.9) * 10.0
+        additional_features.append('drug_interest_ratio')
+        
+        training_df['drug_benefit_boost'] = (
+            (drug_query + drug_filter + drug_click + drug_accordion) *
+            (drug_benefit + 0.5) * 5.0
+        ).clip(lower=0, upper=25)
+        additional_features.append('drug_benefit_boost')
+        
+        training_df['drug_time_intensity'] = (
+            (drug_time / (training_df.get('total_session_time', 1) + 1e-5))
+        ).clip(upper=0.8) * 6.0
+        additional_features.append('drug_time_intensity')
+        
+        # CSNP-specific features
+        csnp_query = get_feature_as_series(training_df, 'query_csnp')
+        csnp_filter = get_feature_as_series(training_df, 'filter_csnp')
+        csnp_time = get_feature_as_series(training_df, 'time_csnp_pages')
+        csnp_accordion = get_feature_as_series(training_df, 'accordion_csnp')
+        csnp_plan = get_feature_as_series(training_df, 'csnp')
+        dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
+        
+        training_df['csnp_dsnp_ratio'] = (
+            (csnp_query + 0.8) / (dsnp_query + csnp_query + 1e-5)
+        ).clip(0, 1) * 5.0
+        additional_features.append('csnp_dsnp_ratio')
+        
+        training_df['csnp_specificity'] = (
+            csnp_query * 3.0 - 
+            (training_df.get('query_dental', 0) + 
+             training_df.get('query_vision', 0) + 
+             training_df.get('query_drug', 0)) * 0.8
+        ).clip(lower=0) * 4.0
+        additional_features.append('csnp_specificity')
+        
+        training_df['csnp_engagement_score'] = (
+            csnp_query * 3.0 +
+            csnp_filter * 3.0 +
+            csnp_time.clip(upper=5) * 2.0 +
+            csnp_accordion * 2.0 +
+            csnp_plan * 5.0
+        ) * 4.0
+        additional_features.append('csnp_engagement_score')
+        
+        training_df['csnp_plan_multiplier'] = (
+            (csnp_query + csnp_filter + csnp_accordion) *
+            (csnp_plan + 0.5) * 6.0
+        ).clip(lower=0, upper=24)
+        additional_features.append('csnp_plan_multiplier')
+        
+        training_df['csnp_time_intensity'] = (
+            (csnp_time / (training_df.get('total_session_time', 1) + 1e-5))
+        ).clip(upper=0.8) * 6.0
+        additional_features.append('csnp_time_intensity')
         
         feature_columns = behavioral_features + plan_features + additional_features + [
             'recency', 'visit_frequency', 'time_of_day', 'user_cluster', 
             'dental_time_ratio', 'click_ratio'
         ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         
+        # MODIFIED: Do not filter features by variance to ensure all expected features are included
         X = training_df[feature_columns].fillna(0)
-        variances = X.var()
-        valid_features = variances[variances > 1e-5].index.tolist()
-        X = X[valid_features]
-        logger.info(f"Selected features after variance filtering: {valid_features}")
+        logger.info(f"Generated feature columns: {list(X.columns)}")
         
         y = training_df['persona']
         training_df = training_df[training_df['persona'].notna()].reset_index(drop=True)
@@ -275,7 +532,7 @@ def prepare_features(behavioral_df, plan_df):
         for persona in PERSONAS:
             num_samples = 2000 if persona in SUPER_PRIORITY_PERSONAS else (
                 1500 if persona == 'dental' else 800)
-            synthetic_examples = generate_synthetic_persona_examples(X, valid_features, persona, num_samples=num_samples)
+            synthetic_examples = generate_synthetic_persona_examples(X, feature_columns, persona, num_samples=num_samples)
             X = pd.concat([X, synthetic_examples], ignore_index=True)
             y = pd.concat([y, pd.Series([persona] * len(synthetic_examples))], ignore_index=True)
             logger.info(f"After adding synthetic {persona} examples: {Counter(y)}")
@@ -364,7 +621,7 @@ def main():
     
     y_pred = np.argmax(y_pred_probas_multi, axis=1)
     
-    # [Override logic - omitted]
+    # [Override logic omitted for brevity]
     
     overall_accuracy = accuracy_score(y_test_encoded, y_pred)
     macro_f1 = f1_score(y_test_encoded, y_pred, average='macro')

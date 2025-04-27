@@ -33,17 +33,11 @@ MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/d
 LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder_1.pkl'
 TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/power_transformer.pkl'
 
-# Persona constants (unchanged)
+# Persona constants (unchanged, abbreviated)
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
-PERSONA_OVERSAMPLING_RATIO = {
-    'drug': 4.5, 'dental': 3.5, 'doctor': 4.8, 'dsnp': 4.0, 'vision': 2.5, 'csnp': 4.5
-}
-PERSONA_CLASS_WEIGHT = {
-    'drug': 5.0, 'dental': 4.5, 'doctor': 5.5, 'dsnp': 4.8, 'vision': 3.0, 'csnp': 5.2
-}
-PERSONA_THRESHOLD = {
-    'drug': 0.28, 'dental': 0.25, 'doctor': 0.22, 'dsnp': 0.25, 'vision': 0.30, 'csnp': 0.24
-}
+PERSONA_OVERSAMPLING_RATIO = {'drug': 4.5, 'dental': 3.5, 'doctor': 4.8, 'dsnp': 4.0, 'vision': 2.5, 'csnp': 4.5}
+PERSONA_CLASS_WEIGHT = {'drug': 5.0, 'dental': 4.5, 'doctor': 5.5, 'dsnp': 4.8, 'vision': 3.0, 'csnp': 5.2}
+PERSONA_THRESHOLD = {'drug': 0.28, 'dental': 0.25, 'doctor': 0.22, 'dsnp': 0.25, 'vision': 0.30, 'csnp': 0.24}
 HIGH_PRIORITY_PERSONAS = ['drug', 'dsnp', 'dental', 'doctor', 'csnp']
 SUPER_PRIORITY_PERSONAS = ['drug', 'dsnp', 'doctor', 'csnp']
 PERSONA_FEATURES = {
@@ -63,39 +57,63 @@ PERSONA_INFO = {
     'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'time_col': 'time_vision_pages', 'accordion_col': 'accordion_vision'}
 }
 
-# Helper functions (unchanged, abbreviated for brevity)
+# Helper functions (unchanged, abbreviated)
 def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples=1000):
-    # [Same as previous, generates synthetic data for each persona]
+    # [Same as previous, generates synthetic data]
     synthetic_examples = []
-    # ... (omitted for brevity)
+    # ... (omitted)
     return pd.DataFrame(synthetic_examples)
 
 def safe_bool_to_int(boolean_value, df):
-    # [Same as previous, converts boolean to int]
+    # [Same as previous]
     if isinstance(boolean_value, pd.Series):
         return boolean_value.astype(int)
     return pd.Series([int(boolean_value)] * len(df), index=df.index)
 
 def get_feature_as_series(df, col_name, default=0):
-    # [Same as previous, ensures feature as Series]
+    # [Same as previous]
     if col_name in df.columns:
         return df[col_name]
     return pd.Series([default] * len(df), index=df.index)
 
 def normalize_persona(df):
-    # [Same as previous, normalizes persona column]
+    # MODIFIED: Ensure only non-NaN personas are included
     valid_personas = PERSONAS
     new_rows = []
-    # ... (omitted for brevity)
-    return pd.DataFrame(new_rows).reset_index(drop=True)
+    invalid_personas = set()
+    
+    for _, row in df.iterrows():
+        persona = row['persona']
+        # HIGHLIGHT: Skip NaN or empty personas to ensure only valid ground truth labels
+        if pd.isna(persona) or not persona:
+            continue
+        
+        personas = [p.strip().lower() for p in str(persona).split(',')]
+        valid_found = [p for p in personas if p in valid_personas]
+        
+        if not valid_found:
+            invalid_personas.update(personas)
+            continue
+        
+        row_copy = row.copy()
+        row_copy['persona'] = valid_found[0]
+        new_rows.append(row_copy)
+    
+    result = pd.DataFrame(new_rows).reset_index(drop=True)
+    logger.info(f"Rows after persona normalization: {len(result)}")
+    if invalid_personas:
+        logger.info(f"Invalid personas found: {invalid_personas}")
+    if result.empty:
+        logger.warning(f"No valid personas found. Valid personas: {valid_personas}")
+    return result
 
 def calculate_persona_weight(row, persona_info, persona):
-    # [Same as previous, computes persona weight]
+    # [Same as previous]
     query_col = persona_info['query_col']
-    # ... (omitted for brevity)
+    # ... (omitted)
     return min(max(weight, 0), 1.0)
 
-# HIGHLIGHT: Load_data function where persona column is loaded for ground truth
+# HIGHLIGHT: Modified load_data to exclude NaN persona values
 def load_data(behavioral_path, plan_path):
     try:
         behavioral_df = pd.read_csv(behavioral_path)
@@ -108,12 +126,13 @@ def load_data(behavioral_path, plan_path):
             logger.info(f"Raw unique personas: {behavioral_df['persona'].unique()}")
             logger.info(f"Persona value counts:\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
         else:
-            logger.warning("Persona column missing in behavioral data")
+            logger.error("Persona column missing in behavioral data")
+            raise ValueError("Persona column required for evaluation ground truth")
         
-        # HIGHLIGHT: Clean and normalize 'persona' column to ensure valid ground truth labels
+        # MODIFIED: Remove filling NaN personas with 'dental' to exclude NaN values
+        # HIGHLIGHT: Clean 'persona' column, but keep NaN filtering to normalize_persona
         persona_mapping = {'fitness': 'otc', 'hearing': 'vision'}
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
-        behavioral_df['persona'] = behavioral_df['persona'].fillna('dental')
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.lower().str.strip()
         
         behavioral_df['zip'] = behavioral_df['zip'].fillna('unknown')
@@ -133,25 +152,23 @@ def load_data(behavioral_path, plan_path):
         logger.error(f"Failed to load data: {e}")
         raise
 
-# HIGHLIGHT: Prepare_features function where persona is separated as ground truth (y) and features (X) are prepared for prediction
+# HIGHLIGHT: Prepare_features with fix for missing userid
 def prepare_features(behavioral_df, plan_df):
     try:
         # HIGHLIGHT: Normalize 'persona' column to ensure valid ground truth labels
         behavioral_df = normalize_persona(behavioral_df)
         
         if behavioral_df.empty:
-            logger.warning("Behavioral_df is empty after normalization. Using plan_df only.")
-            training_df = plan_df.copy()
-            training_df['persona'] = 'dental'
-        else:
-            training_df = behavioral_df.merge(
-                plan_df.rename(columns={'StateCode': 'state'}),
-                how='left', on=['zip', 'plan_id']
-            ).reset_index(drop=True)
-            logger.info(f"Rows after merge: {len(training_df)}")
-            logger.info(f"training_df columns: {list(training_df.columns)}")
+            logger.warning("Behavioral_df is empty after normalization")
+            raise ValueError("No valid data after persona normalization")
         
-        # Define features (excluding persona)
+        training_df = behavioral_df.merge(
+            plan_df.rename(columns={'StateCode': 'state'}),
+            how='left', on=['zip', 'plan_id']
+        ).reset_index(drop=True)
+        logger.info(f"Rows after merge: {len(training_df)}")
+        logger.info(f"training_df columns: {list(training_df.columns)}")
+        
         plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
         for col in plan_features:
             if col not in training_df.columns:
@@ -174,10 +191,19 @@ def prepare_features(behavioral_df, plan_df):
             else:
                 training_df[col] = 0
 
-        # [Feature engineering: temporal features, clustering, embeddings, etc. - omitted for brevity]
+        sparsity_cols = ['query_dsnp', 'time_dsnp_pages', 'query_drug', 'time_drug_pages', 'query_dental', 'query_provider']
+        sparsity_stats = training_df[sparsity_cols].describe().to_dict()
+        logger.info(f"Feature sparsity stats:\n{sparsity_stats}")
+        
+        # MODIFIED: Handle missing userid for visit_frequency
         if 'start_time' in training_df.columns:
             training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])).dt.days.fillna(30)
-            training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30
+            # HIGHLIGHT: Check for userid before computing visit_frequency
+            if 'userid' in training_df.columns:
+                training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30
+            else:
+                logger.warning("userid column missing, setting visit_frequency to default value 1")
+                training_df['visit_frequency'] = 1
             training_df['time_of_day'] = pd.to_datetime(training_df['start_time']).dt.hour.fillna(12) // 6
         else:
             training_df['recency'] = 30
@@ -195,7 +221,7 @@ def prepare_features(behavioral_df, plan_df):
         training_df['click_ratio'] = training_df.get('num_clicks', 0) / (training_df.get('num_pages_viewed', 1) + 1e-5)
         
         if 'plan_id' in training_df.columns:
-            plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist()
+            plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist() if 'userid' in training_df.columns else training_df['plan_id'].apply(lambda x: [x]).tolist()
             w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
             plan_embeddings = training_df['plan_id'].apply(
                 lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(10)
@@ -217,12 +243,11 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        # [Additional feature engineering for personas - abbreviated]
         additional_features = []
         for persona in PERSONAS:
             persona_info = PERSONA_INFO.get(persona, {})
             query_col = get_feature_as_series(training_df, persona_info.get('query_col'))
-            # ... (omitted for brevity, includes persona-specific features like dental_engagement_score, doctor_interaction_score, etc.)
+            # ... (omitted for brevity, includes persona-specific features)
         
         # HIGHLIGHT: Define feature columns for prediction (excluding persona)
         feature_columns = behavioral_features + plan_features + additional_features + [
@@ -231,7 +256,6 @@ def prepare_features(behavioral_df, plan_df):
         ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         
         # HIGHLIGHT: Separate features (X) and ground truth (y)
-        # Note: 'persona' column is used as ground truth (y), not included in features (X)
         X = training_df[feature_columns].fillna(0)
         variances = X.var()
         valid_features = variances[variances > 1e-5].index.tolist()
@@ -244,7 +268,6 @@ def prepare_features(behavioral_df, plan_df):
         logger.info(f"Rows after filtering: {len(training_df)}")
         logger.info(f"Pre-SMOTE persona distribution:\n{training_df['persona'].value_counts(dropna=False).to_string()}")
         
-        # [Synthetic data generation and SMOTE - abbreviated]
         for persona in PERSONAS:
             num_samples = 2000 if persona in SUPER_PRIORITY_PERSONAS else (
                 1500 if persona == 'dental' else 800)
@@ -265,18 +288,22 @@ def prepare_features(behavioral_df, plan_df):
         logger.info(f"Rows after balanced SMOTE: {len(X)}")
         logger.info(f"Post-SMOTE persona distribution:\n{pd.Series(y).value_counts().to_string()}")
         
-        return X, y, None  # Transformer loaded later
+        return X, y, None
     except Exception as e:
         logger.error(f"Failed to prepare features: {e}")
         raise
 
 def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
-    # [Same as previous, computes per-persona accuracy]
     per_persona_accuracy = {}
-    # ... (omitted for brevity)
+    for cls_idx, cls_name in enumerate(class_names):
+        mask = y_true == cls_idx
+        if mask.sum() > 0:
+            cls_accuracy = accuracy_score(y_true[mask], y_pred[mask])
+            per_persona_accuracy[cls_name] = cls_accuracy * 100
+        else:
+            per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
 
-# HIGHLIGHT: Main function where evaluation uses ground truth (y_test) for metrics
 def main():
     logger.info("Starting model evaluation...")
     
@@ -320,15 +347,13 @@ def main():
             logger.error(f"Binary classifier for {persona} not found at {binary_model_path}")
             raise
     
-    # HIGHLIGHT: Generate predictions using features (X_test)
+    # HIGHLIGHT: Generate predictions using features (X_test) only
     y_pred_probas_multi = main_model.predict_proba(X_test)
     
-    # Get binary classifier probabilities
     binary_probas = {}
     for persona, classifier in binary_classifiers.items():
         binary_probas[persona] = classifier.predict_proba(X_test)[:,1]
     
-    # [Blending probabilities and overrides - abbreviated]
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
             if persona in ['doctor', 'csnp']:
@@ -343,7 +368,7 @@ def main():
     
     y_pred = np.argmax(y_pred_probas_multi, axis=1)
     
-    # [Override logic - omitted for brevity]
+    # [Override logic - omitted]
     
     # HIGHLIGHT: Evaluate predictions against ground truth (y_test_encoded)
     overall_accuracy = accuracy_score(y_test_encoded, y_pred)

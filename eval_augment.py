@@ -220,13 +220,13 @@ def load_data(behavioral_path, plan_path):
         logger.error(f"Failed to load data: {e}")
         raise
 
-# MODIFIED: Return pre-SMOTE data for testing
+# MODIFIED: Ensure y is initialized and handle edge cases
 def prepare_features(behavioral_df, plan_df, expected_features=None):
     try:
         behavioral_df = normalize_persona(behavioral_df)
         
         if behavioral_df.empty:
-            logger.warning("Behavioral_df is empty after normalization")
+            logger.error("Behavioral_df is empty after normalization")
             raise ValueError("No valid data after persona normalization")
         
         training_df = behavioral_df.merge(
@@ -235,6 +235,10 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         ).reset_index(drop=True)
         logger.info(f"Rows after merge: {len(training_df)}")
         logger.info(f"training_df columns: {list(training_df.columns)}")
+        
+        if 'persona' not in training_df.columns:
+            logger.error("Persona column missing in training_df after merge")
+            raise ValueError("Persona column required in training_df")
         
         plan_features = ['ma_dental_benefit', 'ma_vision', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
         for col in plan_features:
@@ -496,6 +500,10 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         
         logger.info(f"Final feature columns after filtering: {list(X.columns)}")
         
+        # Initialize y for augmentation
+        y = training_df['persona']
+        logger.info(f"Initialized y with {len(y)} labels")
+        
         # Apply synthetic data generation and SMOTE for training data
         for persona in PERSONAS:
             num_samples = 2000 if persona in SUPER_PRIORITY_PERSONAS else (
@@ -548,7 +556,6 @@ def main():
     
     behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
     
-    # MODIFIED: Get pre-SMOTE data for testing
     X, y, X_pre_smote, y_pre_smote = prepare_features(behavioral_df, plan_df, expected_features)
     
     # Split pre-SMOTE data for testing
@@ -569,7 +576,7 @@ def main():
     with open(LABEL_ENCODER_FILE, 'rb') as f:
         le = pickle.load(f)
     y_train_encoded = le.transform(y_train)
-    y_test_pre_encoded = le.transform(y_test_pre)  # Encode pre-SMOTE test labels
+    y_test_pre_encoded = le.transform(y_test_pre)
     
     with open(TRANSFORMER_FILE, 'rb') as f:
         transformer = pickle.load(f)
@@ -586,7 +593,6 @@ def main():
             logger.error(f"Binary classifier for {persona} not found at {binary_model_path}")
             raise
     
-    # Predict on pre-SMOTE test set
     y_pred_probas_multi = main_model.predict_proba(X_test_pre)
     
     binary_probas = {}

@@ -26,7 +26,7 @@ logging.getLogger("py4j").setLevel(logging.ERROR)
 
 # File paths
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025.csv'
-PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
+PLAN_FILE = '/Workspace/Users/jwanguspension@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-1.0.0.pkl'
 LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/label_encoder_1.pkl'
 SCALER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/scaler.pkl'
@@ -229,7 +229,7 @@ def prepare_features(behavioral_df, plan_df):
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        # Domain-specific features (reverted to previous set with targeted additions)
+        # Domain-specific features
         additional_features = []
         training_df['csnp_interaction'] = training_df['csnp'] * (
             training_df.get('query_csnp', 0) + training_df.get('filter_csnp', 0) + 
@@ -287,8 +287,9 @@ def prepare_features(behavioral_df, plan_df):
         training_df['vision_signal'] = (
             training_df.get('query_vision', 0) +
             training_df.get('filter_vision', 0) +
-            training_df.get('time_vision_pages', 0).clip(upper=5)
-        ) * 2.0
+            training_df.get('time_vision_pages', 0).clip(upper=5) +
+            training_df.get('accordion_vision', 0)
+        ).clip(lower=0, upper=5) * 3.0  # Increased weight
         additional_features.append('vision_signal')
 
         training_df['dental_signal'] = (
@@ -325,15 +326,17 @@ def prepare_features(behavioral_df, plan_df):
             training_df.get('query_drug', 0) +
             training_df.get('filter_drug', 0) +
             training_df.get('time_drug_pages', 0).clip(upper=5) +
-            training_df.get('accordion_drug', 0)
-        ) * 2.0
+            training_df.get('accordion_drug', 0) +
+            training_df.get('click_drug', 0)  # Added click interaction
+        ).clip(lower=0, upper=5) * 3.0  # Increased weight
         additional_features.append('drug_signal')
 
         training_df['doctor_signal'] = (
             training_df.get('query_provider', 0) +
             training_df.get('filter_provider', 0) +
-            training_df.get('click_provider', 0)
-        ).clip(lower=0, upper=5) * 2.0
+            training_df.get('click_provider', 0) +
+            training_df.get('accordion_provider', 0)  # Added accordion interaction
+        ).clip(lower=0, upper=5) * 3.0  # Increased weight
         additional_features.append('doctor_signal')
 
         training_df['dsnp_drug_interaction'] = (
@@ -357,6 +360,42 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(lower=0) * 1.5
         additional_features.append('drug_doctor_interaction')
 
+        # New interaction features
+        training_df['doctor_plan_interaction'] = (
+            training_df['ma_provider_network'] * (
+                training_df.get('query_provider', 0) +
+                training_df.get('filter_provider', 0) +
+                training_df.get('click_provider', 0)
+            )
+        ).clip(lower=0, upper=5) * 2.0
+        additional_features.append('doctor_plan_interaction')
+
+        training_df['drug_plan_interaction'] = (
+            training_df['ma_drug_benefit'] * (
+                training_df.get('query_drug', 0) +
+                training_df.get('filter_drug', 0) +
+                training_df.get('click_drug', 0)
+            )
+        ).clip(lower=0, upper=5) * 2.0
+        additional_features.append('drug_plan_interaction')
+
+        training_df['vision_plan_interaction'] = (
+            training_df['ma_vision'] * (
+                training_df.get('query_vision', 0) +
+                training_df.get('filter_vision', 0)
+            )
+        ).clip(lower=0, upper=5) * 2.0
+        additional_features.append('vision_plan_interaction')
+
+        # Log key feature distributions
+        key_features = [
+            'query_provider', 'filter_provider', 'click_provider', 'doctor_signal',
+            'query_drug', 'filter_drug', 'click_drug', 'drug_signal',
+            'query_vision', 'filter_vision', 'vision_signal'
+        ]
+        feature_stats = training_df[key_features].describe().to_dict()
+        logger.info(f"Key feature distributions for doctor, drug, vision:\n{feature_stats}")
+
         # Label validation
         mismatches = training_df[
             ((training_df['persona'] == 'dsnp') & (training_df['dsnp'] == 0)) |
@@ -377,7 +416,7 @@ def prepare_features(behavioral_df, plan_df):
         
         X = training_df[feature_columns].fillna(0)
         variances = X.var()
-        valid_features = variances[variances > 1e-3].index.tolist()  # Stricter filtering
+        valid_features = variances[variances > 1e-4].index.tolist()  # Lowered threshold
         X = X[valid_features]
         logger.info(f"Selected features after variance filtering: {valid_features}")
         
@@ -418,7 +457,6 @@ def prepare_features(behavioral_df, plan_df):
                     
                     # Set persona-specific features
                     if persona == 'dental':
-                        # Set strong dental signals
                         for feature in [f for f in X.columns if 'dental' in f]:
                             sample[feature] = np.random.uniform(3.0, 5.0)
                         if 'ma_dental_benefit' in X.columns:
@@ -429,7 +467,6 @@ def prepare_features(behavioral_df, plan_df):
                             sample['dental_signal_strength'] = np.random.uniform(3.0, 5.0)
                     
                     elif persona == 'csnp':
-                        # Set strong csnp signals
                         for feature in [f for f in X.columns if 'csnp' in f]:
                             sample[feature] = np.random.uniform(3.0, 5.0)
                         if 'csnp' in X.columns:
@@ -440,7 +477,6 @@ def prepare_features(behavioral_df, plan_df):
                             sample['csnp_specific_signal'] = np.random.uniform(3.0, 5.0)
                     
                     elif persona == 'dsnp':
-                        # Set strong dsnp signals
                         for feature in [f for f in X.columns if 'dsnp' in f]:
                             sample[feature] = np.random.uniform(3.0, 5.0)
                         if 'dsnp' in X.columns:
@@ -469,10 +505,11 @@ def prepare_features(behavioral_df, plan_df):
         # Apply SMOTE with refined targets
         class_counts = pd.Series(y).value_counts()
         sampling_strategy = {
-            persona: 1500 if persona == 'dsnp' else max(count, 2000) for persona, count in class_counts.items()
+            persona: 2500 if persona in ['doctor', 'drug', 'vision'] else max(count, 1500)
+            for persona, count in class_counts.items()
         }
         logger.info(f"SMOTE sampling strategy: {sampling_strategy}")
-        smote = SMOTE(random_state=42, k_neighbors=3, sampling_strategy=sampling_strategy)
+        smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy)
         X, y = smote.fit_resample(X, y)
         logger.info(f"Rows after SMOTE: {len(X)}")
         logger.info(f"Post-SMOTE persona distribution:\n{pd.Series(y).value_counts().to_string()}")
@@ -499,7 +536,7 @@ def pseudo_labeling(X_labeled, y_labeled, X_unlabeled, model):
         model.fit(X_labeled, y_labeled)
         y_unlabeled_pred = model.predict(X_unlabeled)
         confidence = model.predict_proba(X_unlabeled).max(axis=1)
-        high_conf_mask = confidence > 0.95
+        high_conf_mask = confidence > 0.90  # Lowered threshold
         X_pseudo = X_unlabeled[high_conf_mask]
         y_pseudo = y_unlabeled_pred[high_conf_mask]
         logger.info(f"Pseudo-labeled {len(X_pseudo)} samples")
@@ -566,12 +603,12 @@ def main():
         y_fold_val = y_train_encoded[val_idx]
         
         model = CatBoostClassifier(
-            iterations=250,  # Fine-tuned
-            depth=4,  # Slightly increased
-            learning_rate=0.04,  # Balanced
-            l2_leaf_reg=10,  # Reverted
+            iterations=500,  # Increased
+            depth=6,  # Increased
+            learning_rate=0.03,  # Adjusted
+            l2_leaf_reg=5,  # Reduced
             loss_function='MultiClass',
-            auto_class_weights='Balanced',  # Reverted
+            auto_class_weights='SqrtBalanced',  # Improved for imbalance
             random_seed=42,
             verbose=0
         )

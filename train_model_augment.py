@@ -433,7 +433,6 @@ def prepare_features(behavioral_df, plan_df):
         logger.info(f"Labeled data rows: {len(X_labeled)}")
         logger.info(f"Unlabeled data rows: {len(X_unlabeled)}")
 
-
         logger.info(f"Pre-SMOTE persona distribution (Labeled Data):\n{y_labeled.value_counts(dropna=False).to_string()}")
 
         if X_labeled.empty:
@@ -485,35 +484,36 @@ def prepare_features(behavioral_df, plan_df):
                 logger.info(f"Added {len(synthetic_data_labeled)} synthetic samples to labeled data.")
                 logger.info(f"Labeled data distribution after adding synthetic samples:\n{y_labeled.value_counts().to_string()}")
 
+        # Scale labeled data BEFORE SMOTE
+        scaler = StandardScaler()
+        X_labeled_scaled = pd.DataFrame(scaler.fit_transform(X_labeled), columns=X_labeled.columns)
 
         # Apply SMOTE with refined targets focusing on low-performing classes in labeled data
         class_counts_labeled = pd.Series(y_labeled).value_counts()
+        # Adjusted sampling strategy: slightly lower targets compared to previous attempt
         sampling_strategy_labeled = {
-            'dsnp': max(class_counts_labeled.get('dsnp', 0), 2000), # Ensure minimum for dsnp
-            'doctor': max(class_counts_labeled.get('doctor', 0), 3000), # Increased target for doctor
-            'drug': max(class_counts_labeled.get('drug', 0), 3000),     # Increased target for drug
-            'vision': max(class_counts_labeled.get('vision', 0), 3000), # Increased target for vision
-            'csnp': max(class_counts_labeled.get('csnp', 0), 2000),
-            'dental': max(class_counts_labeled.get('dental', 0), 2000)
+            'dsnp': max(class_counts_labeled.get('dsnp', 0), 1500),
+            'doctor': max(class_counts_labeled.get('doctor', 0), 2000), # Reduced target
+            'drug': max(class_counts_labeled.get('drug', 0), 2000),     # Reduced target
+            'vision': max(class_counts_labeled.get('vision', 0), 2000), # Reduced target
+            'csnp': max(class_counts_labeled.get('csnp', 0), 1500),
+            'dental': max(class_counts_labeled.get('dental', 0), 2000)  # Adjusted target
         }
         logger.info(f"SMOTE sampling strategy (Labeled Data): {sampling_strategy_labeled}")
-        smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy_labeled) # Increased k_neighbors
-        X_labeled_resampled, y_labeled_resampled = smote.fit_resample(X_labeled, y_labeled)
+        smote = SMOTE(random_state=42, k_neighbors=5, sampling_strategy=sampling_strategy_labeled)
+        X_labeled_resampled, y_labeled_resampled = smote.fit_resample(X_labeled_scaled, y_labeled) # Apply SMOTE on scaled data
 
         logger.info(f"Labeled data rows after SMOTE: {len(X_labeled_resampled)}")
         logger.info(f"Post-SMOTE persona distribution (Labeled Data):\n{pd.Series(y_labeled_resampled).value_counts().to_string()}")
 
-
-        # Scale features for both labeled and unlabeled data separately after SMOTE on labeled
-        scaler = StandardScaler()
-        X_labeled_scaled = pd.DataFrame(scaler.fit_transform(X_labeled_resampled), columns=X_labeled_resampled.columns)
+        # Scale unlabeled data using the same scaler fitted on labeled data
         if not X_unlabeled.empty:
              X_unlabeled_scaled = pd.DataFrame(scaler.transform(X_unlabeled), columns=X_unlabeled.columns)
         else:
              X_unlabeled_scaled = pd.DataFrame(columns=X_labeled_scaled.columns) # Create empty df with correct columns
 
 
-        return X_labeled_scaled, y_labeled_resampled, X_unlabeled_scaled, scaler
+        return X_labeled_resampled, y_labeled_resampled, X_unlabeled_scaled, scaler
     except Exception as e:
         logger.error(f"Failed to prepare features: {e}")
         raise
@@ -571,14 +571,14 @@ def main():
 
     # Prepare features and handle labeled/unlabeled data
     try:
-        X_labeled_scaled, y_labeled_resampled, X_unlabeled_scaled, scaler = prepare_features(behavioral_df, plan_df)
+        X_labeled_resampled, y_labeled_resampled, X_unlabeled_scaled, scaler = prepare_features(behavioral_df, plan_df)
     except Exception as e:
         logger.error(f"Failed to prepare features: {e}")
         return
 
     # Split labeled data
     X_train, X_test, y_train, y_test = train_test_split(
-        X_labeled_scaled, y_labeled_resampled, test_size=0.25, random_state=42, stratify=y_labeled_resampled
+        X_labeled_resampled, y_labeled_resampled, test_size=0.25, random_state=42, stratify=y_labeled_resampled
     )
     logger.info(f"Training set: {X_train.shape[0]} samples, Test set: {X_test.shape[0]} samples")
 
@@ -595,27 +595,9 @@ def main():
     models = []
     feature_importances = []
 
-    # Determine a dynamic pseudo-labeling threshold or per-class thresholds
-    # Simple dynamic threshold based on initial model accuracy on a subset
-    if not X_train.empty and not X_test.empty:
-        initial_model = CatBoostClassifier(
-            iterations=100, # Quick initial model
-            depth=4,
-            learning_rate=0.05,
-            loss_function='MultiClass',
-            auto_class_weights='Balanced',
-            random_seed=42,
-            verbose=0
-        )
-        initial_model.fit(X_train, y_train_encoded)
-        initial_preds_proba = initial_model.predict_proba(X_test)
-        initial_preds_encoded = np.argmax(initial_preds_proba, axis=1)
-        initial_accuracy = accuracy_score(y_test_encoded, initial_preds_encoded)
-        pseudo_label_threshold = max(0.8, initial_accuracy * 0.9) # Threshold based on initial accuracy
-        logger.info(f"Setting pseudo-labeling confidence threshold to: {pseudo_label_threshold:.2f}")
-    else:
-        logger.warning("Training or test set is empty. Cannot determine dynamic pseudo-labeling threshold. Using default 0.95.")
-        pseudo_label_threshold = 0.95
+    # Fixed pseudo-labeling confidence threshold
+    pseudo_label_threshold = 0.98 # Increased confidence threshold
+    logger.info(f"Using fixed pseudo-labeling confidence threshold: {pseudo_label_threshold:.2f}")
 
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train_encoded)):
@@ -625,19 +607,18 @@ def main():
         y_fold_val = y_train_encoded[val_idx]
 
         model = CatBoostClassifier(
-            iterations=500,  # Increased iterations
-            depth=6,  # Increased depth
-            learning_rate=0.03,  # Reduced learning rate
-            l2_leaf_reg=3,  # Adjusted L2 regularization
+            iterations=400,  # Slightly reduced iterations
+            depth=5,  # Slightly reduced depth
+            learning_rate=0.04,  # Adjusted learning rate
+            l2_leaf_reg=5,  # Adjusted L2 regularization
             loss_function='MultiClass',
             auto_class_weights='Balanced',
             random_seed=42,
             verbose=0,
-            # Added some other parameters for potential improvement
-            one_hot_max_size=10, # For categorical features if any were not one-hot encoded
+            one_hot_max_size=10,
             eval_metric='Accuracy'
         )
-        # Pass the dynamic threshold to pseudo_labeling
+        # Pass the fixed threshold to pseudo_labeling
         X_pseudo, y_pseudo_labels = pseudo_labeling(X_fold_train, y_fold_train, X_unlabeled_scaled, model, confidence_threshold=pseudo_label_threshold)
 
         if not X_pseudo.empty:
@@ -650,7 +631,7 @@ def main():
         model.fit(
             X_fold_train, y_fold_train,
             eval_set=(X_fold_val, y_fold_val),
-            early_stopping_rounds=70 # Increased early stopping rounds
+            early_stopping_rounds=50 # Adjusted early stopping rounds
         )
         models.append(model)
         # Get feature importances from the trained model before ensemble

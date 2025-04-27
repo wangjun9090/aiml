@@ -38,35 +38,39 @@ SCALER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/
 # Persona list
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
 
-# Constants for all personas - enhanced weights and ratios for drug and dsnp
+# Constants for all personas - enhanced weights and ratios for csnp and doctor
 PERSONA_OVERSAMPLING_RATIO = {
-    'drug': 4.5,   # Increased from 3.5 for stronger drug representation
+    'drug': 4.5,
     'dental': 3.5,
-    'doctor': 4.0,
-    'dsnp': 4.0,   # Increased from 3.0 for stronger DSNP representation
+    'doctor': 4.8,   # Increased from 4.0 for stronger doctor representation
+    'dsnp': 4.0,
     'vision': 2.5,
-    'csnp': 3.0
+    'csnp': 4.5      # Increased from 3.0 for stronger CSNP representation
 }
 
-# Boosted class weights for drug and dsnp
+# Boosted class weights for csnp and doctor
 PERSONA_CLASS_WEIGHT = {
-    'drug': 5.0,    # Increased from 4.0 for stronger emphasis
+    'drug': 5.0,
     'dental': 4.5,
-    'doctor': 4.5,
-    'dsnp': 4.8,    # Increased from 3.5 to nearly match drug importance
+    'doctor': 5.5,   # Increased from 4.5 to boost doctor classification
+    'dsnp': 4.8,
     'vision': 3.0,
-    'csnp': 3.5
+    'csnp': 5.2      # Increased from 3.5 to boost csnp classification
 }
 
-# Modified thresholds - lowered for drug and dsnp for more aggressive classification
+# Modified thresholds - more aggressive for csnp and doctor
 PERSONA_THRESHOLD = {
-    'drug': 0.28,    # Reduced from 0.35 to classify more cases as drug
+    'drug': 0.28,
     'dental': 0.25,
-    'doctor': 0.25,
-    'dsnp': 0.25,    # Reduced from 0.30 to classify more cases as dsnp
+    'doctor': 0.22,  # Lowered from 0.25 to classify more cases as doctor
+    'dsnp': 0.25,
     'vision': 0.30,
-    'csnp': 0.32     # Slightly increased to reduce confusion with dsnp
+    'csnp': 0.24     # Lowered from 0.32 to classify more cases as csnp
 }
+
+# Enhanced priority personas list - add csnp and ensure doctor is included
+HIGH_PRIORITY_PERSONAS = ['drug', 'dsnp', 'dental', 'doctor', 'csnp']
+SUPER_PRIORITY_PERSONAS = ['drug', 'dsnp', 'doctor', 'csnp']  # Used for most aggressive overrides
 
 # Define specialized features for each persona
 PERSONA_FEATURES = {
@@ -131,9 +135,9 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
     specific_features = PERSONA_FEATURES.get(persona, [])
     
     # Increase samples for high-priority personas
-    if persona in ['drug', 'dsnp']:
+    if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
         num_samples = int(num_samples * 1.8)  # 80% more synthetic samples
-    elif persona in ['dental', 'doctor']:
+    elif persona in ['dental']:
         num_samples = int(num_samples * 1.5)
     
     for _ in range(num_samples):
@@ -149,11 +153,11 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
         if 'user_cluster' in feature_columns:
             sample['user_cluster'] = np.random.randint(0, 5)
             
-        # Set persona-specific feature values with stronger signals for drug and dsnp
+        # Set persona-specific feature values
         for feature in persona_features:
-            if persona in ['drug', 'dsnp']:
+            if persona in ['drug', 'dsnp', 'csnp', 'doctor']:  # Added csnp and doctor to strongest signals
                 sample[feature] = np.random.uniform(4.0, 7.0)  # Much stronger signals
-            elif persona in ['dental', 'doctor']:
+            elif persona in ['dental']:
                 sample[feature] = np.random.uniform(3.0, 6.0)
             else:
                 sample[feature] = np.random.uniform(2.0, 5.0)
@@ -161,9 +165,9 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
         # Set specific high values for known important features
         for feature in specific_features:
             if feature in feature_columns:
-                if persona in ['drug', 'dsnp']:
+                if persona in ['drug', 'dsnp', 'csnp', 'doctor']:  # Added csnp and doctor to strongest signals
                     sample[feature] = np.random.uniform(7.0, 12.0)  # Extreme signals
-                elif persona in ['dental', 'doctor']:
+                elif persona in ['dental']:
                     sample[feature] = np.random.uniform(6.0, 10.0)
                 else:
                     sample[feature] = np.random.uniform(4.0, 8.0)
@@ -173,8 +177,8 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
         if plan_col and plan_col in feature_columns:
             sample[plan_col] = 1
             
-        # Create extremely distinct separation for drug and dsnp
-        if persona in ['drug', 'dsnp']:
+        # Create extremely distinct separation for high priority personas
+        if persona in ['drug', 'dsnp', 'csnp', 'doctor']:  # Added csnp and doctor to strongest separation
             for other_persona in PERSONAS:
                 if other_persona != persona:
                     other_features = [col for col in feature_columns if other_persona in col.lower()]
@@ -316,7 +320,7 @@ def load_data(behavioral_path, plan_path):
         logger.error(f"Failed to load data: {e}")
         raise
 
-# Modified prepare_features function with specialized drug and dsnp features
+# Fix the prepare_features function to ensure X is defined before being used
 def prepare_features(behavioral_df, plan_df):
     try:
         behavioral_df = normalize_persona(behavioral_df)
@@ -491,32 +495,40 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(lower=0, upper=20)
         additional_features.append('dental_benefit_multiplier')
         
-        # Enhanced Doctor features
+        # Enhanced Doctor features - adding more specialized features
         provider_query = get_feature_as_series(training_df, 'query_provider')
         provider_filter = get_feature_as_series(training_df, 'filter_provider')
         provider_click = get_feature_as_series(training_df, 'click_provider')
         provider_network = get_feature_as_series(training_df, 'ma_provider_network')
         
-        training_df['doctor_clicks_ratio'] = (
-            training_df.get('click_provider', 0) / (training_df.get('num_clicks', 1) + 1e-5)
-        ).clip(upper=0.8) * 5.0
-        additional_features.append('doctor_clicks_ratio')
-        
-        # New provider interaction score - emphasizes click actions
+        # Further enhance doctor_interaction_score with higher weights
         training_df['doctor_interaction_score'] = (
-            provider_query * 2.0 +
-            provider_filter * 2.5 +
-            provider_click * 4.0 +
-            provider_network * 3.0
-        ) * 3.5
+            provider_query * 3.0 +
+            provider_filter * 3.0 +
+            provider_click * 5.0 +  # Increased from 4.0
+            provider_network * 4.0  # Increased from 3.0
+        ) * 4.0  # Increased from 3.5
         additional_features.append('doctor_interaction_score')
         
-        # Provider engagement ratio - how focused was user on provider content
-        training_df['doctor_focus_ratio'] = (
-            (provider_query + provider_filter + provider_click) /
-            (training_df.get('query_count', 1) + training_df.get('filter_count', 1) + training_df.get('num_clicks', 1) + 1e-5)
-        ).clip(upper=0.9) * 10.0
-        additional_features.append('doctor_focus_ratio')
+        # Doctor vs Vision & Dental contrast - creates separation
+        training_df['doctor_specificity'] = (
+            provider_query * 3.0 - 
+            (training_df.get('query_dental', 0) + training_df.get('query_vision', 0)) * 0.7
+        ).clip(lower=0) * 4.0
+        additional_features.append('doctor_specificity')
+        
+        # Doctor network boost - amplifies signal when provider network exists
+        training_df['doctor_network_boost'] = (
+            (provider_query + provider_filter + provider_click) *
+            (provider_network + 0.5) * 6.0
+        ).clip(lower=0, upper=25)
+        additional_features.append('doctor_network_boost')
+        
+        # Provider page depth - measure of how deeply user engaged with provider content
+        training_df['doctor_page_depth'] = (
+            (provider_click / (provider_query + 0.1)) * 10.0
+        ).clip(0, 20)
+        additional_features.append('doctor_page_depth')
         
         # Enhanced DSNP features - significantly boosted
         dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
@@ -588,40 +600,53 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(upper=0.8) * 6.0  # Higher multiplier than dental
         additional_features.append('drug_time_intensity')
         
-        # CSNP features
+        # CSNP features - significantly upgraded
+        csnp_query = get_feature_as_series(training_df, 'query_csnp')
+        csnp_filter = get_feature_as_series(training_df, 'filter_csnp')
+        csnp_time = get_feature_as_series(training_df, 'time_csnp_pages')
+        csnp_accordion = get_feature_as_series(training_df, 'accordion_csnp')
+        csnp_plan = get_feature_as_series(training_df, 'csnp')
+        dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
+        
+        # CSNP vs DSNP differentiation (reverse of the dsnp_csnp_ratio) with stronger weighting
+        training_df['csnp_dsnp_ratio'] = (
+            (csnp_query + 0.8) / (dsnp_query + csnp_query + 1e-5)
+        ).clip(0, 1) * 5.0
+        additional_features.append('csnp_dsnp_ratio')
+        
+        # Improved CSNP specificity with stronger negative weights for other features
         training_df['csnp_specificity'] = (
-            training_df.get('query_csnp', 0) * 2.0 - 
-            (training_df.get('query_dental', 0) + training_df.get('query_vision', 0)) * 0.5
-        ).clip(lower=0) * 3.0
+            csnp_query * 3.0 - 
+            (training_df.get('query_dental', 0) + 
+             training_df.get('query_vision', 0) + 
+             training_df.get('query_drug', 0)) * 0.8
+        ).clip(lower=0) * 4.0  # Increased from 3.0
         additional_features.append('csnp_specificity')
         
-        # Vision features
-        training_df['vision_focus'] = (
-            training_df.get('query_vision', 0) * 2.0 + 
-            training_df.get('filter_vision', 0) * 2.0 - 
-            (training_df.get('query_dental', 0) + training_df.get('query_provider', 0)) * 0.3
-        ).clip(lower=0) * 2.5
-        additional_features.append('vision_focus')
+        # New CSNP engagement compound score
+        training_df['csnp_engagement_score'] = (
+            csnp_query * 3.0 +
+            csnp_filter * 3.0 +
+            csnp_time.clip(upper=5) * 2.0 +
+            csnp_accordion * 2.0 +
+            csnp_plan * 5.0
+        ) * 4.0  # Higher multiplier than dsnp engagement
+        additional_features.append('csnp_engagement_score')
         
-        # Calculate relative dominance for each persona
-        for persona in PERSONAS:
-            persona_col = f'{persona}_signal'
-            if persona_col in training_df.columns:
-                other_signals = sum(training_df[f'{p}_signal'] for p in PERSONAS if p != persona and f'{p}_signal' in training_df.columns)
-                training_df[f'{persona}_dominance'] = (
-                    training_df[persona_col] * 2.0 - other_signals * 0.2
-                ).clip(lower=0) * 2.0
-                additional_features.append(f'{persona}_dominance')
-                
-                # Add super-signal indicators
-                training_df[f'{persona}_super'] = safe_bool_to_int(
-                    (training_df[persona_col] > training_df[persona_col].quantile(0.8)) & 
-                    (training_df[f'{persona}_primary'] > 3),
-                    training_df
-                ) * 5.0
-                additional_features.append(f'{persona}_super')
+        # CSNP plan interaction multiplier
+        training_df['csnp_plan_multiplier'] = (
+            (csnp_query + csnp_filter + csnp_accordion) *
+            (csnp_plan + 0.5) * 6.0
+        ).clip(lower=0, upper=24)
+        additional_features.append('csnp_plan_multiplier')
         
-        # Feature selection
+        # CSNP time intensity - how focused was session on csnp pages
+        training_df['csnp_time_intensity'] = (
+            (csnp_time / (training_df.get('total_session_time', 1) + 1e-5))
+        ).clip(upper=0.8) * 6.0
+        additional_features.append('csnp_time_intensity')
+        
+        # First create X and y BEFORE trying to use them for synthetic data
         feature_columns = behavioral_features + plan_features + additional_features + [
             'recency', 'visit_frequency', 'time_of_day', 'user_cluster', 
             'dental_time_ratio', 'click_ratio'
@@ -638,11 +663,11 @@ def prepare_features(behavioral_df, plan_df):
         logger.info(f"Rows after filtering: {len(training_df)}")
         logger.info(f"Pre-SMOTE persona distribution:\n{training_df['persona'].value_counts(dropna=False).to_string()}")
         
-        # Add synthetic examples for ALL personas
+        # NOW add synthetic examples for ALL personas AFTER X and y are defined
         for persona in PERSONAS:
-            # Generate more synthetic examples for drug and dsnp
-            num_samples = 2000 if persona in ['drug', 'dsnp'] else (
-                1500 if persona in ['dental', 'doctor'] else 800)
+            # Generate more synthetic examples for high-priority personas
+            num_samples = 2000 if persona in SUPER_PRIORITY_PERSONAS else (
+                1500 if persona == 'dental' else 800)
             synthetic_examples = generate_synthetic_persona_examples(X, valid_features, persona, num_samples=num_samples)
             X = pd.concat([X, synthetic_examples], ignore_index=True)
             y = pd.concat([y, pd.Series([persona] * len(synthetic_examples))], ignore_index=True)
@@ -672,7 +697,7 @@ def prepare_features(behavioral_df, plan_df):
         logger.error(f"Failed to prepare features: {e}")
         raise
 
-# Enhanced binary classifier with specialized configuration for drug and dsnp
+# Enhanced binary classifier with specialized parameters for csnp and doctor
 def train_binary_persona_classifier(X_train, y_train, X_val, y_val, persona):
     # Convert to binary classification problem
     y_train_binary = (y_train == persona).astype(int)
@@ -686,14 +711,20 @@ def train_binary_persona_classifier(X_train, y_train, X_val, y_val, persona):
     persona_features = [col for col in X_train.columns if persona in col.lower()]
     logger.info(f"Training {persona} classifier with {len(persona_features)} specific features")
     
-    # Super-enhanced parameters for drug and dsnp
-    if persona in ['drug', 'dsnp']:
-        iterations = 800   # Maximum iterations for top priority personas
-        depth = 7          # Deeper trees for more complex patterns
-        learning_rate = 0.02  # Slower learning rate for better generalization
-        l2_leaf_reg = 1.8     # Less regularization to fit patterns better
-        early_stopping = 90    # More patience for finding optimal iteration
-    elif persona in ['dental', 'doctor']:
+    # Super-enhanced parameters for all high priority personas including csnp and doctor
+    if persona in ['csnp', 'doctor']:  # Specific tuning for csnp and doctor
+        iterations = 950  # Even more iterations for doctor and csnp
+        depth = 8         # Deeper trees for more complex patterns
+        learning_rate = 0.015  # Slower learning rate for better generalization
+        l2_leaf_reg = 1.5      # Less regularization to fit patterns better
+        early_stopping = 100   # More patience for finding optimal iteration
+    elif persona in ['drug', 'dsnp']:
+        iterations = 800
+        depth = 7
+        learning_rate = 0.02
+        l2_leaf_reg = 1.8
+        early_stopping = 90
+    elif persona in ['dental']:
         iterations = 650
         depth = 6
         learning_rate = 0.03
@@ -718,11 +749,15 @@ def train_binary_persona_classifier(X_train, y_train, X_val, y_val, persona):
         verbose=0
     )
     
-    # Add boosted sampling weight if persona is drug or dsnp
-    if persona in ['drug', 'dsnp']:
+    # Add boosted sampling weight for high priority personas
+    if persona in SUPER_PRIORITY_PERSONAS:  # Now includes csnp and doctor
         # Create sample weights that prioritize positive examples
         sample_weights = np.ones(len(y_train_binary))
-        sample_weights[y_train_binary == 1] = 1.5  # 50% more weight to positive examples
+        # Give even more weight to doctor and csnp positive examples
+        if persona in ['doctor', 'csnp']:
+            sample_weights[y_train_binary == 1] = 1.8  # 80% more weight to positive examples
+        else:
+            sample_weights[y_train_binary == 1] = 1.5
         model.fit(
             X_train, y_train_binary,
             eval_set=(X_val, y_val_binary),
@@ -780,7 +815,7 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
 
-# Modified main function with enhanced blending strategies
+# Modified main function with enhanced blending and override strategies
 def main():
     # Load data
     try:
@@ -865,27 +900,55 @@ def main():
         # Use the same feature set that was used for training
         binary_probas[persona] = classifier.predict_proba(X_test)[:,1]
     
-    # Blend probabilities for each persona - custom blending for high priority personas
+    # Blend probabilities - custom blending for high priority personas
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
-            if persona in ['drug', 'dsnp']:
-                blend_ratio = 0.4  # 40% multi-class, 60% binary - strongest binary influence
-            elif persona in ['dental', 'doctor']:
-                blend_ratio = 0.5  # 50-50 blend
+            if persona in ['doctor', 'csnp']:  # Strongest binary influence for doctor and csnp
+                blend_ratio = 0.35  # 35% multi-class, 65% binary - extremely strong binary influence
+            elif persona in ['drug', 'dsnp']:
+                blend_ratio = 0.4   # 40% multi-class, 60% binary
+            elif persona in ['dental']:
+                blend_ratio = 0.5   # 50-50 blend
             else:
-                blend_ratio = 0.6  # 60% multi-class, 40% binary for others
+                blend_ratio = 0.6   # 60% multi-class, 40% binary for others
                 
             y_pred_probas_multi[:, i] = blend_ratio * y_pred_probas_multi[:, i] + (1-blend_ratio) * binary_probas[persona]
     
     # Initial class prediction based on highest probability
     y_pred = np.argmax(y_pred_probas_multi, axis=1)
     
-    # Super-aggressive overrides for drug and dsnp to maximize their accuracy
+    # Super-aggressive overrides for high priority personas, with special focus on csnp and doctor
     for persona, classifier in binary_classifiers.items():
         persona_idx = np.where(le.classes_ == persona)[0][0]
         confidence_threshold = PERSONA_THRESHOLD.get(persona, 0.3)
         
-        if persona in ['drug', 'dsnp']:
+        if persona in ['doctor', 'csnp']:  # Most aggressive overrides for doctor and csnp
+            # Ultra-aggressive override for doctor and csnp
+            high_confidence = binary_probas[persona] >= confidence_threshold * 1.2  # Very low threshold
+            medium_confidence = binary_probas[persona] >= confidence_threshold * 0.8  # Even lower medium threshold
+            
+            # Two-level confidence override with more aggressive thresholds
+            strong_signal_mask = high_confidence & (y_pred_probas_multi[:, persona_idx] > confidence_threshold * 0.6)
+            y_pred[strong_signal_mask] = persona_idx
+            
+            # Apply a very aggressive second-pass override with medium confidence
+            # But avoid overriding the other critical personas (drug and dsnp)
+            critical_personas = ['drug', 'dsnp'] if persona == 'csnp' else ['drug', 'dsnp', 'csnp'] if persona == 'doctor' else []
+            weaker_classes = [j for j, p in enumerate(le.classes_) if p not in critical_personas]
+            in_weaker_class = np.isin(y_pred, weaker_classes)
+            medium_signal_mask = medium_confidence & ~strong_signal_mask & in_weaker_class
+            y_pred[medium_signal_mask] = persona_idx
+            
+            # Apply a third-pass override that's just for extremely borderline cases
+            # This applies only to vision/csnp for maximum accuracy boost without hurting others
+            if persona == 'csnp' or persona == 'doctor':
+                lowest_confidence = binary_probas[persona] >= confidence_threshold * 0.7
+                borderline_classes = [j for j, p in enumerate(le.classes_) if p in ['vision'] and p != persona]
+                in_borderline_class = np.isin(y_pred, borderline_classes)
+                borderline_signal_mask = lowest_confidence & ~medium_signal_mask & ~strong_signal_mask & in_borderline_class
+                y_pred[borderline_signal_mask] = persona_idx
+        
+        elif persona in ['drug', 'dsnp']:
             # Extremely aggressive override for top priority personas
             high_confidence = binary_probas[persona] >= confidence_threshold * 1.4  # Very low threshold
             medium_confidence = binary_probas[persona] >= confidence_threshold
@@ -901,7 +964,7 @@ def main():
             in_weaker_class = np.isin(y_pred, weaker_classes)
             medium_signal_mask = medium_confidence & ~strong_signal_mask & in_weaker_class
             y_pred[medium_signal_mask] = persona_idx
-        elif persona in ['dental', 'doctor']:
+        elif persona in ['dental']:
             high_confidence = binary_probas[persona] >= confidence_threshold * 1.7
             strong_signal_mask = high_confidence & (y_pred_probas_multi[:, persona_idx] > confidence_threshold * 0.8)
             y_pred[strong_signal_mask] = persona_idx

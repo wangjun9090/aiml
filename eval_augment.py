@@ -45,7 +45,7 @@ PERSONA_FEATURES = {
     'dsnp': ['query_dsnp', 'filter_dsnp', 'time_dsnp_pages', 'dsnp'],
     'drug': ['query_drug', 'filter_drug', 'time_drug_pages', 'click_drug', 'ma_drug_benefit'],
     'vision': ['query_vision', 'filter_vision', 'time_vision_pages', 'ma_vision'],
-    'csnp': ['query_csnp', 'filter_csnp', 'time_csnp_pages', 'csnp']
+    'csnp': ['query_csnp', 'filter_csnp', 'time_csnp_pages']
 }
 PERSONA_INFO = {
     'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp', 'time_col': 'time_csnp_pages'},
@@ -220,8 +220,8 @@ def load_data(behavioral_path, plan_path):
         logger.error(f"Failed to load data: {e}")
         raise
 
-# MODIFIED: Remove accordion_* features to match training feature set
-def prepare_features(behavioral_df, plan_df):
+# MODIFIED: Filter features to match model’s expected feature names
+def prepare_features(behavioral_df, plan_df, expected_features=None):
     try:
         behavioral_df = normalize_persona(behavioral_df)
         
@@ -236,14 +236,14 @@ def prepare_features(behavioral_df, plan_df):
         logger.info(f"Rows after merge: {len(training_df)}")
         logger.info(f"training_df columns: {list(training_df.columns)}")
         
-        plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
+        # MODIFIED: Exclude csnp from plan_features
+        plan_features = ['ma_dental_benefit', 'ma_vision', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
         for col in plan_features:
             if col not in training_df.columns:
                 training_df[col] = 0
             else:
                 training_df[col] = training_df[col].fillna(0)
         
-        # MODIFIED: Exclude accordion_* features causing feature mismatch
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
@@ -282,9 +282,6 @@ def prepare_features(behavioral_df, plan_df):
         else:
             training_df['user_cluster'] = 0
         
-        training_df['dental_time_ratio'] = training_df.get('time_dental_pages', 0) / (training_df.get('total_session_time', 1) + 1e-5)
-        training_df['click_ratio'] = training_df.get('num_clicks', 0) / (training_df.get('num_pages_viewed', 1) + 1e-5)
-        
         if 'plan_id' in training_df.columns:
             plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist() if 'userid' in training_df.columns else training_df['plan_id'].apply(lambda x: [x]).tolist()
             w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
@@ -301,12 +298,6 @@ def prepare_features(behavioral_df, plan_df):
         filter_cols = [c for c in behavioral_features if c.startswith('filter_') and c in training_df.columns]
         training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series(0, index=training_df.index)
         training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else pd.Series(0, index=training_df.index)
-        
-        for persona in PERSONAS:
-            if persona in PERSONA_INFO:
-                training_df[f'{persona}_weight'] = training_df.apply(
-                    lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
-                )
         
         additional_features = []
         for persona in PERSONAS:
@@ -341,11 +332,6 @@ def prepare_features(behavioral_df, plan_df):
                 safe_bool_to_int(time_col > 2, training_df) * 1.5
             ) * 2.0
             additional_features.append(f'{persona}_primary')
-            
-            training_df[f'{persona}_plan_correlation'] = plan_col * (
-                query_col + filter_col + click_col + time_col.clip(upper=3)
-            ) * 2.0
-            additional_features.append(f'{persona}_plan_correlation')
         
         dental_query = get_feature_as_series(training_df, 'query_dental')
         dental_filter = get_feature_as_series(training_df, 'filter_dental')
@@ -461,7 +447,6 @@ def prepare_features(behavioral_df, plan_df):
         csnp_query = get_feature_as_series(training_df, 'query_csnp')
         csnp_filter = get_feature_as_series(training_df, 'filter_csnp')
         csnp_time = get_feature_as_series(training_df, 'time_csnp_pages')
-        csnp_plan = get_feature_as_series(training_df, 'csnp')
         dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
         
         training_df['csnp_dsnp_ratio'] = (
@@ -480,29 +465,30 @@ def prepare_features(behavioral_df, plan_df):
         training_df['csnp_engagement_score'] = (
             csnp_query * 3.0 +
             csnp_filter * 3.0 +
-            csnp_time.clip(upper=5) * 2.0 +
-            csnp_plan * 5.0
+            csnp_time.clip(upper=5) * 2.0
         ) * 4.0
         additional_features.append('csnp_engagement_score')
         
-        training_df['csnp_plan_multiplier'] = (
-            (csnp_query + csnp_filter) *
-            (csnp_plan + 0.5) * 6.0
-        ).clip(lower=0, upper=24)
-        additional_features.append('csnp_plan_multiplier')
-        
-        training_df['csnp_time_intensity'] = (
-            (csnp_time / (training_df.get('total_session_time', 1) + 1e-5))
-        ).clip(upper=0.8) * 6.0
-        additional_features.append('csnp_time_intensity')
-        
         feature_columns = behavioral_features + plan_features + additional_features + [
-            'recency', 'visit_frequency', 'time_of_day', 'user_cluster', 
-            'dental_time_ratio', 'click_ratio'
-        ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
+            'recency', 'visit_frequency', 'time_of_day', 'user_cluster'
+        ] + embedding_cols
         
         X = training_df[feature_columns].fillna(0)
-        logger.info(f"Generated feature columns: {list(X.columns)}")
+        logger.info(f"Initial generated feature columns: {list(X.columns)}")
+        
+        # MODIFIED: Filter features to match expected_features
+        if expected_features is not None:
+            missing_features = [f for f in expected_features if f not in X.columns]
+            extra_features = [f for f in X.columns if f not in expected_features]
+            
+            logger.info(f"Missing features (added as zeros): {missing_features}")
+            logger.info(f"Extra features (removed): {extra_features}")
+            
+            for f in missing_features:
+                X[f] = 0
+            X = X[expected_features]
+        
+        logger.info(f"Final feature columns after filtering: {list(X.columns)}")
         
         y = training_df['persona']
         training_df = training_df[training_df['persona'].notna()].reset_index(drop=True)
@@ -512,7 +498,7 @@ def prepare_features(behavioral_df, plan_df):
         for persona in PERSONAS:
             num_samples = 2000 if persona in SUPER_PRIORITY_PERSONAS else (
                 1500 if persona == 'dental' else 800)
-            synthetic_examples = generate_synthetic_persona_examples(X, feature_columns, persona, num_samples=num_samples)
+            synthetic_examples = generate_synthetic_persona_examples(X, X.columns, persona, num_samples=num_samples)
             X = pd.concat([X, synthetic_examples], ignore_index=True)
             y = pd.concat([y, pd.Series([persona] * len(synthetic_examples))], ignore_index=True)
             logger.info(f"After adding synthetic {persona} examples: {Counter(y)}")
@@ -545,12 +531,23 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
 
+# MODIFIED: Load model first to get expected feature names
 def main():
     logger.info("Starting model evaluation...")
     
+    # Load model to get expected feature names
+    with open(MODEL_FILE, 'rb') as f:
+        main_model = pickle.load(f)
+    expected_features = getattr(main_model, 'feature_names_', None)
+    if expected_features is None:
+        logger.warning("Model feature_names_ not available, using generated features")
+        expected_features = None
+    else:
+        logger.info(f"Expected feature names from model: {expected_features}")
+    
     behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
     
-    X, y, _ = prepare_features(behavioral_df, plan_df)
+    X, y, _ = prepare_features(behavioral_df, plan_df, expected_features)
     
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
@@ -567,9 +564,6 @@ def main():
         transformer = pickle.load(f)
     X_train = pd.DataFrame(transformer.transform(X_train), columns=X_train.columns)
     X_test = pd.DataFrame(transformer.transform(X_test), columns=X_test.columns)
-    
-    with open(MODEL_FILE, 'rb') as f:
-        main_model = pickle.load(f)
     
     binary_classifiers = {}
     for persona in PERSONAS:
@@ -600,8 +594,6 @@ def main():
             y_pred_probas_multi[:, i] = blend_ratio * y_pred_probas_multi[:, i] + (1-blend_ratio) * binary_probas[persona]
     
     y_pred = np.argmax(y_pred_probas_multi, axis=1)
-    
-    # [Override logic omitted]
     
     overall_accuracy = accuracy_score(y_test_encoded, y_pred)
     macro_f1 = f1_score(y_test_encoded, y_pred, average='macro')

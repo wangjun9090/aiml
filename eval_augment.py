@@ -220,7 +220,7 @@ def load_data(behavioral_path, plan_path):
         logger.error(f"Failed to load data: {e}")
         raise
 
-# MODIFIED: Filter features to match model’s expected feature names
+# MODIFIED: Return pre-SMOTE data for testing
 def prepare_features(behavioral_df, plan_df, expected_features=None):
     try:
         behavioral_df = normalize_persona(behavioral_df)
@@ -236,7 +236,6 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         logger.info(f"Rows after merge: {len(training_df)}")
         logger.info(f"training_df columns: {list(training_df.columns)}")
         
-        # MODIFIED: Exclude csnp from plan_features
         plan_features = ['ma_dental_benefit', 'ma_vision', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
         for col in plan_features:
             if col not in training_df.columns:
@@ -476,7 +475,12 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         X = training_df[feature_columns].fillna(0)
         logger.info(f"Initial generated feature columns: {list(X.columns)}")
         
-        # MODIFIED: Filter features to match expected_features
+        # Save pre-SMOTE data for testing
+        X_pre_smote = X.copy()
+        y_pre_smote = training_df['persona'].copy()
+        logger.info(f"Pre-SMOTE persona distribution:\n{y_pre_smote.value_counts(dropna=False).to_string()}")
+        
+        # Filter features to match expected_features
         if expected_features is not None:
             missing_features = [f for f in expected_features if f not in X.columns]
             extra_features = [f for f in X.columns if f not in expected_features]
@@ -486,15 +490,13 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             
             for f in missing_features:
                 X[f] = 0
+                X_pre_smote[f] = 0
             X = X[expected_features]
+            X_pre_smote = X_pre_smote[expected_features]
         
         logger.info(f"Final feature columns after filtering: {list(X.columns)}")
         
-        y = training_df['persona']
-        training_df = training_df[training_df['persona'].notna()].reset_index(drop=True)
-        logger.info(f"Rows after filtering: {len(training_df)}")
-        logger.info(f"Pre-SMOTE persona distribution:\n{training_df['persona'].value_counts(dropna=False).to_string()}")
-        
+        # Apply synthetic data generation and SMOTE for training data
         for persona in PERSONAS:
             num_samples = 2000 if persona in SUPER_PRIORITY_PERSONAS else (
                 1500 if persona == 'dental' else 800)
@@ -515,7 +517,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         logger.info(f"Rows after balanced SMOTE: {len(X)}")
         logger.info(f"Post-SMOTE persona distribution:\n{pd.Series(y).value_counts().to_string()}")
         
-        return X, y, None
+        return X, y, X_pre_smote, y_pre_smote
     except Exception as e:
         logger.error(f"Failed to prepare features: {e}")
         raise
@@ -531,7 +533,6 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
 
-# MODIFIED: Load model first to get expected feature names
 def main():
     logger.info("Starting model evaluation...")
     
@@ -547,23 +548,33 @@ def main():
     
     behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
     
-    X, y, _ = prepare_features(behavioral_df, plan_df, expected_features)
+    # MODIFIED: Get pre-SMOTE data for testing
+    X, y, X_pre_smote, y_pre_smote = prepare_features(behavioral_df, plan_df, expected_features)
     
+    # Split pre-SMOTE data for testing
+    X_train_pre, X_test_pre, y_train_pre, y_test_pre = train_test_split(
+        X_pre_smote, y_pre_smote, test_size=0.2, random_state=42, stratify=y_pre_smote
+    )
+    logger.info(f"Pre-SMOTE training set: {X_train_pre.shape[0]} samples ({X_train_pre.shape[0]/len(X_pre_smote)*100:.1f}%)")
+    logger.info(f"Pre-SMOTE testing set: {X_test_pre.shape[0]} samples ({X_test_pre.shape[0]/len(X_pre_smote)*100:.1f}%)")
+    logger.info(f"Pre-SMOTE test persona distribution:\n{pd.Series(y_test_pre).value_counts().to_string()}")
+    
+    # Use augmented data for training
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
-    logger.info(f"Training set: {X_train.shape[0]} samples ({X_train.shape[0]/len(X)*100:.1f}%)")
-    logger.info(f"Testing set: {X_test.shape[0]} samples ({X_test.shape[0]/len(X)*100:.1f}%)")
+    logger.info(f"Augmented training set: {X_train.shape[0]} samples ({X_train.shape[0]/len(X)*100:.1f}%)")
+    logger.info(f"Augmented testing set: {X_test.shape[0]} samples ({X_test.shape[0]/len(X)*100:.1f}%)")
     
     with open(LABEL_ENCODER_FILE, 'rb') as f:
         le = pickle.load(f)
     y_train_encoded = le.transform(y_train)
-    y_test_encoded = le.transform(y_test)
+    y_test_pre_encoded = le.transform(y_test_pre)  # Encode pre-SMOTE test labels
     
     with open(TRANSFORMER_FILE, 'rb') as f:
         transformer = pickle.load(f)
     X_train = pd.DataFrame(transformer.transform(X_train), columns=X_train.columns)
-    X_test = pd.DataFrame(transformer.transform(X_test), columns=X_test.columns)
+    X_test_pre = pd.DataFrame(transformer.transform(X_test_pre), columns=X_test_pre.columns)
     
     binary_classifiers = {}
     for persona in PERSONAS:
@@ -575,11 +586,12 @@ def main():
             logger.error(f"Binary classifier for {persona} not found at {binary_model_path}")
             raise
     
-    y_pred_probas_multi = main_model.predict_proba(X_test)
+    # Predict on pre-SMOTE test set
+    y_pred_probas_multi = main_model.predict_proba(X_test_pre)
     
     binary_probas = {}
     for persona, classifier in binary_classifiers.items():
-        binary_probas[persona] = classifier.predict_proba(X_test)[:,1]
+        binary_probas[persona] = classifier.predict_proba(X_test_pre)[:,1]
     
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
@@ -595,15 +607,15 @@ def main():
     
     y_pred = np.argmax(y_pred_probas_multi, axis=1)
     
-    overall_accuracy = accuracy_score(y_test_encoded, y_pred)
-    macro_f1 = f1_score(y_test_encoded, y_pred, average='macro')
-    logger.info(f"Overall Accuracy on Test Set: {overall_accuracy * 100:.2f}%")
-    logger.info(f"Macro F1 Score: {macro_f1:.2f}")
+    overall_accuracy = accuracy_score(y_test_pre_encoded, y_pred)
+    macro_f1 = f1_score(y_test_pre_encoded, y_pred, average='macro')
+    logger.info(f"Overall Accuracy on Pre-SMOTE Test Set: {overall_accuracy * 100:.2f}%")
+    logger.info(f"Macro F1 Score on Pre-SMOTE Test Set: {macro_f1:.2f}")
     
-    per_persona_accuracy = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
-    test_sample_counts = pd.Series(y_test).value_counts()
+    per_persona_accuracy = compute_per_persona_accuracy(y_test_pre_encoded, y_pred, le.classes_, le.classes_)
+    test_sample_counts = pd.Series(y_test_pre).value_counts()
     
-    logger.info("\nPer-Persona Test Metrics:")
+    logger.info("\nPer-Persona Test Metrics (Pre-SMOTE):")
     logger.info(f"{'Persona':<12} {'Test Samples':<12} {'Accuracy (%)':<12}")
     logger.info("-" * 36)
     for persona in PERSONAS:
@@ -611,10 +623,10 @@ def main():
         accuracy = per_persona_accuracy.get(persona, 0.0)
         logger.info(f"{persona:<12} {sample_count:<12} {accuracy:.2f}")
     
-    logger.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
-    logger.info("Confusion Matrix:\n" + str(confusion_matrix(y_test_encoded, y_pred)))
+    logger.info("Classification Report (Pre-SMOTE):\n" + classification_report(y_test_pre_encoded, y_pred, target_names=le.classes_))
+    logger.info("Confusion Matrix (Pre-SMOTE):\n" + str(confusion_matrix(y_test_pre_encoded, y_pred)))
     
-    logger.info(f"Feature importances: {dict(zip(X.columns, main_model.get_feature_importance()))}")
+    logger.info(f"Feature importances: {dict(zip(X_test_pre.columns, main_model.get_feature_importance()))}")
 
 if __name__ == "__main__":
     main()

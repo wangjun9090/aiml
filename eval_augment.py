@@ -1,15 +1,11 @@
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.preprocessing import LabelEncoder, PowerTransformer
 from sklearn.impute import SimpleImputer
-from catboost import CatBoostClassifier
-from imblearn.combine import SMOTETomek
 from sklearn.cluster import KMeans
 from gensim.models import Word2Vec
-from collections import Counter
 import logging
 import os
 import sys
@@ -34,11 +30,8 @@ TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model
 
 # Persona constants
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
-PERSONA_OVERSAMPLING_RATIO = {'drug': 4.5, 'dental': 3.5, 'doctor': 4.8, 'dsnp': 4.0, 'vision': 2.5, 'csnp': 4.5}
-PERSONA_CLASS_WEIGHT = {'drug': 5.0, 'dental': 4.5, 'doctor': 5.5, 'dsnp': 4.8, 'vision': 3.0, 'csnp': 5.2}
-PERSONA_THRESHOLD = {'drug': 0.28, 'dental': 0.25, 'doctor': 0.22, 'dsnp': 0.25, 'vision': 0.30, 'csnp': 0.24}
-HIGH_PRIORITY_PERSONAS = ['drug', 'dsnp', 'dental', 'doctor', 'csnp']
-SUPER_PRIORITY_PERSONAS = ['drug', 'dsnp', 'doctor', 'csnp']
+PERSONA_CLASS_WEIGHT = {'drug': 3.0, 'dental': 6.0, 'doctor': 4.0, 'dsnp': 4.5, 'vision': 7.0, 'csnp': 4.0}
+PERSONA_THRESHOLD = {'drug': 0.25, 'dental': 0.20, 'doctor': 0.20, 'dsnp': 0.22, 'vision': 0.18, 'csnp': 0.22}
 PERSONA_FEATURES = {
     'dental': ['query_dental', 'filter_dental', 'time_dental_pages', 'ma_dental_benefit'],
     'doctor': ['query_provider', 'filter_provider', 'click_provider', 'ma_provider_network'],
@@ -57,73 +50,6 @@ PERSONA_INFO = {
 }
 
 # Helper functions
-def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples=1000):
-    synthetic_examples = []
-    persona_features = [col for col in feature_columns if persona in col.lower()]
-    specific_features = PERSONA_FEATURES.get(persona, [])
-    
-    if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
-        num_samples = int(num_samples * 1.8)
-    elif persona in ['dental']:
-        num_samples = int(num_samples * 1.5)
-    
-    for _ in range(num_samples):
-        sample = {col: 0 for col in feature_columns}
-        if 'recency' in feature_columns:
-            sample['recency'] = np.random.randint(1, 30)
-        if 'visit_frequency' in feature_columns:
-            sample['visit_frequency'] = np.random.uniform(0.1, 0.5)
-        if 'time_of_day' in feature_columns:
-            sample['time_of_day'] = np.random.randint(0, 4)
-        if 'user_cluster' in feature_columns:
-            sample['user_cluster'] = np.random.randint(0, 5)
-            
-        for feature in persona_features:
-            if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
-                sample[feature] = np.random.uniform(4.0, 7.0)
-            elif persona in ['dental']:
-                sample[feature] = np.random.uniform(3.0, 6.0)
-            else:
-                sample[feature] = np.random.uniform(2.0, 5.0)
-            
-        for feature in specific_features:
-            if feature in feature_columns:
-                if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
-                    sample[feature] = np.random.uniform(7.0, 12.0)
-                elif persona in ['dental']:
-                    sample[feature] = np.random.uniform(6.0, 10.0)
-                else:
-                    sample[feature] = np.random.uniform(4.0, 8.0)
-        
-        plan_col = PERSONA_INFO.get(persona, {}).get('plan_col')
-        if plan_col and plan_col in feature_columns:
-            sample[plan_col] = 1
-            
-        if persona in ['drug', 'dsnp', 'csnp', 'doctor']:
-            for other_persona in PERSONAS:
-                if other_persona != persona:
-                    other_features = [col for col in feature_columns if other_persona in col.lower()]
-                    for feature in other_features:
-                        sample[feature] = np.random.uniform(0.0, 0.1)
-        elif persona in ['dental', 'doctor']:
-            for other_persona in PERSONAS:
-                if other_persona != persona:
-                    other_features = [col for col in feature_columns if other_persona in col.lower()]
-                    for feature in other_features:
-                        sample[feature] = np.random.uniform(0.0, 0.2)
-        else:
-            for other_persona in PERSONAS:
-                if other_persona != persona:
-                    other_features = [col for col in feature_columns if other_persona in col.lower()]
-                    for feature in other_features:
-                        sample[feature] = np.random.uniform(0.0, 0.5)
-                    
-        synthetic_examples.append(sample)
-    
-    synthetic_df = pd.DataFrame(synthetic_examples)
-    logger.info(f"Generated {len(synthetic_examples)} synthetic {persona} examples")
-    return synthetic_df
-
 def safe_bool_to_int(boolean_value, df):
     if isinstance(boolean_value, pd.Series):
         return boolean_value.astype(int)
@@ -141,7 +67,6 @@ def normalize_persona(df):
     
     for _, row in df.iterrows():
         persona = row['persona']
-        # HIGHLIGHT: Skip NaN or empty personas to ensure only valid ground truth labels
         if pd.isna(persona) or not persona:
             continue
         
@@ -161,29 +86,9 @@ def normalize_persona(df):
     if invalid_personas:
         logger.info(f"Invalid personas found: {invalid_personas}")
     if result.empty:
-        logger.warning(f"No valid personas found. Valid personas: {valid_personas}")
+        logger.error(f"No valid personas found. Valid personas: {valid_personas}")
+        raise ValueError("No valid personas found")
     return result
-
-def calculate_persona_weight(row, persona_info, persona):
-    query_col = persona_info['query_col']
-    filter_col = persona_info['filter_col']
-    plan_col = persona_info.get('plan_col', None)
-    click_col = persona_info.get('click_col', None)
-    
-    query_value = row.get(query_col, 0) if pd.notna(row.get(query_col, np.nan)) else 0
-    filter_value = row.get(filter_col, 0) if pd.notna(row.get(filter_col, np.nan)) else 0
-    plan_value = row.get(plan_col, 0) if plan_col and pd.notna(row.get(plan_col, np.nan)) else 0
-    click_value = row.get(click_col, 0) if click_col and pd.notna(row.get(click_col, np.nan)) else 0
-    
-    max_val = max([query_value, filter_value, plan_value, click_value, 1])
-    if max_val > 0:
-        query_value /= max_val
-        filter_value /= max_val
-        plan_value /= max_val
-        click_value /= max_val
-    
-    weight = 0.25 * (query_value + filter_value + plan_value + click_value)
-    return min(max(weight, 0), 1.0)
 
 def load_data(behavioral_path, plan_path):
     try:
@@ -191,13 +96,12 @@ def load_data(behavioral_path, plan_path):
         logger.info(f"Raw behavioral data rows: {len(behavioral_df)}")
         logger.info(f"Raw behavioral columns: {list(behavioral_df.columns)}")
         
-        # HIGHLIGHT: Load and process 'persona' column for ground truth labels during evaluation
-        if 'persona' in behavioral_df.columns:
-            logger.info(f"Raw unique personas: {behavioral_df['persona'].unique()}")
-            logger.info(f"Persona value counts:\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
-        else:
+        if 'persona' not in behavioral_df.columns:
             logger.error("Persona column missing in behavioral data")
             raise ValueError("Persona column required for evaluation ground truth")
+        
+        logger.info(f"Raw unique personas: {behavioral_df['persona'].unique()}")
+        logger.info(f"Persona value counts:\n{behavioral_df['persona'].value_counts(dropna=False).to_string()}")
         
         persona_mapping = {'fitness': 'otc', 'hearing': 'vision'}
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
@@ -220,7 +124,6 @@ def load_data(behavioral_path, plan_path):
         logger.error(f"Failed to load data: {e}")
         raise
 
-# MODIFIED: Ensure y is initialized and handle edge cases
 def prepare_features(behavioral_df, plan_df, expected_features=None):
     try:
         behavioral_df = normalize_persona(behavioral_df)
@@ -477,12 +380,10 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         ] + embedding_cols
         
         X = training_df[feature_columns].fillna(0)
-        logger.info(f"Initial generated feature columns: {list(X.columns)}")
-        
-        # Save pre-SMOTE data for testing
-        X_pre_smote = X.copy()
-        y_pre_smote = training_df['persona'].copy()
-        logger.info(f"Pre-SMOTE persona distribution:\n{y_pre_smote.value_counts(dropna=False).to_string()}")
+        y = training_df['persona']
+        logger.info(f"Generated feature columns: {list(X.columns)}")
+        logger.info(f"Test set size: {len(X)} samples")
+        logger.info(f"Test persona distribution:\n{y.value_counts(dropna=False).to_string()}")
         
         # Filter features to match expected_features
         if expected_features is not None:
@@ -494,38 +395,11 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             
             for f in missing_features:
                 X[f] = 0
-                X_pre_smote[f] = 0
             X = X[expected_features]
-            X_pre_smote = X_pre_smote[expected_features]
         
-        logger.info(f"Final feature columns after filtering: {list(X.columns)}")
+        logger.info(f"Final feature columns: {list(X.columns)}")
         
-        # Initialize y for augmentation
-        y = training_df['persona']
-        logger.info(f"Initialized y with {len(y)} labels")
-        
-        # Apply synthetic data generation and SMOTE for training data
-        for persona in PERSONAS:
-            num_samples = 2000 if persona in SUPER_PRIORITY_PERSONAS else (
-                1500 if persona == 'dental' else 800)
-            synthetic_examples = generate_synthetic_persona_examples(X, X.columns, persona, num_samples=num_samples)
-            X = pd.concat([X, synthetic_examples], ignore_index=True)
-            y = pd.concat([y, pd.Series([persona] * len(synthetic_examples))], ignore_index=True)
-            logger.info(f"After adding synthetic {persona} examples: {Counter(y)}")
-        
-        class_counts = pd.Series(y).value_counts()
-        sampling_strategy = {
-            persona: int(count * PERSONA_OVERSAMPLING_RATIO.get(persona, 2.0))
-            for persona, count in class_counts.items()
-        }
-        logger.info(f"Balanced SMOTE sampling strategy: {sampling_strategy}")
-        
-        smote = SMOTETomek(sampling_strategy=sampling_strategy, random_state=42)
-        X, y = smote.fit_resample(X, y)
-        logger.info(f"Rows after balanced SMOTE: {len(X)}")
-        logger.info(f"Post-SMOTE persona distribution:\n{pd.Series(y).value_counts().to_string()}")
-        
-        return X, y, X_pre_smote, y_pre_smote
+        return X, y
     except Exception as e:
         logger.error(f"Failed to prepare features: {e}")
         raise
@@ -544,9 +418,18 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
 def main():
     logger.info("Starting model evaluation...")
     
-    # Load model to get expected feature names
-    with open(MODEL_FILE, 'rb') as f:
-        main_model = pickle.load(f)
+    # Load model, label encoder, and transformer
+    try:
+        with open(MODEL_FILE, 'rb') as f:
+            main_model = pickle.load(f)
+        with open(LABEL_ENCODER_FILE, 'rb') as f:
+            le = pickle.load(f)
+        with open(TRANSFORMER_FILE, 'rb') as f:
+            transformer = pickle.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load model or files: {e}")
+        raise
+    
     expected_features = getattr(main_model, 'feature_names_', None)
     if expected_features is None:
         logger.warning("Model feature_names_ not available, using generated features")
@@ -554,35 +437,7 @@ def main():
     else:
         logger.info(f"Expected feature names from model: {expected_features}")
     
-    behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
-    
-    X, y, X_pre_smote, y_pre_smote = prepare_features(behavioral_df, plan_df, expected_features)
-    
-    # Split pre-SMOTE data for testing
-    X_train_pre, X_test_pre, y_train_pre, y_test_pre = train_test_split(
-        X_pre_smote, y_pre_smote, test_size=0.2, random_state=42, stratify=y_pre_smote
-    )
-    logger.info(f"Pre-SMOTE training set: {X_train_pre.shape[0]} samples ({X_train_pre.shape[0]/len(X_pre_smote)*100:.1f}%)")
-    logger.info(f"Pre-SMOTE testing set: {X_test_pre.shape[0]} samples ({X_test_pre.shape[0]/len(X_pre_smote)*100:.1f}%)")
-    logger.info(f"Pre-SMOTE test persona distribution:\n{pd.Series(y_test_pre).value_counts().to_string()}")
-    
-    # Use augmented data for training
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    logger.info(f"Augmented training set: {X_train.shape[0]} samples ({X_train.shape[0]/len(X)*100:.1f}%)")
-    logger.info(f"Augmented testing set: {X_test.shape[0]} samples ({X_test.shape[0]/len(X)*100:.1f}%)")
-    
-    with open(LABEL_ENCODER_FILE, 'rb') as f:
-        le = pickle.load(f)
-    y_train_encoded = le.transform(y_train)
-    y_test_pre_encoded = le.transform(y_test_pre)
-    
-    with open(TRANSFORMER_FILE, 'rb') as f:
-        transformer = pickle.load(f)
-    X_train = pd.DataFrame(transformer.transform(X_train), columns=X_train.columns)
-    X_test_pre = pd.DataFrame(transformer.transform(X_test_pre), columns=X_test_pre.columns)
-    
+    # Load binary classifiers
     binary_classifiers = {}
     for persona in PERSONAS:
         binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary.pkl')
@@ -593,35 +448,63 @@ def main():
             logger.error(f"Binary classifier for {persona} not found at {binary_model_path}")
             raise
     
-    y_pred_probas_multi = main_model.predict_proba(X_test_pre)
+    # Load and prepare data
+    behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
+    X_test, y_test = prepare_features(behavioral_df, plan_df, expected_features)
+    
+    # Transform features
+    X_test = pd.DataFrame(transformer.transform(X_test), columns=X_test.columns)
+    
+    # Encode ground truth labels
+    y_test_encoded = le.transform(y_test)
+    
+    # Predict personas
+    y_pred_probas_multi = main_model.predict_proba(X_test)
     
     binary_probas = {}
     for persona, classifier in binary_classifiers.items():
-        binary_probas[persona] = classifier.predict_proba(X_test_pre)[:,1]
+        binary_probas[persona] = classifier.predict_proba(X_test)[:,1]
     
+    # Blend probabilities with tuned ratios and apply class weights
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
-            if persona in ['doctor', 'csnp']:
-                blend_ratio = 0.35
-            elif persona in ['drug', 'dsnp']:
+            if persona in ['dental', 'vision']:
+                blend_ratio = 0.6  # Higher weight for rare classes
+            elif persona in ['doctor', 'csnp']:
                 blend_ratio = 0.4
-            elif persona in ['dental']:
-                blend_ratio = 0.5
+            elif persona in ['drug', 'dsnp']:
+                blend_ratio = 0.3
             else:
-                blend_ratio = 0.6
+                blend_ratio = 0.5
             y_pred_probas_multi[:, i] = blend_ratio * y_pred_probas_multi[:, i] + (1-blend_ratio) * binary_probas[persona]
+        y_pred_probas_multi[:, i] *= PERSONA_CLASS_WEIGHT.get(persona, 1.0)
     
-    y_pred = np.argmax(y_pred_probas_multi, axis=1)
+    # Normalize probabilities
+    y_pred_probas_multi = y_pred_probas_multi / y_pred_probas_multi.sum(axis=1, keepdims=True)
     
-    overall_accuracy = accuracy_score(y_test_pre_encoded, y_pred)
-    macro_f1 = f1_score(y_test_pre_encoded, y_pred, average='macro')
-    logger.info(f"Overall Accuracy on Pre-SMOTE Test Set: {overall_accuracy * 100:.2f}%")
-    logger.info(f"Macro F1 Score on Pre-SMOTE Test Set: {macro_f1:.2f}")
+    # Apply persona-specific thresholds
+    y_pred = np.zeros(y_pred_probas_multi.shape[0], dtype=int)
+    for i in range(y_pred_probas_multi.shape[0]):
+        max_prob = -1
+        max_idx = 0
+        for j, persona in enumerate(le.classes_):
+            prob = y_pred_probas_multi[i, j]
+            threshold = PERSONA_THRESHOLD.get(persona, 0.5)
+            if prob > threshold and prob > max_prob:
+                max_prob = prob
+                max_idx = j
+        y_pred[i] = max_idx
     
-    per_persona_accuracy = compute_per_persona_accuracy(y_test_pre_encoded, y_pred, le.classes_, le.classes_)
-    test_sample_counts = pd.Series(y_test_pre).value_counts()
+    # Evaluate performance
+    overall_accuracy = accuracy_score(y_test_encoded, y_pred)
+    macro_f1 = f1_score(y_test_encoded, y_pred, average='macro')
+    logger.info(f"Overall Accuracy on Test Set: {overall_accuracy * 100:.2f}%")
+    logger.info(f"Macro F1 Score on Test Set: {macro_f1:.2f}")
     
-    logger.info("\nPer-Persona Test Metrics (Pre-SMOTE):")
+    per_persona_accuracy = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
+    test_sample_counts = pd.Series(y_test).value_counts()
+    
+    logger.info("\nPer-Persona Test Metrics:")
     logger.info(f"{'Persona':<12} {'Test Samples':<12} {'Accuracy (%)':<12}")
     logger.info("-" * 36)
     for persona in PERSONAS:
@@ -629,10 +512,10 @@ def main():
         accuracy = per_persona_accuracy.get(persona, 0.0)
         logger.info(f"{persona:<12} {sample_count:<12} {accuracy:.2f}")
     
-    logger.info("Classification Report (Pre-SMOTE):\n" + classification_report(y_test_pre_encoded, y_pred, target_names=le.classes_))
-    logger.info("Confusion Matrix (Pre-SMOTE):\n" + str(confusion_matrix(y_test_pre_encoded, y_pred)))
+    logger.info("Classification Report:\n" + classification_report(y_test_encoded, y_pred, target_names=le.classes_))
+    logger.info("Confusion Matrix:\n" + str(confusion_matrix(y_test_encoded, y_pred)))
     
-    logger.info(f"Feature importances: {dict(zip(X_test_pre.columns, main_model.get_feature_importance()))}")
+    logger.info(f"Feature importances: {dict(zip(X_test.columns, main_model.get_feature_importance()))}")
 
 if __name__ == "__main__":
     main()

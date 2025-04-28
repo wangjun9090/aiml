@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import pickle
+import os
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.preprocessing import LabelEncoder, PowerTransformer
 from sklearn.impute import SimpleImputer
@@ -18,7 +19,7 @@ TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model
 
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
 
-# Persona constants from eval_augment.py
+# Persona constants
 PERSONA_FEATURES = {
     'dental': ['query_dental', 'filter_dental', 'time_dental_pages', 'ma_dental_benefit'],
     'doctor': ['query_provider', 'filter_provider', 'click_provider', 'ma_provider_network'],
@@ -36,19 +37,19 @@ PERSONA_INFO = {
     'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'time_col': 'time_vision_pages'}
 }
 
-# Define the base weights and thresholds from eval_augment.py
+# Define the base weights and thresholds
 BASE_PERSONA_CLASS_WEIGHT = {
     'drug': 5.0,
-    'dental': 15.5,  # Starting point
-    'doctor': 12.5,  # Starting point
+    'dental': 15.5,
+    'doctor': 12.5,
     'dsnp': 8.5,
     'vision': 6.5,
     'csnp': 4.5
 }
 BASE_PERSONA_THRESHOLD = {
     'drug': 0.20,
-    'dental': 0.08,  # Starting point
-    'doctor': 0.05,  # Starting point
+    'dental': 0.08,
+    'doctor': 0.05,
     'dsnp': 0.20,
     'vision': 0.18,
     'csnp': 0.20
@@ -62,7 +63,7 @@ SEARCH_SPACE = {
     'doctor_threshold': [0.02, 0.04, 0.05, 0.07, 0.09]
 }
 
-# Optimization objective: Prioritize dental and doctor accuracy, then overall accuracy
+# Optimization objective
 OPTIMIZATION_OBJECTIVE = ['dental_accuracy', 'doctor_accuracy', 'overall_accuracy']
 
 # --- Logging Setup ---
@@ -76,7 +77,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logging.getLogger("py4j").setLevel(logging.ERROR)
 
-# --- Helper Functions (Copied from eval_augment.py) ---
+# --- Helper Functions ---
 def safe_bool_to_int(boolean_value, df):
     if isinstance(boolean_value, pd.Series):
         return boolean_value.astype(int)
@@ -91,25 +92,34 @@ def normalize_persona(df):
     valid_personas = PERSONAS
     new_rows = []
     invalid_personas = set()
+    dropped_rows = 0
     
     for _, row in df.iterrows():
         persona = row['persona']
         if pd.isna(persona) or not persona:
+            dropped_rows += 1
             continue
         
-        personas = [p.strip().lower() for p in str(persona).split(',')]
-        valid_found = [p for p in personas if p in valid_personas]
+        try:
+            personas = [p.strip().lower() for p in str(persona).split(',')]
+        except Exception as e:
+            logger.warning(f"Error processing persona value {persona}: {str(e)}")
+            dropped_rows += 1
+            continue
         
+        valid_found = [p for p in personas if p in valid_personas]
         if not valid_found:
             invalid_personas.update(personas)
+            dropped_rows += 1
             continue
         
-        row_copy = row.copy()
-        row_copy['persona'] = valid_found[0]
-        new_rows.append(row_copy)
+        for valid_persona in valid_found:
+            row_copy = row.copy()
+            row_copy['persona'] = valid_persona
+            new_rows.append(row_copy)
     
     result = pd.DataFrame(new_rows).reset_index(drop=True)
-    logger.info(f"Rows after persona normalization: {len(result)}")
+    logger.info(f"Rows after persona normalization: {len(result)} (Dropped {dropped_rows} rows)")
     if invalid_personas:
         logger.info(f"Invalid personas found: {invalid_personas}")
     if result.empty:
@@ -140,6 +150,11 @@ def calculate_persona_weight(row, persona_info, persona):
 
 def load_data(behavioral_path, plan_path):
     try:
+        if not os.path.exists(behavioral_path):
+            raise FileNotFoundError(f"Behavioral file not found: {behavioral_path}")
+        if not os.path.exists(plan_path):
+            raise FileNotFoundError(f"Plan file not found: {plan_path}")
+        
         behavioral_df = pd.read_csv(behavioral_path)
         logger.info(f"Raw behavioral data rows: {len(behavioral_df)}")
         logger.info(f"Raw behavioral columns: {list(behavioral_df.columns)}")
@@ -169,7 +184,7 @@ def load_data(behavioral_path, plan_path):
         
         return behavioral_df, plan_df
     except Exception as e:
-        logger.error(f"Failed to load data: {e}")
+        logger.error(f"Failed to load data: {str(e)}")
         raise
 
 def prepare_features(behavioral_df, plan_df, expected_features=None):
@@ -205,13 +220,19 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages'
         ]
         
-        imputer = SimpleImputer(strategy='median')
+        sparse_features = ['query_dental', 'time_dental_pages', 'query_vision', 'time_vision_pages', 'query_drug', 'query_provider']
+        imputer_median = SimpleImputer(strategy='median')
+        imputer_zero = SimpleImputer(strategy='constant', fill_value=0)
+        
         for col in behavioral_features:
             if col in training_df.columns:
-                training_df[col] = imputer.fit_transform(training_df[[col]]).flatten()
+                if col in sparse_features:
+                    training_df[col] = imputer_zero.fit_transform(training_df[[col]]).flatten()
+                else:
+                    training_df[col] = imputer_median.fit_transform(training_df[[col]]).flatten()
             else:
                 training_df[col] = 0
-
+        
         sparsity_cols = ['query_dental', 'time_dental_pages', 'query_vision', 'time_vision_pages', 'query_drug', 'query_provider']
         sparsity_stats = training_df[sparsity_cols].describe().to_dict()
         logger.info(f"Feature sparsity stats:\n{sparsity_stats}")
@@ -227,13 +248,20 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
                 training_df.loc[strong_signal, time_col] *= 1.5
         
         if 'start_time' in training_df.columns:
-            training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])).dt.days.fillna(30)
-            if 'userid' in training_df.columns:
-                training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30
-            else:
-                logger.warning("userid column missing, setting visit_frequency to default value 1")
+            try:
+                start_time = pd.to_datetime(training_df['start_time'], errors='coerce')
+                training_df['recency'] = (pd.to_datetime('2025-04-25') - start_time).dt.days.fillna(30)
+                training_df['time_of_day'] = start_time.dt.hour.fillna(12) // 6
+                if 'userid' in training_df.columns:
+                    training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30
+                else:
+                    logger.warning("userid column missing, setting visit_frequency to default value 1")
+                    training_df['visit_frequency'] = 1
+            except Exception as e:
+                logger.warning(f"Error parsing start_time: {str(e)}. Using default values.")
+                training_df['recency'] = 30
+                training_df['time_of_day'] = 2
                 training_df['visit_frequency'] = 1
-            training_df['time_of_day'] = pd.to_datetime(training_df['start_time']).dt.hour.fillna(12) // 6
         else:
             training_df['recency'] = 30
             training_df['visit_frequency'] = 1
@@ -250,13 +278,29 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         training_df['click_ratio'] = training_df.get('num_clicks', 0) / (training_df.get('num_pages_viewed', 1) + 1e-5)
         
         if 'plan_id' in training_df.columns:
-            plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist() if 'userid' in training_df.columns else training_df['plan_id'].apply(lambda x: [x]).tolist()
-            w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
-            plan_embeddings = training_df['plan_id'].apply(
-                lambda x: w2v_model.wv[x] if x in w2v_model.wv else np.zeros(10)
-            )
-            embedding_cols = [f'plan_emb_{i}' for i in range(10)]
-            training_df[embedding_cols] = pd.DataFrame(plan_embeddings.tolist(), index=training_df.index)
+            plan_sentences = []
+            if 'userid' in training_df.columns:
+                plan_groups = training_df.groupby('userid')['plan_id'].apply(list)
+                plan_sentences = [plans for plans in plan_groups if len([p for p in plans if pd.notna(p)]) > 1]
+            else:
+                plan_sentences = [[p] for p in training_df['plan_id'] if pd.notna(p)]
+            
+            if plan_sentences:
+                try:
+                    w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
+                    plan_embeddings = training_df['plan_id'].apply(
+                        lambda x: w2v_model.wv[x] if pd.notna(x) and x in w2v_model.wv else np.zeros(10)
+                    )
+                    embedding_cols = [f'plan_emb_{i}' for i in range(10)]
+                    training_df[embedding_cols] = pd.DataFrame(plan_embeddings.tolist(), index=training_df.index)
+                except Exception as e:
+                    logger.warning(f"Error training Word2Vec model: {str(e)}. Setting embeddings to zero.")
+                    embedding_cols = [f'plan_emb_{i}' for i in range(10)]
+                    training_df[embedding_cols] = 0
+            else:
+                logger.warning("No valid plan sentences for Word2Vec. Setting embeddings to zero.")
+                embedding_cols = [f'plan_emb_{i}' for i in range(10)]
+                training_df[embedding_cols] = 0
         else:
             embedding_cols = [f'plan_emb_{i}' for i in range(10)]
             training_df[embedding_cols] = 0
@@ -466,25 +510,28 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         
         X = training_df[feature_columns].fillna(0)
         y = training_df['persona']
-        logger.info(f"Generated feature columns: {list(X.columns)}")
-        logger.info(f"Test set size: {len(X)} samples")
-        logger.info(f"Test persona distribution:\n{y.value_counts(dropna=False).to_string()}")
         
-        # Filter features to match expected_features
         if expected_features is not None:
             missing_features = [f for f in expected_features if f not in X.columns]
             extra_features = [f for f in X.columns if f not in expected_features]
             
-            logger.info(f"Missing features (added as zeros): {missing_features}")
-            logger.info(f"Extra features (removed): {extra_features}")
+            if missing_features:
+                logger.error(f"Critical missing features: {missing_features}. Cannot proceed.")
+                raise ValueError("Model expects features that are missing in the prepared data.")
             
-            for f in missing_features:
-                X[f] = 0
-            X = X[expected_features]
+            if extra_features:
+                logger.info(f"Removing extra features: {extra_features}")
+                X = X[expected_features]
+        
+        logger.info(f"Generated feature columns: {list(X.columns)}")
+        logger.info(f"Test set size: {len(X)} samples")
+        logger.info(f"Test persona distribution:\n{y.value_counts(dropna=False).to_string()}")
         
         logger.info(f"Final feature columns: {list(X.columns)}")
-        
         return X, y
+    except Exception as e:
+        logger.error(f"Failed to prepare features: {str(e)}")
+        raise
 
 def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
     per_persona_accuracy = {}
@@ -497,106 +544,122 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
             per_persona_accuracy[cls_name] = 0.0
     return per_persona_accuracy
 
-# --- Model Evaluation Function ---
 def evaluate_model_with_params(class_weights, thresholds, main_model, binary_classifiers, le, transformer, X_test, y_test_encoded, X_test_cols):
-    y_pred_probas_multi = main_model.predict_proba(transformer.transform(X_test))
+    try:
+        y_pred_probas_multi = main_model.predict_proba(transformer.transform(X_test))
 
-    binary_probas = {}
-    for persona, classifier in binary_classifiers.items():
-        binary_probas[persona] = classifier.predict_proba(transformer.transform(X_test))[:, 1]
-
-    # Blend probabilities with provided ratios and apply class weights
-    y_pred_probas_multi_blended = np.copy(y_pred_probas_multi)
-    for i, persona in enumerate(le.classes_):
-        if persona in binary_probas:
-            if persona in ['dental', 'vision']:
-                blend_ratio = 0.4
-            elif persona in ['drug']:
-                blend_ratio = 0.6
-            elif persona in ['doctor']:
-                blend_ratio = 0.5
+        binary_probas = {}
+        for persona in le.classes_:
+            if persona in binary_classifiers:
+                binary_probas[persona] = binary_classifiers[persona].predict_proba(transformer.transform(X_test))[:, 1]
             else:
-                blend_ratio = 0.5
-            y_pred_probas_multi_blended[:, i] = blend_ratio * y_pred_probas_multi_blended[:, i] + (1-blend_ratio) * binary_probas[persona]
-        y_pred_probas_multi_blended[:, i] *= class_weights.get(persona, 1.0)
+                binary_probas[persona] = np.zeros(len(X_test))
 
-    # Normalize probabilities
-    y_pred_probas_multi_normalized = y_pred_probas_multi_blended / y_pred_probas_multi_blended.sum(axis=1, keepdims=True)
+        y_pred_probas_multi_blended = np.copy(y_pred_probas_multi)
+        for i, persona in enumerate(le.classes_):
+            if persona in binary_probas and binary_probas[persona].sum() > 0:
+                blend_ratio = {
+                    'dental': 0.4, 'vision': 0.4, 'drug': 0.6, 'doctor': 0.5
+                }.get(persona, 0.5)
+                y_pred_probas_multi_blended[:, i] = blend_ratio * y_pred_probas_multi_blended[:, i] + (1-blend_ratio) * binary_probas[persona]
+            y_pred_probas_multi_blended[:, i] *= class_weights.get(persona, 1.0)
 
-    # Apply persona-specific thresholds
-    y_pred = np.zeros(y_pred_probas_multi_normalized.shape[0], dtype=int)
-    for i in range(y_pred_probas_multi_normalized.shape[0]):
-        max_prob = -1
-        max_idx = 0
-        for j, persona in enumerate(le.classes_):
-            prob = y_pred_probas_multi_normalized[i, j]
-            threshold = thresholds.get(persona, 0.5)
-            if prob > threshold and prob > max_prob:
-                max_prob = prob
-                max_idx = j
-        y_pred[i] = max_idx
+        y_pred_probas_multi_normalized = y_pred_probas_multi_blended / y_pred_probas_multi_blended.sum(axis=1, keepdims=True)
 
-    # Evaluate performance
-    overall_acc = accuracy_score(y_test_encoded, y_pred)
-    macro_f1 = f1_score(y_test_encoded, y_pred, average='macro')
-    per_persona_acc = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
-    dental_acc = per_persona_acc.get('dental', 0.0)
-    doctor_acc = per_persona_acc.get('doctor', 0.0)
+        y_pred = np.zeros(y_pred_probas_multi_normalized.shape[0], dtype=int)
+        for i in range(y_pred_probas_multi_normalized.shape[0]):
+            max_prob = -1
+            max_idx = 0
+            for j, persona in enumerate(le.classes_):
+                prob = y_pred_probas_multi_normalized[i, j]
+                threshold = thresholds.get(persona, 0.5)
+                if prob > threshold and prob > max_prob:
+                    max_prob = prob
+                    max_idx = j
+            y_pred[i] = max_idx
 
-    return overall_acc, dental_acc, doctor_acc, macro_f1, y_pred
+        overall_acc = accuracy_score(y_test_encoded, y_pred)
+        macro_f1 = f1_score(y_test_encoded, y_pred, average='macro')
+        per_persona_acc = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
+        dental_acc = per_persona_acc.get('dental', 0.0)
+        doctor_acc = per_persona_acc.get('doctor', 0.0)
+
+        return overall_acc, dental_acc, doctor_acc, macro_f1, y_pred
+    except Exception as e:
+        logger.error(f"Error in model evaluation: {str(e)}")
+        raise
+
+def is_better_combination(current_metrics, best_metrics, objectives, weights=None):
+    if weights is None:
+        weights = {'dental_accuracy': 0.4, 'doctor_accuracy': 0.4, 'overall_accuracy': 0.2}
+    
+    current_score = sum(current_metrics[obj] * weights.get(obj, 1.0) for obj in objectives)
+    best_score = sum(best_metrics[obj] * weights.get(obj, 1.0) for obj in objectives)
+    
+    return current_score > best_score + 1e-5
 
 # --- Main Tuning Logic ---
 if __name__ == "__main__":
     logger.info("Starting hyperparameter tuning...")
-
-    # Load model, label encoder, and transformer
+    
     try:
+        if not os.path.exists(MODEL_FILE):
+            raise FileNotFoundError(f"Model file not found: {MODEL_FILE}")
         with open(MODEL_FILE, 'rb') as f:
             main_model = pickle.load(f)
+        if not os.path.exists(LABEL_ENCODER_FILE):
+            raise FileNotFoundError(f"Label encoder file not found: {LABEL_ENCODER_FILE}")
         with open(LABEL_ENCODER_FILE, 'rb') as f:
             le = pickle.load(f)
+        if not os.path.exists(TRANSFORMER_FILE):
+            raise FileNotFoundError(f"Transformer file not found: {TRANSFORMER_FILE}")
         with open(TRANSFORMER_FILE, 'rb') as f:
             transformer = pickle.load(f)
     except Exception as e:
-        logger.error(f"Failed to load model or files: {e}")
+        logger.error(f"Failed to load model or files: {str(e)}")
         sys.exit(1)
-
+    
     expected_features = getattr(main_model, 'feature_names_', None)
     if expected_features is None:
-        logger.warning("Model feature_names_ not available, using generated features")
-        expected_features = None
-
-    # Load binary classifiers
+        logger.error("Model does not provide feature_names_. Please specify expected features manually.")
+        sys.exit(1)
+    
     binary_classifiers = {}
     for persona in PERSONAS:
         binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary.pkl')
         try:
+            if not os.path.exists(binary_model_path):
+                logger.warning(f"Binary classifier for {persona} not found at {binary_model_path}. Skipping this persona.")
+                continue
             with open(binary_model_path, 'rb') as f:
                 binary_classifiers[persona] = pickle.load(f)
-        except FileNotFoundError:
-            logger.error(f"Binary classifier for {persona} not found at {binary_model_path}")
-            sys.exit(1)
-
-    # Load and prepare data
+        except Exception as e:
+            logger.warning(f"Failed to load binary classifier for {persona}: {str(e)}. Skipping.")
+            continue
+    
+    if not binary_classifiers:
+        logger.error("No binary classifiers loaded. At least one is required.")
+        sys.exit(1)
+    
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
         X_data, y_data = prepare_features(behavioral_df, plan_df, expected_features)
         y_data_encoded = le.transform(y_data)
         X_data_cols = X_data.columns
     except Exception as e:
-        logger.error(f"Failed to load and prepare data: {e}")
+        logger.error(f"Failed to load and prepare data: {str(e)}")
         sys.exit(1)
-
+    
+ Plants for Sale
     best_metrics = {obj: -1 for obj in OPTIMIZATION_OBJECTIVE}
     best_params = {}
-
-    # Grid Search
+    
     logger.info("Starting grid search...")
     total_combinations = (len(SEARCH_SPACE['dental_weight']) * len(SEARCH_SPACE['doctor_weight']) *
                          len(SEARCH_SPACE['dental_threshold']) * len(SEARCH_SPACE['doctor_threshold']))
     logger.info(f"Total combinations to test: {total_combinations}")
     tested_combinations = 0
-
+    
     for dw in SEARCH_SPACE['dental_weight']:
         for dow in SEARCH_SPACE['doctor_weight']:
             for dt in SEARCH_SPACE['dental_threshold']:
@@ -604,41 +667,32 @@ if __name__ == "__main__":
                     tested_combinations += 1
                     current_weights = BASE_PERSONA_CLASS_WEIGHT.copy()
                     current_thresholds = BASE_PERSONA_THRESHOLD.copy()
-
+                    
                     current_weights['dental'] = dw
                     current_weights['doctor'] = dow
                     current_thresholds['dental'] = dt
                     current_thresholds['doctor'] = dot
-
+                    
                     logger.info(f"Testing combination {tested_combinations}/{total_combinations}: Weights={current_weights}, Thresholds={current_thresholds}")
-
-                    # Evaluate the model with current parameters
+                    
                     overall_acc, dental_acc, doctor_acc, macro_f1, y_pred = evaluate_model_with_params(
                         current_weights, current_thresholds, main_model, binary_classifiers,
                         le, transformer, X_data, y_data_encoded, X_data_cols
                     )
-
+                    
                     logger.info(f"Results: Overall Acc={overall_acc*100:.2f}%, Dental Acc={dental_acc:.2f}%, Doctor Acc={doctor_acc:.2f}%, Macro F1={macro_f1:.2f}")
-
-                    # Check if current parameters are better
-                    is_better = False
-                    for i, obj in enumerate(OPTIMIZATION_OBJECTIVE):
-                        current_metric = locals()[obj]
-                        best_metric = best_metrics[obj]
-
-                        if current_metric > best_metric:
-                            is_better = True
-                            break
-                        elif current_metric < best_metric:
-                            is_better = False
-                            break
-
-                    if is_better:
+                    
+                    current_metrics = {
+                        'dental_accuracy': dental_acc,
+                        'doctor_accuracy': doctor_acc,
+                        'overall_accuracy': overall_acc * 100
+                    }
+                    
+                    if is_better_combination(current_metrics, best_metrics, OPTIMIZATION_OBJECTIVE):
                         logger.info("Found a better combination!")
-                        for obj in OPTIMIZATION_OBJECTIVE:
-                            best_metrics[obj] = locals()[obj]
+                        best_metrics.update(current_metrics)
                         best_params = {'weights': current_weights, 'thresholds': current_thresholds}
-
+    
     logger.info("\n--- Tuning Complete ---")
     if best_params:
         logger.info(f"Best parameters found based on objective {OPTIMIZATION_OBJECTIVE}:")

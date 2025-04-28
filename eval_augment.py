@@ -129,8 +129,8 @@ def load_data(behavioral_path, plan_path):
         
         plan_df = pd.read_csv(plan_path)
         logger.info(f"Plan_df columns: {list(plan_df.columns)}")
-        plan_df['zip'] = plan_df['zip'].astype(str).strip()
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).strip()
+        plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
         logger.info(f"Plan_df rows: {len(plan_df)}")
         
         return behavioral_df, plan_df

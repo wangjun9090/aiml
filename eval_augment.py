@@ -31,19 +31,19 @@ TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model
 # Persona constants
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
 PERSONA_CLASS_WEIGHT = {
-    'drug': 4.5,    # Reduced to balance with others
-    'dental': 7.0,  # Increased to boost from 0%
-    'doctor': 6.0,  # Increased to recover from 0%
+    'drug': 4.0,    # Reduced to prevent overprediction
+    'dental': 7.5,  # Increased to boost from 0%
+    'doctor': 6.5,  # Increased to recover from 0%
     'dsnp': 4.5,
-    'vision': 7.0,  # Increased to boost from 0%
+    'vision': 7.5,  # Increased to boost from 0%
     'csnp': 4.5
 }
 PERSONA_THRESHOLD = {
     'drug': 0.20,   # Maintained for balance
-    'dental': 0.18, # Lowered to capture true positives
-    'doctor': 0.12, # Lowered to recover predictions
+    'dental': 0.15, # Lowered to capture weak signals
+    'doctor': 0.10, # Lowered to recover predictions
     'dsnp': 0.20,
-    'vision': 0.18, # Lowered for rare class
+    'vision': 0.15, # Lowered for rare class
     'csnp': 0.20
 }
 PERSONA_FEATURES = {
@@ -72,6 +72,7 @@ def safe_bool_to_int(boolean_value, df):
 def get_feature_as_series(df, col_name, default=0):
     if col_name in df.columns:
         return df[col_name]
+    logger.warning(f"Feature {col_name} not found, setting to default value {default}")
     return pd.Series([default] * len(df), index=df.index)
 
 def normalize_persona(df):
@@ -189,7 +190,8 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
             'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
-            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages'
+            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages',
+            'click_provider', 'click_drug'
         ]
         
         imputer = SimpleImputer(strategy='median')
@@ -197,15 +199,19 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             if col in training_df.columns:
                 training_df[col] = imputer.fit_transform(training_df[[col]]).flatten()
             else:
+                logger.warning(f"Feature {col} not found in training_df, setting to 0")
                 training_df[col] = 0
 
         sparsity_cols = [
             'query_dental', 'time_dental_pages', 'filter_dental',
             'query_vision', 'time_vision_pages', 'filter_vision',
             'query_provider', 'click_provider', 'filter_provider',
-            'query_drug', 'time_drug_pages', 'click_drug'
+            'query_drug', 'time_drug_pages', 'click_drug',
+            'query_csnp', 'time_csnp_pages', 'filter_csnp',
+            'query_dsnp', 'time_dsnp_pages', 'filter_dsnp'
         ]
-        sparsity_stats = training_df[sparsity_cols].describe().to_dict()
+        available_sparsity_cols = [col for col in sparsity_cols if col in training_df.columns]
+        sparsity_stats = training_df[available_sparsity_cols].describe().to_dict()
         logger.info(f"Feature sparsity stats:\n{sparsity_stats}")
         
         # Feature-based boost for dental, vision, and doctor
@@ -213,15 +219,19 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             query_col = PERSONA_INFO[persona]['query_col']
             time_col = PERSONA_INFO[persona].get('time_col', None)
             click_col = PERSONA_INFO[persona].get('click_col', None)
+            filter_col = PERSONA_INFO[persona]['filter_col']
             if query_col in training_df.columns:
-                strong_signal = training_df[query_col] > training_df[query_col].quantile(0.75)
-                training_df.loc[strong_signal, query_col] *= 2.0
+                strong_signal = training_df[query_col] > training_df[query_col].quantile(0.7)
+                training_df.loc[strong_signal, query_col] *= 2.5
             if time_col in training_df.columns:
-                strong_signal = training_df[time_col] > training_df[time_col].quantile(0.75)
-                training_df.loc[strong_signal, time_col] *= 2.0
+                strong_signal = training_df[time_col] > training_df[time_col].quantile(0.7)
+                training_df.loc[strong_signal, time_col] *= 2.5
             if click_col in training_df.columns:
-                strong_signal = training_df[click_col] > training_df[click_col].quantile(0.75)
-                training_df.loc[strong_signal, click_col] *= 2.0
+                strong_signal = training_df[click_col] > training_df[click_col].quantile(0.7)
+                training_df.loc[strong_signal, click_col] *= 2.5
+            if filter_col in training_df.columns:
+                strong_signal = training_df[filter_col] > training_df[filter_col].quantile(0.7)
+                training_df.loc[strong_signal, filter_col] *= 2.5
         
         if 'start_time' in training_df.columns:
             training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])).dt.days.fillna(30)
@@ -554,11 +564,11 @@ def main():
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
             if persona in ['dental', 'vision']:
-                blend_ratio = 0.3  # Lower to rely on main model
+                blend_ratio = 0.2  # Very low to rely on main model
             elif persona in ['doctor']:
-                blend_ratio = 0.6  # Higher to leverage binary classifier
+                blend_ratio = 0.7  # Higher to leverage binary classifier
             elif persona in ['drug']:
-                blend_ratio = 0.7  # High to maintain accuracy
+                blend_ratio = 0.6  # Moderate to balance
             else:
                 blend_ratio = 0.5
             y_pred_probas_multi[:, i] = blend_ratio * y_pred_probas_multi[:, i] + (1-blend_ratio) * binary_probas[persona]

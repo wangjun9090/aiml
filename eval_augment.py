@@ -30,15 +30,29 @@ TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model
 
 # Persona constants
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
-PERSONA_CLASS_WEIGHT = {'drug': 3.0, 'dental': 6.0, 'doctor': 4.0, 'dsnp': 4.5, 'vision': 7.0, 'csnp': 4.0}
-PERSONA_THRESHOLD = {'drug': 0.25, 'dental': 0.20, 'doctor': 0.20, 'dsnp': 0.22, 'vision': 0.18, 'csnp': 0.22}
+PERSONA_CLASS_WEIGHT = {
+    'drug': 2.5,    # Reduced to balance with others
+    'dental': 8.0,  # Increased to boost dental
+    'doctor': 7.0,  # Increased to boost doctor
+    'dsnp': 4.0,
+    'vision': 8.0,  # Increased for rare class
+    'csnp': 3.5
+}
+PERSONA_THRESHOLD = {
+    'drug': 0.25,
+    'dental': 0.15,  # Lowered to classify more dental
+    'doctor': 0.15,  # Lowered to classify more doctor
+    'dsnp': 0.20,
+    'vision': 0.15,  # Lowered for rare class
+    'csnp': 0.20
+}
 PERSONA_FEATURES = {
     'dental': ['query_dental', 'filter_dental', 'time_dental_pages', 'ma_dental_benefit'],
     'doctor': ['query_provider', 'filter_provider', 'click_provider', 'ma_provider_network'],
     'dsnp': ['query_dsnp', 'filter_dsnp', 'time_dsnp_pages', 'dsnp'],
     'drug': ['query_drug', 'filter_drug', 'time_drug_pages', 'click_drug', 'ma_drug_benefit'],
     'vision': ['query_vision', 'filter_vision', 'time_vision_pages', 'ma_vision'],
-    'csnp': ['query_csnp', 'filter_csnp', 'time_csnp_pages']
+    'csnp': ['query_csnp', 'filter_csnp', 'time_csnp_pages', 'csnp']
 }
 PERSONA_INFO = {
     'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp', 'time_col': 'time_csnp_pages'},
@@ -115,8 +129,8 @@ def load_data(behavioral_path, plan_path):
         
         plan_df = pd.read_csv(plan_path)
         logger.info(f"Plan_df columns: {list(plan_df.columns)}")
-        plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
+        plan_df['zip'] = plan_df['zip'].astype(str).strip()
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).strip()
         logger.info(f"Plan_df rows: {len(plan_df)}")
         
         return behavioral_df, plan_df
@@ -143,7 +157,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             logger.error("Persona column missing in training_df after merge")
             raise ValueError("Persona column required in training_df")
         
-        plan_features = ['ma_dental_benefit', 'ma_vision', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
+        plan_features = ['ma_dental_benefit', 'ma_vision', 'dsnp', 'ma_drug_benefit', 'ma_provider_network', 'csnp']
         for col in plan_features:
             if col not in training_df.columns:
                 training_df[col] = 0
@@ -353,6 +367,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         csnp_query = get_feature_as_series(training_df, 'query_csnp')
         csnp_filter = get_feature_as_series(training_df, 'filter_csnp')
         csnp_time = get_feature_as_series(training_df, 'time_csnp_pages')
+        csnp_plan = get_feature_as_series(training_df, 'csnp')
         dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
         
         training_df['csnp_dsnp_ratio'] = (
@@ -371,7 +386,8 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         training_df['csnp_engagement_score'] = (
             csnp_query * 3.0 +
             csnp_filter * 3.0 +
-            csnp_time.clip(upper=5) * 2.0
+            csnp_time.clip(upper=5) * 2.0 +
+            csnp_plan * 5.0
         ) * 4.0
         additional_features.append('csnp_engagement_score')
         
@@ -468,14 +484,12 @@ def main():
     # Blend probabilities with tuned ratios and apply class weights
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
-            if persona in ['dental', 'vision']:
-                blend_ratio = 0.6  # Higher weight for rare classes
-            elif persona in ['doctor', 'csnp']:
-                blend_ratio = 0.4
-            elif persona in ['drug', 'dsnp']:
-                blend_ratio = 0.3
-            else:
+            if persona in ['dental', 'doctor', 'vision']:
+                blend_ratio = 0.7  # Higher weight for dental, doctor, vision
+            elif persona in ['csnp']:
                 blend_ratio = 0.5
+            else:
+                blend_ratio = 0.3
             y_pred_probas_multi[:, i] = blend_ratio * y_pred_probas_multi[:, i] + (1-blend_ratio) * binary_probas[persona]
         y_pred_probas_multi[:, i] *= PERSONA_CLASS_WEIGHT.get(persona, 1.0)
     

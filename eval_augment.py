@@ -31,19 +31,19 @@ TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model
 # Persona constants
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
 PERSONA_CLASS_WEIGHT = {
-    'drug': 5.0,    # Increased to recover accuracy
-    'dental': 6.5,  # Moderated to boost from 0%
-    'doctor': 5.5,  # Tuned to push above 80%
+    'drug': 4.5,    # Reduced to balance with others
+    'dental': 7.0,  # Increased to boost from 0%
+    'doctor': 6.0,  # Increased to recover from 0%
     'dsnp': 4.5,
-    'vision': 6.5,  # High for rare class
+    'vision': 7.0,  # Increased to boost from 0%
     'csnp': 4.5
 }
 PERSONA_THRESHOLD = {
-    'drug': 0.20,   # Lowered for recall
-    'dental': 0.22, # Raised to reduce false positives
-    'doctor': 0.15, # Kept low for gains
+    'drug': 0.20,   # Maintained for balance
+    'dental': 0.18, # Lowered to capture true positives
+    'doctor': 0.12, # Lowered to recover predictions
     'dsnp': 0.20,
-    'vision': 0.22, # Raised for rare class
+    'vision': 0.18, # Lowered for rare class
     'csnp': 0.20
 }
 PERSONA_FEATURES = {
@@ -199,19 +199,29 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             else:
                 training_df[col] = 0
 
-        sparsity_cols = ['query_dental', 'time_dental_pages', 'query_vision', 'time_vision_pages', 'query_drug', 'query_provider']
+        sparsity_cols = [
+            'query_dental', 'time_dental_pages', 'filter_dental',
+            'query_vision', 'time_vision_pages', 'filter_vision',
+            'query_provider', 'click_provider', 'filter_provider',
+            'query_drug', 'time_drug_pages', 'click_drug'
+        ]
         sparsity_stats = training_df[sparsity_cols].describe().to_dict()
         logger.info(f"Feature sparsity stats:\n{sparsity_stats}")
         
-        # Feature-based boost for dental and vision
-        for persona in ['dental', 'vision']:
+        # Feature-based boost for dental, vision, and doctor
+        for persona in ['dental', 'vision', 'doctor']:
             query_col = PERSONA_INFO[persona]['query_col']
             time_col = PERSONA_INFO[persona].get('time_col', None)
-            if query_col in training_df.columns and time_col in training_df.columns:
-                strong_signal = (training_df[query_col] > training_df[query_col].quantile(0.9)) | \
-                               (training_df[time_col] > training_df[time_col].quantile(0.9))
-                training_df.loc[strong_signal, query_col] *= 1.5
-                training_df.loc[strong_signal, time_col] *= 1.5
+            click_col = PERSONA_INFO[persona].get('click_col', None)
+            if query_col in training_df.columns:
+                strong_signal = training_df[query_col] > training_df[query_col].quantile(0.75)
+                training_df.loc[strong_signal, query_col] *= 2.0
+            if time_col in training_df.columns:
+                strong_signal = training_df[time_col] > training_df[time_col].quantile(0.75)
+                training_df.loc[strong_signal, time_col] *= 2.0
+            if click_col in training_df.columns:
+                strong_signal = training_df[click_col] > training_df[click_col].quantile(0.75)
+                training_df.loc[strong_signal, click_col] *= 2.0
         
         if 'start_time' in training_df.columns:
             training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])).dt.days.fillna(30)
@@ -451,6 +461,9 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             'recency', 'visit_frequency', 'time_of_day', 'user_cluster', 'dental_time_ratio', 'click_ratio'
         ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         
+        # Exclude accordion_* features
+        feature_columns = [f for f in feature_columns if not f.startswith('accordion_')]
+        
         X = training_df[feature_columns].fillna(0)
         y = training_df['persona']
         logger.info(f"Generated feature columns: {list(X.columns)}")
@@ -541,11 +554,11 @@ def main():
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
             if persona in ['dental', 'vision']:
-                blend_ratio = 0.4  # Lower to rely on main model
-            elif persona in ['drug']:
-                blend_ratio = 0.6  # Higher to leverage main model
+                blend_ratio = 0.3  # Lower to rely on main model
             elif persona in ['doctor']:
-                blend_ratio = 0.5  # Moderate for balance
+                blend_ratio = 0.6  # Higher to leverage binary classifier
+            elif persona in ['drug']:
+                blend_ratio = 0.7  # High to maintain accuracy
             else:
                 blend_ratio = 0.5
             y_pred_probas_multi[:, i] = blend_ratio * y_pred_probas_multi[:, i] + (1-blend_ratio) * binary_probas[persona]

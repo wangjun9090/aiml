@@ -10,7 +10,6 @@ import logging
 import sys
 
 # --- Configuration ---
-# IMPORTANT: Adjust these file paths to match your setup
 BEHAVIORAL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv'
 PLAN_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/training/plan_derivation_by_zip.csv'
 MODEL_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/model-persona-1.1.0.pkl'
@@ -18,6 +17,24 @@ LABEL_ENCODER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-mod
 TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/models/power_transformer.pkl'
 
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
+
+# Persona constants from eval_augment.py
+PERSONA_FEATURES = {
+    'dental': ['query_dental', 'filter_dental', 'time_dental_pages', 'ma_dental_benefit'],
+    'doctor': ['query_provider', 'filter_provider', 'click_provider', 'ma_provider_network'],
+    'dsnp': ['query_dsnp', 'filter_dsnp', 'time_dsnp_pages', 'dsnp'],
+    'drug': ['query_drug', 'filter_drug', 'time_drug_pages', 'click_drug', 'ma_drug_benefit'],
+    'vision': ['query_vision', 'filter_vision', 'time_vision_pages', 'ma_vision'],
+    'csnp': ['query_csnp', 'filter_csnp', 'time_csnp_pages', 'csnp']
+}
+PERSONA_INFO = {
+    'csnp': {'plan_col': 'csnp', 'query_col': 'query_csnp', 'filter_col': 'filter_csnp', 'time_col': 'time_csnp_pages'},
+    'dental': {'plan_col': 'ma_dental_benefit', 'query_col': 'query_dental', 'filter_col': 'filter_dental', 'time_col': 'time_dental_pages'},
+    'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'click_provider'},
+    'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp', 'time_col': 'time_dsnp_pages'},
+    'drug': {'plan_col': 'ma_drug_benefit', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'click_drug', 'time_col': 'time_drug_pages'},
+    'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'time_col': 'time_vision_pages'}
+}
 
 # Define the base weights and thresholds from eval_augment.py
 BASE_PERSONA_CLASS_WEIGHT = {
@@ -147,7 +164,7 @@ def load_data(behavioral_path, plan_path):
         plan_df = pd.read_csv(plan_path)
         logger.info(f"Plan_df columns: {list(plan_df.columns)}")
         plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).strip()
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
         logger.info(f"Plan_df rows: {len(plan_df)}")
         
         return behavioral_df, plan_df
@@ -575,8 +592,8 @@ if __name__ == "__main__":
 
     # Grid Search
     logger.info("Starting grid search...")
-    total_combinations = len(SEARCH_SPACE['dental_weight']) * len(SEARCH_SPACE['doctor_weight']) * \
-                         len(SEARCH_SPACE['dental_threshold']) * len(SEARCH_SPACE['doctor_threshold'])
+    total_combinations = (len(SEARCH_SPACE['dental_weight']) * len(SEARCH_SPACE['doctor_weight']) *
+                         len(SEARCH_SPACE['dental_threshold']) * len(SEARCH_SPACE['doctor_threshold']))
     logger.info(f"Total combinations to test: {total_combinations}")
     tested_combinations = 0
 

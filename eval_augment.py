@@ -31,19 +31,19 @@ TRANSFORMER_FILE = '/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model
 # Persona constants
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
 PERSONA_CLASS_WEIGHT = {
-    'drug': 2.5,    # Reduced to balance with others
-    'dental': 8.0,  # Increased to boost dental
-    'doctor': 7.0,  # Increased to boost doctor
-    'dsnp': 4.0,
-    'vision': 8.0,  # Increased for rare class
-    'csnp': 3.5
+    'drug': 5.0,    # Increased to recover accuracy
+    'dental': 6.5,  # Moderated to boost from 0%
+    'doctor': 5.5,  # Tuned to push above 80%
+    'dsnp': 4.5,
+    'vision': 6.5,  # High for rare class
+    'csnp': 4.5
 }
 PERSONA_THRESHOLD = {
-    'drug': 0.25,
-    'dental': 0.15,  # Lowered to classify more dental
-    'doctor': 0.15,  # Lowered to classify more doctor
+    'drug': 0.20,   # Lowered for recall
+    'dental': 0.22, # Raised to reduce false positives
+    'doctor': 0.15, # Kept low for gains
     'dsnp': 0.20,
-    'vision': 0.15,  # Lowered for rare class
+    'vision': 0.22, # Raised for rare class
     'csnp': 0.20
 }
 PERSONA_FEATURES = {
@@ -103,6 +103,27 @@ def normalize_persona(df):
         logger.error(f"No valid personas found. Valid personas: {valid_personas}")
         raise ValueError("No valid personas found")
     return result
+
+def calculate_persona_weight(row, persona_info, persona):
+    query_col = persona_info['query_col']
+    filter_col = persona_info['filter_col']
+    plan_col = persona_info.get('plan_col', None)
+    click_col = persona_info.get('click_col', None)
+    
+    query_value = row.get(query_col, 0) if pd.notna(row.get(query_col, np.nan)) else 0
+    filter_value = row.get(filter_col, 0) if pd.notna(row.get(filter_col, np.nan)) else 0
+    plan_value = row.get(plan_col, 0) if plan_col and pd.notna(row.get(plan_col, np.nan)) else 0
+    click_value = row.get(click_col, 0) if click_col and pd.notna(row.get(click_col, np.nan)) else 0
+    
+    max_val = max([query_value, filter_value, plan_value, click_value, 1])
+    if max_val > 0:
+        query_value /= max_val
+        filter_value /= max_val
+        plan_value /= max_val
+        click_value /= max_val
+    
+    weight = 0.25 * (query_value + filter_value + plan_value + click_value)
+    return min(max(weight, 0), 1.0)
 
 def load_data(behavioral_path, plan_path):
     try:
@@ -178,9 +199,19 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             else:
                 training_df[col] = 0
 
-        sparsity_cols = ['query_dsnp', 'time_dsnp_pages', 'query_drug', 'time_drug_pages', 'query_dental', 'query_provider']
+        sparsity_cols = ['query_dental', 'time_dental_pages', 'query_vision', 'time_vision_pages', 'query_drug', 'query_provider']
         sparsity_stats = training_df[sparsity_cols].describe().to_dict()
         logger.info(f"Feature sparsity stats:\n{sparsity_stats}")
+        
+        # Feature-based boost for dental and vision
+        for persona in ['dental', 'vision']:
+            query_col = PERSONA_INFO[persona]['query_col']
+            time_col = PERSONA_INFO[persona].get('time_col', None)
+            if query_col in training_df.columns and time_col in training_df.columns:
+                strong_signal = (training_df[query_col] > training_df[query_col].quantile(0.9)) | \
+                               (training_df[time_col] > training_df[time_col].quantile(0.9))
+                training_df.loc[strong_signal, query_col] *= 1.5
+                training_df.loc[strong_signal, time_col] *= 1.5
         
         if 'start_time' in training_df.columns:
             training_df['recency'] = (pd.to_datetime('2025-04-25') - pd.to_datetime(training_df['start_time'])).dt.days.fillna(30)
@@ -202,6 +233,9 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         else:
             training_df['user_cluster'] = 0
         
+        training_df['dental_time_ratio'] = training_df.get('time_dental_pages', 0) / (training_df.get('total_session_time', 1) + 1e-5)
+        training_df['click_ratio'] = training_df.get('num_clicks', 0) / (training_df.get('num_pages_viewed', 1) + 1e-5)
+        
         if 'plan_id' in training_df.columns:
             plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist() if 'userid' in training_df.columns else training_df['plan_id'].apply(lambda x: [x]).tolist()
             w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
@@ -218,6 +252,12 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         filter_cols = [c for c in behavioral_features if c.startswith('filter_') and c in training_df.columns]
         training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series(0, index=training_df.index)
         training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else pd.Series(0, index=training_df.index)
+        
+        for persona in PERSONAS:
+            if persona in PERSONA_INFO:
+                training_df[f'{persona}_weight'] = training_df.apply(
+                    lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
+                )
         
         additional_features = []
         for persona in PERSONAS:
@@ -252,6 +292,11 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
                 safe_bool_to_int(time_col > 2, training_df) * 1.5
             ) * 2.0
             additional_features.append(f'{persona}_primary')
+            
+            training_df[f'{persona}_plan_correlation'] = plan_col * (
+                query_col + filter_col + click_col + time_col.clip(upper=3)
+            ) * 2.0
+            additional_features.append(f'{persona}_plan_correlation')
         
         dental_query = get_feature_as_series(training_df, 'query_dental')
         dental_filter = get_feature_as_series(training_df, 'filter_dental')
@@ -391,9 +436,20 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         ) * 4.0
         additional_features.append('csnp_engagement_score')
         
+        training_df['csnp_time_intensity'] = (
+            (csnp_time / (training_df.get('total_session_time', 1) + 1e-5))
+        ).clip(upper=0.8) * 6.0
+        additional_features.append('csnp_time_intensity')
+        
+        training_df['csnp_plan_multiplier'] = (
+            (csnp_query + csnp_filter) *
+            (csnp_plan + 0.5) * 6.0
+        ).clip(lower=0, upper=24)
+        additional_features.append('csnp_plan_multiplier')
+        
         feature_columns = behavioral_features + plan_features + additional_features + [
-            'recency', 'visit_frequency', 'time_of_day', 'user_cluster'
-        ] + embedding_cols
+            'recency', 'visit_frequency', 'time_of_day', 'user_cluster', 'dental_time_ratio', 'click_ratio'
+        ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
         
         X = training_df[feature_columns].fillna(0)
         y = training_df['persona']
@@ -484,12 +540,14 @@ def main():
     # Blend probabilities with tuned ratios and apply class weights
     for i, persona in enumerate(le.classes_):
         if persona in binary_probas:
-            if persona in ['dental', 'doctor', 'vision']:
-                blend_ratio = 0.7  # Higher weight for dental, doctor, vision
-            elif persona in ['csnp']:
-                blend_ratio = 0.5
+            if persona in ['dental', 'vision']:
+                blend_ratio = 0.4  # Lower to rely on main model
+            elif persona in ['drug']:
+                blend_ratio = 0.6  # Higher to leverage main model
+            elif persona in ['doctor']:
+                blend_ratio = 0.5  # Moderate for balance
             else:
-                blend_ratio = 0.3
+                blend_ratio = 0.5
             y_pred_probas_multi[:, i] = blend_ratio * y_pred_probas_multi[:, i] + (1-blend_ratio) * binary_probas[persona]
         y_pred_probas_multi[:, i] *= PERSONA_CLASS_WEIGHT.get(persona, 1.0)
     

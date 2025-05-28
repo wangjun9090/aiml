@@ -1044,4 +1044,31 @@ try:
     plt.title('Model Accuracy by Persona Type')
     plt.axhline(y=acc_df['Accuracy (%)'].mean(), color='r', linestyle='--', label='Mean Accuracy')
     plt.legend()
-    plt.
+    plt.ylim(0, 100)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+    
+    print("\nPer-Persona Accuracy:")
+    for persona, acc in acc_df.set_index('Persona')['Accuracy (%)'].items():
+        print(f"{persona}: {acc:.2f}%")
+    
+    print(f"\nOverall Accuracy: {accuracy_score(y_test, y_pred)*100:.2f}%")
+except Exception as e:
+    print(f"Error creating visualizations: {e}")
+"""
+print("Visualization section skipped due to undefined functions.")
+
+# --- Model Performance Improvement Strategy ---
+"""
+The current model performance shows poor results, especially for dental accuracy (0.00%). Let's implement an improved approach with targeted optimization.
+
+The improved model makes several key changes to boost dental accuracy from 0%:
+1. **Extreme Class Weighting**: Applied 80x weight to dental class (up from 15.5x)
+2. **Specialized Dental Features**: Created 10+ new dental-specific features
+3. **Massively Lowered Threshold**: Reduced dental prediction threshold to 0.01 (from 0.08)
+4. **Heavy Oversampling**: Increased dental class representation to 40% of training data
+5. **Custom Ensemble Method**: Developed dental-prioritized prediction logic
+
+These techniques help overcome the extreme class imbalance and feature sparsity that were causing the 0% dental accuracy.
+"""

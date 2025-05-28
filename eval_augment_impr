@@ -75,38 +75,46 @@ BASE_PERSONA_THRESHOLD = {
     'csnp': 0.20
 }
 
-# Enhanced model parameters focused on improving dental and doctor accuracy
+# Enhanced model parameters for balanced accuracy
 ENHANCED_PERSONA_CLASS_WEIGHT = {
-    'dental': 80.0,
-    'doctor': 55.0,
-    'drug': 5.0,
-    'dsnp': 8.5,
-    'vision': 6.5,
-    'csnp': 4.5
+    'dental': 30.0,  # Reduced from 80.0 to lessen dental bias
+    'doctor': 25.0,  # Adjusted from 55.0 for balance
+    'drug': 10.0,    # Increased from 5.0 to boost drug predictions
+    'dsnp': 10.0,    # Increased from 8.5
+    'vision': 15.0,  # Increased from 6.5 to support minority class
+    'csnp': 10.0     # Increased from 4.5
 }
 
 ENHANCED_PERSONA_THRESHOLD = {
-    'dental': 0.01,
-    'doctor': 0.04,
-    'drug': 0.25,
-    'dsnp': 0.20,
-    'vision': 0.18,
-    'csnp': 0.20
+    'dental': 0.02,  # Increased from 0.01 to reduce false positives
+    'doctor': 0.03,  # Reduced from 0.04 to allow more doctor predictions
+    'drug': 0.15,    # Reduced from 0.25
+    'dsnp': 0.15,    # Reduced from 0.20
+    'vision': 0.15,  # Reduced from 0.18
+    'csnp': 0.15     # Reduced from 0.20
 }
 
-# Extended search space with more extreme values for dental
+# Extended search space for all personas
 EXTENDED_SEARCH_SPACE = {
-    'dental_weight': [40.0, 60.0, 80.0, 100.0, 120.0, 150.0],
-    'doctor_weight': [30.0, 40.0, 55.0, 70.0, 85.0],
-    'dental_threshold': [0.001, 0.005, 0.01, 0.02, 0.03],
-    'doctor_threshold': [0.02, 0.03, 0.04, 0.05, 0.06]
+    'dental_weight': [20.0, 30.0, 40.0, 50.0],
+    'doctor_weight': [15.0, 25.0, 35.0, 45.0],
+    'drug_weight': [5.0, 10.0, 15.0],
+    'dsnp_weight': [5.0, 10.0, 15.0],
+    'vision_weight': [10.0, 15.0, 20.0],
+    'csnp_weight': [5.0, 10.0, 15.0],
+    'dental_threshold': [0.01, 0.02, 0.03],
+    'doctor_threshold': [0.02, 0.03, 0.04],
+    'drug_threshold': [0.10, 0.15, 0.20],
+    'dsnp_threshold': [0.10, 0.15, 0.20],
+    'vision_threshold': [0.10, 0.15, 0.20],
+    'csnp_threshold': [0.10, 0.15, 0.20]
 }
 
-# Modified optimization weights to prioritize dental accuracy
+# Modified optimization weights to balance accuracy
 OPTIMIZATION_WEIGHTS = {
-    'dental_accuracy': 0.6,
-    'doctor_accuracy': 0.3,
-    'overall_accuracy': 0.1
+    'dental_accuracy': 0.3,     # Reduced from 0.6
+    'doctor_accuracy': 0.3,     # Same as dental
+    'overall_accuracy': 0.4     # Increased from 0.1
 }
 
 # Optimization objective
@@ -578,65 +586,66 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         logger.error(f"Failed to prepare features: {str(e)}")
         raise
 
-def create_specialized_dental_features(df):
-    """Create highly specialized features for the dental class which currently has 0% accuracy"""
-    print("Creating specialized dental features...")
+def create_specialized_persona_features(df, persona):
+    """Create specialized features for a given persona."""
+    print(f"Creating specialized features for {persona}...")
     
-    dental_query = get_feature_as_series(df, 'query_dental')
-    dental_filter = get_feature_as_series(df, 'filter_dental')
-    dental_time = get_feature_as_series(df, 'time_dental_pages')
-    dental_benefit = get_feature_as_series(df, 'ma_dental_benefit')
+    persona_info = PERSONA_INFO.get(persona, {})
+    query_col = persona_info.get('query_col', f'query_{persona}')
+    filter_col = persona_info.get('filter_col', f'filter_{persona}')
+    time_col = persona_info.get('time_col', f'time_{persona}_pages')
+    click_col = persona_info.get('click_col', f'click_{persona}')
+    plan_col = persona_info.get('plan_col', f'ma_{persona}_benefit')
     
-    vision_query = get_feature_as_series(df, 'query_vision')
-    doctor_query = get_feature_as_series(df, 'query_provider')
-    drug_query = get_feature_as_series(df, 'query_drug')
+    query = get_feature_as_series(df, query_col)
+    filter_val = get_feature_as_series(df, filter_col)
+    time = get_feature_as_series(df, time_col)
+    click = get_feature_as_series(df, click_col)
+    plan = get_feature_as_series(df, plan_col)
     
-    df['dental_super_signal'] = (
-        np.log1p(dental_query * 10) * 5.0 +
-        np.log1p(dental_filter * 10) * 5.0 +
-        np.log1p(dental_time.clip(upper=5) * 5) * 4.0 +
-        np.log1p(dental_benefit * 10) * 6.0
+    # Super signal combining key features
+    df[f'{persona}_super_signal'] = (
+        np.log1p(query * 10) * 5.0 +
+        np.log1p(filter_val * 10) * 5.0 +
+        np.log1p(time.clip(upper=5) * 5) * 4.0 +
+        np.log1p(plan * 10) * 6.0
     ) * 10.0
     
-    dental_total = dental_query + dental_filter + dental_time + dental_benefit + 1e-8
-    other_total = vision_query + doctor_query + drug_query + 1e-8
-    df['dental_exclusivity'] = (dental_total / (dental_total + other_total)).fillna(0) * 15.0
+    # Exclusivity against other personas
+    other_queries = sum(get_feature_as_series(df, PERSONA_INFO[p].get('query_col', f'query_{p}')) 
+                        for p in PERSONAS if p != persona)
+    total = query + filter_val + time + plan + 1e-8
+    df[f'{persona}_exclusivity'] = (total / (total + other_queries + 1e-8)).fillna(0) * 15.0
     
-    df['dental_any_interaction'] = ((dental_query > 0) | 
-                                  (dental_filter > 0) | 
-                                  (dental_time > 0) | 
-                                  (dental_benefit > 0)).astype(int) * 10.0
+    # Interaction indicator
+    df[f'{persona}_any_interaction'] = ((query > 0) | (filter_val > 0) | (time > 0) | (plan > 0)).astype(int) * 10.0
     
-    df['dental_benefit_indicator'] = (dental_benefit > 0).astype(int) * 20.0
+    # Plan indicator
+    df[f'{persona}_plan_indicator'] = (plan > 0).astype(int) * 20.0
     
-    df['dental_query_strong'] = (dental_query > 0.5).astype(int) * 15.0
-    df['dental_filter_strong'] = (dental_filter > 0.5).astype(int) * 15.0
-    df['dental_time_significant'] = (dental_time > 1.0).astype(int) * 12.0
+    # Strong signals
+    df[f'{persona}_query_strong'] = (query > 0.5).astype(int) * 15.0
+    df[f'{persona}_filter_strong'] = (filter_val > 0.5).astype(int) * 15.0
+    df[f'{persona}_time_significant'] = (time > 1.0).astype(int) * 12.0
     
-    df['dental_signature_score'] = (
-        df['dental_super_signal'] * 2.0 + 
-        df['dental_exclusivity'] * 3.0 + 
-        df['dental_any_interaction'] * 5.0 + 
-        df['dental_benefit_indicator'] * 4.0
+    # Signature score
+    df[f'{persona}_signature_score'] = (
+        df[f'{persona}_super_signal'] * 2.0 +
+        df[f'{persona}_exclusivity'] * 3.0 +
+        df[f'{persona}_any_interaction'] * 5.0 +
+        df[f'{persona}_plan_indicator'] * 4.0
     ) * 5.0
     
-    df['dental_vs_drug'] = ((dental_query + dental_filter) - 
-                           (drug_query + get_feature_as_series(df, 'filter_drug')).clip(upper=1.0)) * 10.0
-    df['dental_vs_vision'] = ((dental_query + dental_filter) - 
-                             (vision_query + get_feature_as_series(df, 'filter_vision')).clip(upper=1.0)) * 10.0
-    
-    print("Specialized dental features created.")
-    
     new_features = [
-        'dental_super_signal', 'dental_exclusivity', 'dental_any_interaction',
-        'dental_benefit_indicator', 'dental_query_strong', 'dental_filter_strong', 
-        'dental_time_significant', 'dental_signature_score',
-        'dental_vs_drug', 'dental_vs_vision'
+        f'{persona}_super_signal', f'{persona}_exclusivity', f'{persona}_any_interaction',
+        f'{persona}_plan_indicator', f'{persona}_query_strong', f'{persona}_filter_strong',
+        f'{persona}_time_significant', f'{persona}_signature_score'
     ]
+    print(f"Created {len(new_features)} specialized features for {persona}.")
     return df, new_features
 
-def custom_ensemble_with_dental_focus(predictions, binary_probas, le, weights=None, thresholds=None):
-    """Custom ensemble method with special handling for dental predictions"""
+def custom_ensemble_with_balanced_focus(predictions, binary_probas, le, weights=None, thresholds=None):
+    """Custom ensemble method with balanced handling for all personas."""
     if weights is None:
         weights = ENHANCED_PERSONA_CLASS_WEIGHT
     if thresholds is None:
@@ -644,51 +653,36 @@ def custom_ensemble_with_dental_focus(predictions, binary_probas, le, weights=No
     
     weighted_preds = np.copy(predictions)
     
+    # Apply class weights
     for i, persona in enumerate(le.classes_):
         weighted_preds[:, i] *= weights.get(persona, 1.0)
     
+    # Incorporate binary classifier probabilities
     if binary_probas:
         for persona, proba in binary_probas.items():
-            if persona == 'dental':
-                persona_idx = np.where(le.classes_ == persona)[0][0]
-                weighted_preds[:, persona_idx] = 0.2 * weighted_preds[:, persona_idx] + 0.8 * proba * 15.0
-            elif persona == 'doctor':
-                persona_idx = np.where(le.classes_ == persona)[0][0]
-                weighted_preds[:, persona_idx] = 0.3 * weighted_preds[:, persona_idx] + 0.7 * proba * 8.0
+            persona_idx = np.where(le.classes_ == persona)[0][0]
+            blend_weight = 0.4
+            weighted_preds[:, persona_idx] = (1 - blend_weight) * weighted_preds[:, persona_idx] + blend_weight * proba * 10.0
     
-    dental_idx = np.where(le.classes_ == 'dental')[0][0]
-    dental_proba = weighted_preds[:, dental_idx]
-    
-    dental_mask = (dental_proba > 0) & (dental_proba < 0.5)
-    weighted_preds[dental_mask, dental_idx] *= 5.0
-    
+    # Normalize probabilities
     row_sums = weighted_preds.sum(axis=1, keepdims=True)
-    normalized_preds = weighted_preds / row_sums
+    normalized_preds = weighted_preds / (row_sums + 1e-8)
     
+    # Predict based on thresholds
     predictions = np.zeros(len(normalized_preds), dtype=np.int32)
-    
     for i in range(len(normalized_preds)):
-        dental_prob = normalized_preds[i, dental_idx]
-        dental_threshold = thresholds.get('dental', 0.05)
-        if dental_prob > dental_threshold:
-            predictions[i] = dental_idx
-    
-    for i in range(len(normalized_preds)):
-        if predictions[i] == 0:
-            max_persona_idx = -1
-            max_score = -1
-            
-            for j, persona in enumerate(le.classes_):
-                prob = normalized_preds[i, j]
-                threshold = thresholds.get(persona, 0.2)
-                if prob > threshold and prob > max_score:
-                    max_score = prob
-                    max_persona_idx = j
-                    
-            if max_persona_idx >= 0:
-                predictions[i] = max_persona_idx
-            else:
-                predictions[i] = np.argmax(normalized_preds[i])
+        max_prob = -1
+        max_idx = -1
+        for j, persona in enumerate(le.classes_):
+            prob = normalized_preds[i, j]
+            threshold = thresholds.get(persona, 0.2)
+            if prob > threshold and prob > max_prob:
+                max_prob = prob
+                max_idx = j
+        if max_idx >= 0:
+            predictions[i] = max_idx
+        else:
+            predictions[i] = np.argmax(normalized_preds[i])
     
     return predictions, normalized_preds
 
@@ -717,9 +711,7 @@ def evaluate_model_with_params(class_weights, thresholds, main_model, binary_cla
         y_pred_probas_multi_blended = np.copy(y_pred_probas_multi)
         for i, persona in enumerate(le.classes_):
             if persona in binary_probas and binary_probas[persona].sum() > 0:
-                blend_ratio = {
-                    'dental': 0.4, 'vision': 0.4, 'drug': 0.6, 'doctor': 0.5
-                }.get(persona, 0.5)
+                blend_ratio = 0.4
                 y_pred_probas_multi_blended[:, i] = blend_ratio * y_pred_probas_multi_blended[:, i] + (1-blend_ratio) * binary_probas[persona]
             y_pred_probas_multi_blended[:, i] *= class_weights.get(persona, 1.0)
 
@@ -750,7 +742,7 @@ def evaluate_model_with_params(class_weights, thresholds, main_model, binary_cla
 
 def is_better_combination(current_metrics, best_metrics, objectives, weights=None):
     if weights is None:
-        weights = {'dental_accuracy': 0.4, 'doctor_accuracy': 0.4, 'overall_accuracy': 0.2}
+        weights = OPTIMIZATION_WEIGHTS
     
     current_score = sum(current_metrics[obj] * weights.get(obj, 1.0) for obj in objectives)
     best_score = sum(best_metrics[obj] * weights.get(obj, 1.0) for obj in objectives)
@@ -769,53 +761,49 @@ def load_model_and_encoder(model_file, label_encoder_file):
         print(f"Error loading model or label encoder: {e}")
         raise
 
-def train_enhanced_dental_model(X_train, y_train, le):
-    """Train a model specifically focused on improving dental accuracy"""
-    print("Training enhanced dental-focused model...")
+def train_enhanced_balanced_model(X_train, y_train, le):
+    """Train a model with balanced focus on all personas."""
+    print("Training enhanced balanced model...")
     
     X_train_df = pd.DataFrame(X_train, columns=X_train.columns)
-    X_train_df, new_features = create_specialized_dental_features(X_train_df)
-    print(f"Added {len(new_features)} specialized dental features")
+    all_new_features = []
+    
+    # Add specialized features for all personas
+    for persona in PERSONAS:
+        X_train_df, new_features = create_specialized_persona_features(X_train_df, persona)
+        all_new_features.extend(new_features)
+    
+    print(f"Added {len(all_new_features)} specialized features across all personas")
     
     y_train_arr = np.array(y_train)
-    dental_idx = np.where(le.classes_ == 'dental')[0][0]
     
     try:
-        dental_count = np.sum(y_train_arr == 'dental')
-        print(f"Original dental samples: {dental_count} ({dental_count/len(y_train_arr)*100:.2f}%)")
-        
+        # Balanced oversampling
         total_samples = len(y_train_arr)
-        target_dental = int(total_samples * 0.4)
-        samples_per_class = {}
+        samples_per_class = {
+            'dental': int(total_samples * 0.2),
+            'vision': int(total_samples * 0.15),
+            'doctor': int(total_samples * 0.15),
+            'dsnp': int(total_samples * 0.15),
+            'drug': int(total_samples * 0.15),
+            'csnp': int(total_samples * 0.15)
+        }
         
-        for cls in le.classes_:
-            if cls == 'dental':
-                samples_per_class[cls] = target_dental
-            else:
-                cls_count = np.sum(y_train_arr == cls)
-                samples_per_class[cls] = int(cls_count * 0.6 / 0.4)
-        
-        print("Applying extreme oversampling for dental class...")
+        print("Applying balanced oversampling...")
         smote = SMOTE(sampling_strategy=samples_per_class, random_state=42)
         X_resampled, y_resampled = smote.fit_resample(X_train_df, y_train_arr)
         
-        dental_count_new = np.sum(y_resampled == 'dental')
-        print(f"After oversampling: {dental_count_new} dental samples ({dental_count_new/len(y_resampled)*100:.2f}%)")
+        for persona in PERSONAS:
+            count = np.sum(y_resampled == persona)
+            print(f"After oversampling: {count} {persona} samples ({count/len(y_resampled)*100:.2f}%)")
         
     except Exception as e:
         print(f"Error in oversampling: {e}. Using original data.")
         X_resampled, y_resampled = X_train_df, y_train_arr
     
-    print("Training specialized model with dental focus...")
+    print("Training balanced model...")
     
-    class_weights = {}
-    for i, cls in enumerate(le.classes_):
-        if cls == 'dental':
-            class_weights[i] = 80.0
-        elif cls == 'doctor':
-            class_weights[i] = 50.0
-        else:
-            class_weights[i] = 1.0
+    class_weights = {i: ENHANCED_PERSONA_CLASS_WEIGHT[cls] for i, cls in enumerate(le.classes_)}
     
     model = CatBoostClassifier(
         iterations=1500,
@@ -832,11 +820,11 @@ def train_enhanced_dental_model(X_train, y_train, le):
     
     model.fit(X_resampled, y_resampled)
     
-    print("Enhanced dental-focused model trained successfully")
+    print("Enhanced balanced model trained successfully")
     return model, X_resampled.columns.tolist()
 
 def improved_evaluation_workflow():
-    """Improved evaluation workflow to maximize dental and doctor accuracy"""
+    """Improved evaluation workflow to maximize accuracy across all personas."""
     print("Starting improved evaluation workflow...")
     
     # 1. Load data
@@ -853,7 +841,7 @@ def improved_evaluation_workflow():
         print(f"Error loading model or encoder: {e}")
         return None
     
-    # 3. Prepare features with dental enhancements
+    # 3. Prepare features
     try:
         X, y = prepare_features(behavioral_df, plan_df, expected_features=base_model.feature_names_)
     except Exception as e:
@@ -869,17 +857,17 @@ def improved_evaluation_workflow():
         print(f"Error splitting data: {e}")
         return None
     
-    # 5. Train specialized dental model
+    # 5. Train balanced model
     try:
-        enhanced_model, enhanced_features = train_enhanced_dental_model(X_train, y_train, le)
+        enhanced_model, enhanced_features = train_enhanced_balanced_model(X_train, y_train, le)
     except Exception as e:
         print(f"Error training enhanced model: {e}")
         return None
     
-    # 6. Create binary classifiers for dental and doctor
+    # 6. Create binary classifiers for all personas
     binary_classifiers = {}
-    for persona in ['dental', 'doctor']:
-        print(f"Training specialized binary classifier for {persona}...")
+    for persona in PERSONAS:
+        print(f"Training binary classifier for {persona}...")
         y_binary = (y_train == persona).astype(int)
         
         pos_ratio = y_binary.mean()
@@ -898,13 +886,16 @@ def improved_evaluation_workflow():
         )
         
         try:
-            model.fit(X_train, y_binary)
-            binary_classifiers[persona] = model
-            print(f"Binary {persona} classifier trained successfully")
+            if y_binary.sum() > 5:  # Ensure minimum samples for training
+                model.fit(X_train, y_binary)
+                binary_classifiers[persona] = model
+                print(f"Binary {persona} classifier trained successfully")
+            else:
+                print(f"Skipping binary classifier for {persona} due to insufficient samples")
         except Exception as e:
             print(f"Error training binary classifier for {persona}: {e}")
     
-    # 7. Evaluate on test set with custom ensemble approach
+    # 7. Evaluate on test set
     print("\nEvaluating models on test set...")
     
     try:
@@ -937,9 +928,9 @@ def improved_evaluation_workflow():
     
     try:
         blended_probas = 0.3 * base_probas + 0.7 * enhanced_probas
-        y_pred_indices, final_probas = custom_ensemble_with_dental_focus(
-            blended_probas, binary_probas, le, 
-            weights=ENHANCED_PERSONA_CLASS_WEIGHT, 
+        y_pred_indices, final_probas = custom_ensemble_with_balanced_focus(
+            blended_probas, binary_probas, le,
+            weights=ENHANCED_PERSONA_CLASS_WEIGHT,
             thresholds=ENHANCED_PERSONA_THRESHOLD
         )
         y_pred = le.classes_[y_pred_indices]
@@ -958,25 +949,26 @@ def improved_evaluation_workflow():
             persona_acc = accuracy_score(y_test[mask], y_pred[mask])
             print(f"{persona}: {persona_acc * 100:.2f}% ({mask.sum()} samples)")
     
-    # 9. Detailed analysis of dental predictions
-    dental_mask = (y_test == 'dental')
-    if dental_mask.sum() > 0:
-        y_pred_dental = y_pred[dental_mask]
-        dental_correct = (y_pred_dental == 'dental').sum()
-        print(f"\nDetailed Dental Analysis:")
-        print(f"Total dental samples in test set: {dental_mask.sum()}")
-        print(f"Correctly predicted dental samples: {dental_correct} ({dental_correct/dental_mask.sum()*100:.2f}%)")
-        if dental_mask.sum() - dental_correct > 0:
-            print("Misclassified dental samples:")
-            misclassified = pd.DataFrame({
-                'True': ['dental'] * (dental_mask.sum() - dental_correct), 
-                'Predicted': y_pred_dental[y_pred_dental != 'dental']
-            })
-            print(misclassified['Predicted'].value_counts())
+    # 9. Detailed analysis for all personas
+    for persona in PERSONAS:
+        mask = (y_test == persona)
+        if mask.sum() > 0:
+            y_pred_persona = y_pred[mask]
+            correct = (y_pred_persona == persona).sum()
+            print(f"\nDetailed {persona.capitalize()} Analysis:")
+            print(f"Total {persona} samples in test set: {mask.sum()}")
+            print(f"Correctly predicted {persona} samples: {correct} ({correct/mask.sum()*100:.2f}%)")
+            if mask.sum() - correct > 0:
+                print(f"Misclassified {persona} samples:")
+                misclassified = pd.DataFrame({
+                    'True': [persona] * (mask.sum() - correct),
+                    'Predicted': y_pred_persona[y_pred_persona != persona]
+                })
+                print(misclassified['Predicted'].value_counts())
     
     # 10. Save the improved model
     try:
-        improved_model_path = MODEL_FILE.replace('.pkl', '_improved_dental.pkl')
+        improved_model_path = MODEL_FILE.replace('.pkl', '_improved_balanced.pkl')
         with open(improved_model_path, 'wb') as f:
             pickle.dump(enhanced_model, f)
         print(f"\nImproved model saved to: {improved_model_path}")
@@ -995,32 +987,25 @@ def improved_evaluation_workflow():
     
     return {
         'overall_accuracy': overall_acc * 100,
-        'dental_accuracy': accuracy_score(y_test[y_test == 'dental'], y_pred[y_test == 'dental']) * 100 if dental_mask.sum() > 0 else 0,
-        'doctor_accuracy': accuracy_score(y_test[y_test == 'doctor'], y_pred[y_test == 'doctor']) * 100 if (y_test == 'doctor').sum() > 0 else 0
+        'per_persona_accuracy': {persona: accuracy_score(y_test[y_test == persona], y_pred[y_test == persona]) * 100 
+                                if (y_test == persona).sum() > 0 else 0 for persona in PERSONAS}
     }
 
-# --- Visualization Section ---
 def create_visualizations(behavioral_df, plan_df, main_model, le, transformer):
     """Create visualizations for model performance: confusion matrix and per-persona accuracy."""
     try:
-        # Prepare features using the existing prepare_features function
         X_full, y_full = prepare_features(behavioral_df, plan_df, expected_features=main_model.feature_names_)
         
-        # Split data
         X_train, X_test, y_train, y_test = train_test_split(
             X_full, y_full, test_size=0.2, random_state=42, stratify=y_full)
         
-        # Transform test data
         X_test_transformed = transformer.transform(X_test)
-        
-        # Get predictions using the main model
         base_probas = main_model.predict_proba(X_test_transformed)
         
-        # Load binary classifiers if available
         binary_classifiers = {}
         binary_probas = {}
-        for persona in ['dental', 'doctor']:
-            binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary.pkl')
+        for persona in PERSONAS:
+            binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary_improved.pkl')
             if os.path.exists(binary_model_path):
                 with open(binary_model_path, 'rb') as f:
                     binary_classifiers[persona] = pickle.load(f)
@@ -1028,15 +1013,13 @@ def create_visualizations(behavioral_df, plan_df, main_model, le, transformer):
             else:
                 binary_probas[persona] = np.zeros(len(X_test))
         
-        # Apply custom ensemble
-        y_pred_indices, _ = custom_ensemble_with_dental_focus(
+        y_pred_indices, _ = custom_ensemble_with_balanced_focus(
             base_probas, binary_probas, le,
             weights=ENHANCED_PERSONA_CLASS_WEIGHT,
             thresholds=ENHANCED_PERSONA_THRESHOLD
         )
         y_pred = le.classes_[y_pred_indices]
         
-        # 1. Create a confusion matrix heatmap
         plt.figure(figsize=(12, 9))
         cm = confusion_matrix(y_test, y_pred, labels=PERSONAS)
         cm_normalized = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-8)
@@ -1049,7 +1032,6 @@ def create_visualizations(behavioral_df, plan_df, main_model, le, transformer):
         plt.tight_layout()
         plt.show()
         
-        # 2. Create bar chart of accuracy by persona
         plt.figure(figsize=(10, 6))
         persona_acc = {}
         for persona in PERSONAS:
@@ -1108,22 +1090,6 @@ if __name__ == "__main__":
         logger.error("Model does not provide feature_names_. Please specify expected features manually.")
         sys.exit(1)
     
-    binary_classifiers = {}
-    for persona in PERSONAS:
-        binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary.pkl')
-        try:
-            if not os.path.exists(binary_model_path):
-                logger.warning(f"Binary classifier for {persona} not found at {binary_model_path}. Skipping this persona.")
-                continue
-            with open(binary_model_path, 'rb') as f:
-                binary_classifiers[persona] = pickle.load(f)
-        except Exception as e:
-            logger.warning(f"Failed to load binary classifier for {persona}: {str(e)}. Skipping.")
-            continue
-    
-    if not binary_classifiers:
-        logger.warning("No binary classifiers loaded. Proceeding without them.")
-    
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
         X_data, y_data = prepare_features(behavioral_df, plan_df, expected_features)
@@ -1138,42 +1104,62 @@ if __name__ == "__main__":
     
     logger.info("Starting grid search...")
     total_combinations = (len(EXTENDED_SEARCH_SPACE['dental_weight']) * len(EXTENDED_SEARCH_SPACE['doctor_weight']) *
-                         len(EXTENDED_SEARCH_SPACE['dental_threshold']) * len(EXTENDED_SEARCH_SPACE['doctor_threshold']))
+                         len(EXTENDED_SEARCH_SPACE['drug_weight']) * len(EXTENDED_SEARCH_SPACE['dsnp_weight']) *
+                         len(EXTENDED_SEARCH_SPACE['vision_weight']) * len(EXTENDED_SEARCH_SPACE['csnp_weight']) *
+                         len(EXTENDED_SEARCH_SPACE['dental_threshold']) * len(EXTENDED_SEARCH_SPACE['doctor_threshold']) *
+                         len(EXTENDED_SEARCH_SPACE['drug_threshold']) * len(EXTENDED_SEARCH_SPACE['dsnp_threshold']) *
+                         len(EXTENDED_SEARCH_SPACE['vision_threshold']) * len(EXTENDED_SEARCH_SPACE['csnp_threshold']))
     logger.info(f"Total combinations to test: {total_combinations}")
     tested_combinations = 0
     
     for dw in EXTENDED_SEARCH_SPACE['dental_weight']:
         for dow in EXTENDED_SEARCH_SPACE['doctor_weight']:
-            for dt in EXTENDED_SEARCH_SPACE['dental_threshold']:
-                for dot in EXTENDED_SEARCH_SPACE['doctor_threshold']:
-                    tested_combinations += 1
-                    current_weights = BASE_PERSONA_CLASS_WEIGHT.copy()
-                    current_thresholds = BASE_PERSONA_THRESHOLD.copy()
-                    
-                    current_weights['dental'] = dw
-                    current_weights['doctor'] = dow
-                    current_thresholds['dental'] = dt
-                    current_thresholds['doctor'] = dot
-                    
-                    logger.info(f"Testing combination {tested_combinations}/{total_combinations}: Weights={current_weights}, Thresholds={current_thresholds}")
-                    
-                    overall_acc, dental_acc, doctor_acc, macro_f1, y_pred = evaluate_model_with_params(
-                        current_weights, current_thresholds, main_model, binary_classifiers,
-                        le, transformer, X_data, y_data_encoded, X_data_cols
-                    )
-                    
-                    logger.info(f"Results: Overall Acc={overall_acc*100:.2f}%, Dental Acc={dental_acc:.2f}%, Doctor Acc={doctor_acc:.2f}%, Macro F1={macro_f1:.2f}")
-                    
-                    current_metrics = {
-                        'dental_accuracy': dental_acc,
-                        'doctor_accuracy': doctor_acc,
-                        'overall_accuracy': overall_acc * 100
-                    }
-                    
-                    if is_better_combination(current_metrics, best_metrics, OPTIMIZATION_OBJECTIVE, weights=OPTIMIZATION_WEIGHTS):
-                        logger.info("Found a better combination!")
-                        best_metrics.update(current_metrics)
-                        best_params = {'weights': current_weights, 'thresholds': current_thresholds}
+            for drw in EXTENDED_SEARCH_SPACE['drug_weight']:
+                for dsw in EXTENDED_SEARCH_SPACE['dsnp_weight']:
+                    for vw in EXTENDED_SEARCH_SPACE['vision_weight']:
+                        for cw in EXTENDED_SEARCH_SPACE['csnp_weight']:
+                            for dt in EXTENDED_SEARCH_SPACE['dental_threshold']:
+                                for dot in EXTENDED_SEARCH_SPACE['doctor_threshold']:
+                                    for drt in EXTENDED_SEARCH_SPACE['drug_threshold']:
+                                        for dst in EXTENDED_SEARCH_SPACE['dsnp_threshold']:
+                                            for vt in EXTENDED_SEARCH_SPACE['vision_threshold']:
+                                                for ct in EXTENDED_SEARCH_SPACE['csnp_threshold']:
+                                                    tested_combinations += 1
+                                                    current_weights = {
+                                                        'dental': dw, 'doctor': dow, 'drug': drw,
+                                                        'dsnp': dsw, 'vision': vw, 'csnp': cw
+                                                    }
+                                                    current_thresholds = {
+                                                        'dental': dt, 'doctor': dot, 'drug': drt,
+                                                        'dsnp': dst, 'vision': vt, 'csnp': ct
+                                                    }
+                                                    
+                                                    logger.info(f"Testing combination {tested_combinations}/{total_combinations}: Weights={current_weights}, Thresholds={current_thresholds}")
+                                                    
+                                                    binary_classifiers = {}
+                                                    for persona in PERSONAS:
+                                                        binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary_improved.pkl')
+                                                        if os.path.exists(binary_model_path):
+                                                            with open(binary_model_path, 'rb') as f:
+                                                                binary_classifiers[persona] = pickle.load(f)
+                                                    
+                                                    overall_acc, dental_acc, doctor_acc, macro_f1, y_pred = evaluate_model_with_params(
+                                                        current_weights, current_thresholds, main_model, binary_classifiers,
+                                                        le, transformer, X_data, y_data_encoded, X_data_cols
+                                                    )
+                                                    
+                                                    logger.info(f"Results: Overall Acc={overall_acc*100:.2f}%, Dental Acc={dental_acc:.2f}%, Doctor Acc={doctor_acc:.2f}%, Macro F1={macro_f1:.2f}")
+                                                    
+                                                    current_metrics = {
+                                                        'dental_accuracy': dental_acc,
+                                                        'doctor_accuracy': doctor_acc,
+                                                        'overall_accuracy': overall_acc * 100
+                                                    }
+                                                    
+                                                    if is_better_combination(current_metrics, best_metrics, OPTIMIZATION_OBJECTIVE, weights=OPTIMIZATION_WEIGHTS):
+                                                        logger.info("Found a better combination!")
+                                                        best_metrics.update(current_metrics)
+                                                        best_params = {'weights': current_weights, 'thresholds': current_thresholds}
     
     logger.info("\n--- Tuning Complete ---")
     if best_params:
@@ -1185,15 +1171,21 @@ if __name__ == "__main__":
             logger.info(f"  {obj}: {value:.2f}%" if '_accuracy' in obj else f"  {obj}: {value:.2f}")
     else:
         logger.warning("No better combination found than the starting parameters.")
+        binary_classifiers = {}
+        for persona in PERSONAS:
+            binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary_improved.pkl')
+            if os.path.exists(binary_model_path):
+                with open(binary_model_path, 'rb') as f:
+                    binary_classifiers[persona] = pickle.load(f)
         overall_acc, dental_acc, doctor_acc, macro_f1, _ = evaluate_model_with_params(
-            BASE_PERSONA_CLASS_WEIGHT, BASE_PERSONA_THRESHOLD, main_model, binary_classifiers,
+            ENHANCED_PERSONA_CLASS_WEIGHT, ENHANCED_PERSONA_THRESHOLD, main_model, binary_classifiers,
             le, transformer, X_data, y_data_encoded, X_data_cols
         )
         logger.info(f"Starting metrics: Overall Acc={overall_acc*100:.2f}%, Dental Acc={dental_acc:.2f}%, Doctor Acc={doctor_acc:.2f}%, Macro F1={macro_f1:.2f}")
 
     # Run the improved evaluation workflow
     print("\n==============================================")
-    print("Starting dental accuracy improvement workflow")
+    print("Starting balanced accuracy improvement workflow")
     print("==============================================\n")
     
     results = improved_evaluation_workflow()
@@ -1201,8 +1193,8 @@ if __name__ == "__main__":
     print("\n============ FINAL RESULTS ============")
     if results:
         print(f"Overall Accuracy: {results['overall_accuracy']:.2f}%")
-        print(f"Dental Accuracy: {results['dental_accuracy']:.2f}%")
-        print(f"Doctor Accuracy: {results['doctor_accuracy']:.2f}%")
+        for persona, acc in results['per_persona_accuracy'].items():
+            print(f"{persona.capitalize()} Accuracy: {acc:.2f}%")
     print("=========================================")
     
     # Run visualizations
@@ -1211,11 +1203,12 @@ if __name__ == "__main__":
 
 # --- Model Performance Improvement Strategy ---
 """
-The current model performance shows poor results, especially for dental accuracy (0.00%). The improved approach includes:
-1. Extreme Class Weighting: Applied 80x weight to dental class (up from 15.5x)
-2. Specialized Dental Features: Created 10+ new dental-specific features
-3. Massively Lowered Threshold: Reduced dental prediction threshold to 0.01 (from 0.08)
-4. Heavy Oversampling: Increased dental class representation to 40% of training data
-5. Custom Ensemble Method: Developed dental-prioritized prediction logic
-These techniques address the extreme class imbalance and feature sparsity causing the 0% dental accuracy.
+This model addresses the issue where dental accuracy was 100% but doctor, dsnp, drug, vision, and csnp had 0% accuracy due to class imbalance and dental bias. Key improvements:
+1. Balanced Class Weights: Reduced dental weight (30.0) and increased others (e.g., vision: 15.0).
+2. Lowered Thresholds: Adjusted thresholds (e.g., doctor: 0.03, drug: 0.15) to boost non-dental predictions.
+3. Specialized Features: Added 8 features per persona (e.g., doctor_super_signal) to enhance representation.
+4. Balanced Oversampling: Set dental to 20%, others to 15% of training data.
+5. Binary Classifiers: Trained for all personas to improve class-specific predictions.
+6. Balanced Ensemble: Uses uniform blend weights (0.4) in custom_ensemble_with_balanced_focus.
+These changes aim to improve accuracy for doctor, dsnp, drug, vision, and csnp while maintaining high dental accuracy.
 """

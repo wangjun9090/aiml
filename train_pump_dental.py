@@ -9,7 +9,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.cluster import KMeans
 from gensim.models import Word2Vec
-from catboost import CatBoostClassifier, Pool
+from catboost import CatBoostClassifier
 from imblearn.over_sampling import SMOTE
 import logging
 import sys
@@ -39,25 +39,25 @@ TRANSFORMER_FILE = (
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'csnp']
 
 PERSONA_OVERSAMPLING_RATIO = {
-    'drug': 5.0,
-    'dental': 15.0,  # Increased for better balance
-    'doctor': 6.0,
+    'drug': 4.5,  # Decreased
+    'dental': 20.0,  # Increased
+    'doctor': 7.0,  # Increased
     'dsnp': 4.5,
-    'csnp': 6.0
+    'csnp': 5.5  # Decreased
 }
 
 PERSONA_CLASS_WEIGHT = {
-    'drug': 6.0,
-    'dental': 20.0,  # Increased to prioritize dental
-    'doctor': 12.0,  # Increased to prioritize doctor
+    'drug': 5.0,  # Decreased
+    'dental': 25.0,  # Increased
+    'doctor': 15.0,  # Increased
     'dsnp': 5.5,
-    'csnp': 8.0
+    'csnp': 7.0  # Decreased
 }
 
 PERSONA_THRESHOLD = {
     'drug': 0.25,
-    'dental': 0.10,  # Lowered for sensitivity
-    'doctor': 0.15,  # Lowered for sensitivity
+    'dental': 0.08,  # Lowered
+    'doctor': 0.12,  # Lowered
     'dsnp': 0.23,
     'csnp': 0.20
 }
@@ -187,9 +187,9 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
     specific_features = PERSONA_FEATURES.get(persona, [])
     
     if persona == 'dental':
-        num_samples = 8000  # Increased for dental
+        num_samples = 10000  # Increased
     elif persona in ['csnp', 'doctor']:
-        num_samples = 5000
+        num_samples = 6000  # Increased for doctor
     else:
         num_samples = 3000
     
@@ -208,19 +208,19 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
         for feature in persona_features:
             if real_data_stats and feature in real_data_stats:
                 mean, std = real_data_stats[feature]['mean'], real_data_stats[feature]['std']
-                sample[feature] = np.random.normal(mean, std * 0.8)  # Tighten distribution
+                sample[feature] = np.random.normal(mean, std * 0.7)  # Tighter distribution
                 sample[feature] = max(0, sample[feature])
             else:
-                sample[feature] = np.random.uniform(8.0, 15.0) if persona in HIGH_PRIORITY_PERSONAS else np.random.uniform(4.0, 8.0)
+                sample[feature] = np.random.uniform(10.0, 18.0) if persona in HIGH_PRIORITY_PERSONAS else np.random.uniform(4.0, 8.0)
             
         for feature in specific_features:
             if feature in feature_columns:
                 if real_data_stats and feature in real_data_stats:
                     mean, std = real_data_stats[feature]['mean'], real_data_stats[feature]['std']
-                    sample[feature] = np.random.normal(mean, std * 0.8)  # Tighten distribution
+                    sample[feature] = np.random.normal(mean, std * 0.7)  # Tighter distribution
                     sample[feature] = max(0, sample[feature])
                 else:
-                    sample[feature] = np.random.uniform(8.0, 15.0) if persona in HIGH_PRIORITY_PERSONAS else np.random.uniform(5.0, 10.0)
+                    sample[feature] = np.random.uniform(10.0, 18.0) if persona in HIGH_PRIORITY_PERSONAS else np.random.uniform(5.0, 10.0)
         
         plan_col = PERSONA_INFO.get(persona, {}).get('plan_col')
         if plan_col and plan_col in feature_columns:
@@ -230,7 +230,7 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
             if other_persona != persona:
                 other_features = [col for col in feature_columns if other_persona in col.lower()]
                 for feature in other_features:
-                    sample[feature] = np.random.uniform(0.0, 0.1) if persona in HIGH_PRIORITY_PERSONAS else np.random.uniform(0.0, 0.3)
+                    sample[feature] = np.random.uniform(0.0, 0.05) if persona in HIGH_PRIORITY_PERSONAS else np.random.uniform(0.0, 0.2)
                     
         synthetic_examples.append(sample)
     
@@ -282,10 +282,10 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             query_col = PERSONA_INFO[persona]['query_col']
             time_col = PERSONA_INFO[persona].get('time_col', None)
             if query_col in training_df.columns and time_col in training_df.columns:
-                strong_signal = (training_df[query_col] > training_df[query_col].quantile(0.85)) | \
-                               (training_df[time_col] > training_df[time_col].quantile(0.85))
-                training_df.loc[strong_signal, query_col] *= 2.0
-                training_df.loc[strong_signal, time_col] *= 2.0
+                strong_signal = (training_df[query_col] > training_df[query_col].quantile(0.90)) | \
+                               (training_df[time_col] > training_df[time_col].quantile(0.90))  # Higher quantile
+                training_df.loc[strong_signal, query_col] *= 2.5  # Increased
+                training_df.loc[strong_signal, time_col] *= 2.5  # Increased
         
         if 'start_time' in training_df.columns:
             try:
@@ -346,31 +346,31 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             accordion_col = get_feature_as_series(training_df, persona_info.get('accordion_col', 'dummy_col'))
             plan_col = get_feature_as_series(training_df, persona_info.get('plan_col'))
             
-            signal_weights = 4.0 if persona in HIGH_PRIORITY_PERSONAS else 3.5
+            signal_weights = 5.0 if persona in HIGH_PRIORITY_PERSONAS else 3.5  # Increased for high-priority
             training_df[f'{persona}_signal'] = (
-                query_col * 2.5 +
-                filter_col * 2.5 +
-                time_col.clip(upper=5) * 2.0 +
-                accordion_col * 1.5 +
-                click_col * 2.5
+                query_col * 3.0 +  # Increased
+                filter_col * 3.0 +  # Increased
+                time_col.clip(upper=5) * 2.5 +  # Increased
+                accordion_col * 2.0 +  # Increased
+                click_col * 3.0  # Increased
             ) * signal_weights
             additional_features.append(f'{persona}_signal')
             
             has_interaction = ((query_col > 0) | (filter_col > 0) | (click_col > 0) | (accordion_col > 0))
-            training_df[f'{persona}_interaction'] = safe_bool_to_int(has_interaction, training_df) * 4.0
+            training_df[f'{persona}_interaction'] = safe_bool_to_int(has_interaction, training_df) * 5.0  # Increased
             additional_features.append(f'{persona}_interaction')
             
             training_df[f'{persona}_primary'] = (
-                safe_bool_to_int(query_col > 0, training_df) * 3.0 +
-                safe_bool_to_int(filter_col > 0, training_df) * 3.0 +
-                safe_bool_to_int(click_col > 0, training_df) * 3.0 +
-                safe_bool_to_int(time_col > 2, training_df) * 2.0
-            ) * 3.0
+                safe_bool_to_int(query_col > 0, training_df) * 4.0 +  # Increased
+                safe_bool_to_int(filter_col > 0, training_df) * 4.0 +  # Increased
+                safe_bool_to_int(click_col > 0, training_df) * 4.0 +  # Increased
+                safe_bool_to_int(time_col > 2, training_df) * 2.5  # Increased
+            ) * 4.0  # Increased
             additional_features.append(f'{persona}_primary')
             
             training_df[f'{persona}_plan_correlation'] = plan_col * (
                 query_col + filter_col + click_col + time_col.clip(upper=3)
-            ) * 3.0
+            ) * 4.0  # Increased
             additional_features.append(f'{persona}_plan_correlation')
         
         dental_query = get_feature_as_series(training_df, 'query_dental')
@@ -380,31 +380,31 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         dental_benefit = get_feature_as_series(training_df, 'ma_dental_benefit')
         
         training_df['dental_engagement_score'] = (
-            dental_query * 7.0 +  # Increased
-            dental_filter * 7.0 +  # Increased
-            dental_time.clip(upper=5) * 5.0 +  # Increased
-            dental_accordion * 4.0 +  # Increased
-            dental_benefit * 8.0  # Increased
-        ) * 6.0  # Increased
+            dental_query * 8.0 +  # Increased
+            dental_filter * 8.0 +  # Increased
+            dental_time.clip(upper=5) * 6.0 +  # Increased
+            dental_accordion * 5.0 +  # Increased
+            dental_benefit * 10.0  # Increased
+        ) * 7.0  # Increased
         additional_features.append('dental_engagement_score')
         
         training_df['dental_benefit_multiplier'] = (
             (dental_query + dental_filter + dental_accordion) * 
-            (dental_benefit + 0.5) * 7.0
-        ).clip(lower=0, upper=30)
+            (dental_benefit + 0.5) * 8.0  # Increased
+        ).clip(lower=0, upper=35)
         additional_features.append('dental_benefit_multiplier')
         
         training_df['dental_specificity'] = (
-            dental_query * 5.0 - 
-            (training_df.get('query_drug', 0) + training_df.get('query_dsnp', 0)) * 1.0
-        ).clip(lower=0) * 5.0
+            dental_query * 6.0 -  # Increased
+            (training_df.get('query_drug', 0) + training_df.get('query_dsnp', 0) + training_df.get('query_csnp', 0)) * 1.5  # Increased penalty
+        ).clip(lower=0) * 6.0  # Increased
         additional_features.append('dental_specificity')
         
         training_df['dental_combined_signal'] = (
             (dental_query > 0).astype(int) + 
             (dental_filter > 0).astype(int) + 
             (dental_accordion > 0).astype(int)
-        ) * 5.0
+        ) * 6.0  # Increased
         additional_features.append('dental_combined_signal')
         
         provider_query = get_feature_as_series(training_df, 'query_provider')
@@ -413,30 +413,37 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         provider_network = get_feature_as_series(training_df, 'ma_provider_network')
         
         training_df['doctor_interaction_score'] = (
-            provider_query * 5.0 +
-            provider_filter * 5.0 +
-            provider_click * 10.0 +  # Increased
-            provider_network * 6.0
-        ) * 5.0
+            provider_query * 6.0 +  # Increased
+            provider_filter * 6.0 +  # Increased
+            provider_click * 12.0 +  # Increased significantly
+            provider_network * 8.0  # Increased
+        ) * 6.0  # Increased
         additional_features.append('doctor_interaction_score')
         
         training_df['doctor_specificity'] = (
-            provider_query * 5.0 - 
-            (training_df.get('query_dental', 0) + training_df.get('query_drug', 0)) * 1.0
-        ).clip(lower=0) * 5.0
+            provider_query * 6.0 -  # Increased
+            (training_df.get('query_dental', 0) + training_df.get('query_drug', 0) + training_df.get('query_dsnp', 0)) * 1.5  # Increased penalty
+        ).clip(lower=0) * 6.0  # Increased
         additional_features.append('doctor_specificity')
         
         training_df['doctor_query_specificity'] = (
-            training_df['query_provider'] / 
+            provider_query / 
             (training_df[['query_dental', 'query_drug', 'query_dsnp', 'query_csnp']].sum(axis=1) + 1e-6)
-        ).clip(upper=1.0) * 5.0
+        ).clip(upper=1.0) * 6.0  # Increased
         additional_features.append('doctor_query_specificity')
         
         training_df['doctor_network_boost'] = (
             (provider_query + provider_filter + provider_click) *
-            (provider_network + 0.5) * 8.0
-        ).clip(lower=0, upper=35)
+            (provider_network + 0.5) * 10.0  # Increased
+        ).clip(lower=0, upper=40)
         additional_features.append('doctor_network_boost')
+        
+        training_df['doctor_exclusive_signal'] = (
+            (provider_click > 0).astype(int) * 8.0 +  # New feature emphasizing clicks
+            (provider_network > 0).astype(int) * 8.0 - 
+            (training_df.get('query_dental', 0) + training_df.get('query_drug', 0) + training_df.get('query_dsnp', 0) + training_df.get('query_csnp', 0)) * 1.5
+        ).clip(lower=0) * 6.0
+        additional_features.append('doctor_exclusive_signal')
         
         dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
         dsnp_filter = get_feature_as_series(training_df, 'filter_dsnp')
@@ -586,11 +593,11 @@ def train_binary_persona_classifier(X_train, y_train, X_val, y_val, persona):
     class_weight = PERSONA_CLASS_WEIGHT.get(persona, 3.0)
     
     if persona in ['dental', 'csnp', 'doctor']:
-        iterations = 2000  # Increased
-        depth = 12  # Increased
-        learning_rate = 0.008  # Decreased
-        l2_leaf_reg = 0.8  # Decreased
-        early_stopping = 200  # Increased
+        iterations = 2500  # Increased
+        depth = 14  # Increased
+        learning_rate = 0.006  # Decreased
+        l2_leaf_reg = 0.7  # Decreased
+        early_stopping = 250  # Increased
     else:
         iterations = 1000
         depth = 8
@@ -612,7 +619,7 @@ def train_binary_persona_classifier(X_train, y_train, X_val, y_val, persona):
     )
     
     sample_weights = np.ones(len(y_train_binary))
-    sample_weights[y_train_binary == 1] = 3.5 if persona in HIGH_PRIORITY_PERSONAS else 1.5  # Increased
+    sample_weights[y_train_binary == 1] = 4.0 if persona in HIGH_PRIORITY_PERSONAS else 1.5  # Increased
     model.fit(
         X_train, y_train_binary,
         eval_set=(X_val, y_val_binary),
@@ -644,11 +651,11 @@ def compute_per_persona_accuracy(y_true, y_pred, classes, class_names):
 def custom_ensemble_with_balanced_focus(predictions, binary_probas, le, weights=None, thresholds=None):
     if weights is None:
         weights = {
-            'drug': 1.0,
-            'dental': 2.0,  # Increased
-            'doctor': 1.5,  # Increased
+            'drug': 0.8,  # Decreased
+            'dental': 2.5,  # Increased
+            'doctor': 2.0,  # Increased
             'dsnp': 1.0,
-            'csnp': 1.0
+            'csnp': 0.9  # Decreased
         }
     if thresholds is None:
         thresholds = PERSONA_THRESHOLD
@@ -662,7 +669,7 @@ def custom_ensemble_with_balanced_focus(predictions, binary_probas, le, weights=
         for persona, proba in binary_probas.items():
             if persona in le.classes_:
                 persona_idx = np.where(le.classes_ == persona)[0][0]
-                blend_ratio = 0.8 if persona in HIGH_PRIORITY_PERSONAS else 0.4  # Increased
+                blend_ratio = 0.9 if persona in HIGH_PRIORITY_PERSONAS else 0.4  # Increased
                 weighted_preds[:, persona_idx] = blend_ratio * proba + \
                                                 (1 - blend_ratio) * weighted_preds[:, persona_idx]
     
@@ -723,12 +730,15 @@ def create_visualizations(X_test, y_test, y_pred, le):
         plt.tight_layout()
         plt.show()
         
-        # Add feature correlation visualization for doctor and drug
-        corr_matrix = X_test[['query_provider', 'filter_provider', 'click_provider', 'ma_provider_network', 
-                              'query_drug', 'filter_drug', 'click_drug', 'ma_drug_benefit']].corr()
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm')
-        plt.title('Feature Correlation for Doctor and Drug')
+        # Enhanced correlation visualization for doctor
+        corr_features = ['query_provider', 'filter_provider', 'click_provider', 'ma_provider_network', 
+                        'query_dental', 'query_drug', 'query_dsnp', 'query_csnp', 
+                        'doctor_interaction_score', 'doctor_specificity', 'doctor_query_specificity', 
+                        'doctor_exclusive_signal']
+        corr_matrix = X_test[[col for col in corr_features if col in X_test.columns]].corr()
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f')
+        plt.title('Feature Correlation for Doctor and Other Personas')
         plt.tight_layout()
         plt.show()
         
@@ -788,10 +798,10 @@ def main():
         y_fold_val = y_train_encoded[val_idx]
         
         model = CatBoostClassifier(
-            iterations=1500,  # Increased
-            depth=8,
-            learning_rate=0.015,  # Decreased
-            l2_leaf_reg=1.5,
+            iterations=2000,  # Increased
+            depth=10,  # Increased
+            learning_rate=0.01,  # Decreased
+            l2_leaf_reg=1.2,  # Decreased
             loss_function='MultiClass',
             class_weights=class_weights,
             random_state=42+fold,
@@ -802,7 +812,7 @@ def main():
         model.fit(
             X_fold_train, y_fold_train,
             eval_set=(X_fold_val, y_fold_val),
-            early_stopping_rounds=100
+            early_stopping_rounds=150  # Increased
         )
         models.append(model)
         logger.info(f"Fold {fold+1} training completed")
@@ -828,7 +838,7 @@ def main():
     for persona, acc in per_persona_acc.items():
         logger.info(f"{persona}: {acc:.2f}%")
     
-    # Log feature importance
+    # Log feature importance for main model
     feature_importance = models[0].get_feature_importance()
     importance_df = pd.DataFrame({
         'Feature': X_train.columns,

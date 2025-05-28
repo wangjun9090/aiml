@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.preprocessing import LabelEncoder, PowerTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from catboost import CatBoostClassifier
 from imblearn.over_sampling import SMOTE
-import random  # OPTIMIZED: For random search
+import random
 
 # --- Configuration ---
 BEHAVIORAL_FILE = (
@@ -95,18 +95,18 @@ ENHANCED_PERSONA_THRESHOLD = {
     'csnp': 0.15
 }
 
-# OPTIMIZED: Reduced search space and fixed dental parameters
+# Reduced search space and fixed dental parameters
 EXTENDED_SEARCH_SPACE = {
-    'doctor_weight': [15.0, 25.0, 35.0],  # 3 values
-    'drug_weight': [5.0, 10.0, 15.0],     # 3 values
-    'dsnp_weight': [5.0, 10.0, 15.0],     # 3 values
-    'vision_weight': [10.0, 15.0, 20.0],  # 3 values
-    'csnp_weight': [5.0, 10.0, 15.0],     # 3 values
-    'doctor_threshold': [0.02, 0.03, 0.04],  # 3 values
-    'drug_threshold': [0.10, 0.15, 0.20],    # 3 values
-    'dsnp_threshold': [0.10, 0.15, 0.20],    # 3 values
-    'vision_threshold': [0.10, 0.15, 0.20],  # 3 values
-    'csnp_threshold': [0.10, 0.15, 0.20]     # 3 values
+    'doctor_weight': [15.0, 25.0, 35.0],
+    'drug_weight': [5.0, 10.0, 15.0],
+    'dsnp_weight': [5.0, 10.0, 15.0],
+    'vision_weight': [10.0, 15.0, 20.0],
+    'csnp_weight': [5.0, 10.0, 15.0],
+    'doctor_threshold': [0.02, 0.03, 0.04],
+    'drug_threshold': [0.10, 0.15, 0.20],
+    'dsnp_threshold': [0.10, 0.15, 0.20],
+    'vision_threshold': [0.10, 0.15, 0.20],
+    'csnp_threshold': [0.10, 0.15, 0.20]
 }
 
 # Modified optimization weights
@@ -121,13 +121,13 @@ OPTIMIZATION_OBJECTIVE = ['dental_accuracy', 'doctor_accuracy', 'overall_accurac
 
 # --- Logging Setup ---
 logging.basicConfig(
-    level=logging.WARNING,  # OPTIMIZED: Reduced to WARNING to minimize I/O
+    level=logging.DEBUG,  # FIXED: Set to DEBUG to trace error
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)],
     force=True
 )
 logger = logging.getLogger()
-logger.setLevel(logging.WARNING)
+logger.setLevel(logging.DEBUG)
 
 # --- Helper Functions ---
 def safe_bool_to_int(boolean_value, df):
@@ -243,13 +243,14 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             plan_df.rename(columns={'StateCode': 'state'}),
             how='left', on=['zip', 'plan_id']
         ).reset_index(drop=True)
+        logger.debug(f"Rows after merge: {len(training_df)}")
         
         if 'persona' not in training_df.columns:
             raise ValueError("Persona column required in training_df")
         
         plan_features = ['ma_dental_benefit', 'ma_vision', 'dsnp', 'ma_drug_benefit', 'ma_provider_network', 'csnp']
         for col in plan_features:
-            training_df[col] = training_df.get(col, 0).fillna(0)
+            training_df[col] = training_df.get(col, pd.Series([0] * len(training_df), index=training_df.index)).fillna(0)
         
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
@@ -263,13 +264,15 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         imputer_zero = SimpleImputer(strategy='constant', fill_value=0)
         
         for col in behavioral_features:
+            logger.debug(f"Processing feature: {col}")
             if col in training_df.columns:
                 if col in sparse_features:
                     training_df[col] = imputer_zero.fit_transform(training_df[[col]]).flatten()
                 else:
                     training_df[col] = imputer_median.fit_transform(training_df[[col]]).flatten()
             else:
-                training_df[col] = 0
+                # FIXED: Use pandas Series instead of integer
+                training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
         
         for persona in ['dental', 'vision']:
             query_col = PERSONA_INFO[persona]['query_col']
@@ -285,34 +288,37 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
                 start_time = pd.to_datetime(training_df['start_time'], errors='coerce')
                 training_df['recency'] = (pd.to_datetime('2025-04-25') - start_time).dt.days.fillna(30)
                 training_df['time_of_day'] = start_time.dt.hour.fillna(12) // 6
-                training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30 if 'userid' in training_df.columns else 1
+                training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30 if 'userid' in training_df.columns else pd.Series([1] * len(training_df), index=training_df.index)
             except:
-                training_df['recency'] = 30
-                training_df['time_of_day'] = 2
-                training_df['visit_frequency'] = 1
+                # FIXED: Use Series
+                training_df['recency'] = pd.Series([30] * len(training_df), index=training_df.index)
+                training_df['time_of_day'] = pd.Series([2] * len(training_df), index=training_df.index)
+                training_df['visit_frequency'] = pd.Series([1] * len(training_df), index=training_df.index)
         else:
-            training_df['recency'] = 30
-            training_df['visit_frequency'] = 1
-            training_df['time_of_day'] = 2
+            # FIXED: Use Series
+            training_df['recency'] = pd.Series([30] * len(training_df), index=training_df.index)
+            training_df['visit_frequency'] = pd.Series([1] * len(training_df), index=training_df.index)
+            training_df['time_of_day'] = pd.Series([2] * len(training_df), index=training_df.index)
         
         cluster_features = ['num_pages_viewed', 'total_session_time', 'num_clicks']
         if all(col in training_df.columns for col in cluster_features):
             kmeans = KMeans(n_clusters=5, random_state=42)
             training_df['user_cluster'] = kmeans.fit_predict(training_df[cluster_features].fillna(0))
         else:
-            training_df['user_cluster'] = 0
+            training_df['user_cluster'] = pd.Series([0] * len(training_df), index=training_df.index)
         
         training_df['dental_time_ratio'] = training_df.get('time_dental_pages', 0) / (training_df.get('total_session_time', 1) + 1e-5)
         training_df['click_ratio'] = training_df.get('num_clicks', 0) / (training_df.get('num_pages_viewed', 1) + 1e-5)
         
-        # OPTIMIZED: Skip Word2Vec embeddings to save time
         embedding_cols = [f'plan_emb_{i}' for i in range(10)]
-        training_df[embedding_cols] = 0
+        for col in embedding_cols:
+            training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
         
         query_cols = [c for c in behavioral_features if c.startswith('query_') and c in training_df.columns]
         filter_cols = [c for c in behavioral_features if c.startswith('filter_') and c in training_df.columns]
-        training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else 0
-        training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else 0
+        # FIXED: Use Series for default case
+        training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series([0] * len(training_df), index=training_df.index)
+        training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else pd.Series([0] * len(training_df), index=training_df.index)
         
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
@@ -327,7 +333,6 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             filter_col = get_feature_as_series(training_df, persona_info.get('filter_col'))
             click_col = get_feature_as_series(training_df, persona_info.get('click_col', 'dummy_col'))
             time_col = get_feature_as_series(training_df, persona_info.get('time_col', 'dummy_col'))
-            plan_col = get_feature_as_series(training_df, persona_info.get('plan_col'))
             
             signal_weights = 3.5 if persona == 'drug' else 3.0
             training_df[f'{persona}_signal'] = (
@@ -353,13 +358,13 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             if extra_features:
                 X = X[expected_features]
         
+        logger.debug(f"Generated feature columns: {list(X.columns)}")
         return X, y
     except Exception as e:
         logger.error(f"Failed to prepare features: {str(e)}")
         raise
 
 def create_specialized_persona_features(df, persona):
-    """Create specialized features for a given persona."""
     print(f"Creating specialized features for {persona}...")
     
     persona_info = PERSONA_INFO.get(persona, {})
@@ -373,7 +378,6 @@ def create_specialized_persona_features(df, persona):
     time = get_feature_as_series(df, time_col)
     plan = get_feature_as_series(df, plan_col)
     
-    # OPTIMIZED: Reduced to 4 features
     df[f'{persona}_super_signal'] = (
         np.log1p(query * 10) * 5.0 +
         np.log1p(filter_val * 10) * 5.0 +
@@ -519,7 +523,6 @@ def train_enhanced_balanced_model(X_train, y_train, le):
     y_train_arr = np.array(y_train)
     
     try:
-        # OPTIMIZED: Reduced oversampling targets
         total_samples = len(y_train_arr)
         samples_per_class = {
             'dental': int(total_samples * 0.15),
@@ -532,11 +535,9 @@ def train_enhanced_balanced_model(X_train, y_train, le):
         
         print("Applying balanced oversampling...")
         smote = SMOTE(sampling_strategy=samples_per_class, random_state=42)
-        # OPTIMIZED: Use subset of features for SMOTE
         smote_features = [f for f in X_train_df.columns if f in PERSONA_FEATURES.get(f.split('_')[0], []) or 'signal' in f]
         X_resampled, y_resampled = smote.fit_resample(X_train_df[smote_features], y_train_arr)
         
-        # Reconstruct full feature set
         X_resampled_full = pd.DataFrame(X_resampled, columns=smote_features)
         for col in X_train_df.columns:
             if col not in smote_features:
@@ -551,7 +552,7 @@ def train_enhanced_balanced_model(X_train, y_train, le):
     class_weights = {i: ENHANCED_PERSONA_CLASS_WEIGHT[cls] for i, cls in enumerate(le.classes_)}
     
     model = CatBoostClassifier(
-        iterations=500,  # OPTIMIZED: Reduced from 1500
+        iterations=500,
         learning_rate=0.01,
         depth=8,
         l2_leaf_reg=3,
@@ -561,7 +562,7 @@ def train_enhanced_balanced_model(X_train, y_train, le):
         auto_class_weights='Balanced',
         random_seed=42,
         verbose=100,
-        early_stopping_rounds=50  # OPTIMIZED: Added early stopping
+        early_stopping_rounds=50
     )
     
     model.fit(X_resampled_full, y_resampled)
@@ -614,7 +615,7 @@ def improved_evaluation_workflow():
         pos_weight = 1.0 / (pos_ratio + 1e-8) * 3
         
         model = CatBoostClassifier(
-            iterations=300,  # OPTIMIZED: Reduced from 1000
+            iterations=300,
             learning_rate=0.01,
             depth=6,
             l2_leaf_reg=3,
@@ -622,7 +623,7 @@ def improved_evaluation_workflow():
             loss_function='Logloss',
             random_seed=42,
             verbose=100,
-            early_stopping_rounds=50  # OPTIMIZED: Added early stopping
+            early_stopping_rounds=50
         )
         
         try:
@@ -837,17 +838,14 @@ if __name__ == "__main__":
     best_params = {}
     
     logger.info("Starting random search...")
-    # OPTIMIZED: Random search with 100 iterations
     n_iterations = 100
     tested_combinations = 0
     
     for _ in range(n_iterations):
         tested_combinations += 1
-        # Fix dental parameters
         current_weights = {'dental': 30.0}
         current_thresholds = {'dental': 0.02}
         
-        # Randomly sample other parameters
         current_weights.update({
             'doctor': random.choice(EXTENDED_SEARCH_SPACE['doctor_weight']),
             'drug': random.choice(EXTENDED_SEARCH_SPACE['drug_weight']),
@@ -863,7 +861,7 @@ if __name__ == "__main__":
             'csnp': random.choice(EXTENDED_SEARCH_SPACE['csnp_threshold'])
         })
         
-        if tested_combinations % 10 == 0:  # OPTIMIZED: Log every 10th iteration
+        if tested_combinations % 10 == 0:
             logger.info(f"Testing combination {tested_combinations}/{n_iterations}: Weights={current_weights}, Thresholds={current_thresholds}")
         
         binary_classifiers = {}
@@ -927,15 +925,3 @@ if __name__ == "__main__":
     
     print("\nCreating visualizations...")
     create_visualizations(behavioral_df, plan_df, main_model, le, transformer)
-
-# --- Model Performance Improvement Strategy ---
-"""
-Optimized to run in under 5-10 minutes while addressing 0% accuracy for doctor, dsnp, drug, vision, csnp:
-1. Random Search: 100 iterations instead of 314,928.
-2. Reduced Oversampling: 15% dental, 10% others; used subset of features for SMOTE.
-3. Faster Training: 500 iterations for main model, 300 for binary classifiers, with early stopping.
-4. Simplified Features: 4 features per persona, skipped Word2Vec embeddings.
-5. Fixed Dental Parameters: Weight=30.0, threshold=0.02 to maintain high dental accuracy.
-6. Reduced Logging: WARNING level, log every 10th iteration.
-These changes maintain balanced predictions while significantly reducing runtime.
-"""

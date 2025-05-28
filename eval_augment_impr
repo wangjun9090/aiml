@@ -10,6 +10,8 @@ from sklearn.cluster import KMeans
 from gensim.models import Word2Vec
 import logging
 import sys
+import matplotlib.pyplot as plt
+import seaborn as sns
 from catboost import CatBoostClassifier
 from imblearn.over_sampling import SMOTE
 
@@ -75,21 +77,21 @@ BASE_PERSONA_THRESHOLD = {
 
 # Enhanced model parameters focused on improving dental and doctor accuracy
 ENHANCED_PERSONA_CLASS_WEIGHT = {
-    'dental': 80.0,  # Dramatically increased from 15.5
-    'doctor': 55.0,  # Significantly increased from 12.5
-    'drug': 5.0,     # Keep as is
-    'dsnp': 8.5,     # Keep as is
-    'vision': 6.5,   # Keep as is
-    'csnp': 4.5      # Keep as is
+    'dental': 80.0,
+    'doctor': 55.0,
+    'drug': 5.0,
+    'dsnp': 8.5,
+    'vision': 6.5,
+    'csnp': 4.5
 }
 
 ENHANCED_PERSONA_THRESHOLD = {
-    'dental': 0.01,  # Dramatically lower threshold to capture more dental predictions
-    'doctor': 0.04,  # Lower threshold
-    'drug': 0.25,    # Slightly higher to reduce false positives
-    'dsnp': 0.20,    # Keep as is
-    'vision': 0.18,  # Keep as is
-    'csnp': 0.20     # Keep as is
+    'dental': 0.01,
+    'doctor': 0.04,
+    'drug': 0.25,
+    'dsnp': 0.20,
+    'vision': 0.18,
+    'csnp': 0.20
 }
 
 # Extended search space with more extreme values for dental
@@ -102,9 +104,9 @@ EXTENDED_SEARCH_SPACE = {
 
 # Modified optimization weights to prioritize dental accuracy
 OPTIMIZATION_WEIGHTS = {
-    'dental_accuracy': 0.6,     # Increased from 0.4
-    'doctor_accuracy': 0.3,     # Reduced from 0.4
-    'overall_accuracy': 0.1     # Reduced from 0.2
+    'dental_accuracy': 0.6,
+    'doctor_accuracy': 0.3,
+    'overall_accuracy': 0.1
 }
 
 # Optimization objective
@@ -614,7 +616,7 @@ def create_specialized_dental_features(df):
     df['dental_signature_score'] = (
         df['dental_super_signal'] * 2.0 + 
         df['dental_exclusivity'] * 3.0 + 
-        df['d personally_any_interaction'] * 5.0 + 
+        df['dental_any_interaction'] * 5.0 + 
         df['dental_benefit_indicator'] * 4.0
     ) * 5.0
     
@@ -997,78 +999,223 @@ def improved_evaluation_workflow():
         'doctor_accuracy': accuracy_score(y_test[y_test == 'doctor'], y_pred[y_test == 'doctor']) * 100 if (y_test == 'doctor').sum() > 0 else 0
     }
 
-# Placeholder for visualization section (commented out due to undefined functions)
-"""
 # --- Visualization Section ---
-try:
-    import matplotlib.pyplot as plt
-    import seaborn as sns
+def create_visualizations(behavioral_df, plan_df, main_model, le, transformer):
+    """Create visualizations for model performance: confusion matrix and per-persona accuracy."""
+    try:
+        # Prepare features using the existing prepare_features function
+        X_full, y_full = prepare_features(behavioral_df, plan_df, expected_features=main_model.feature_names_)
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_full, y_full, test_size=0.2, random_state=42, stratify=y_full)
+        
+        # Transform test data
+        X_test_transformed = transformer.transform(X_test)
+        
+        # Get predictions using the main model
+        base_probas = main_model.predict_proba(X_test_transformed)
+        
+        # Load binary classifiers if available
+        binary_classifiers = {}
+        binary_probas = {}
+        for persona in ['dental', 'doctor']:
+            binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary.pkl')
+            if os.path.exists(binary_model_path):
+                with open(binary_model_path, 'rb') as f:
+                    binary_classifiers[persona] = pickle.load(f)
+                binary_probas[persona] = binary_classifiers[persona].predict_proba(X_test_transformed)[:, 1]
+            else:
+                binary_probas[persona] = np.zeros(len(X_test))
+        
+        # Apply custom ensemble
+        y_pred_indices, _ = custom_ensemble_with_dental_focus(
+            base_probas, binary_probas, le,
+            weights=ENHANCED_PERSONA_CLASS_WEIGHT,
+            thresholds=ENHANCED_PERSONA_THRESHOLD
+        )
+        y_pred = le.classes_[y_pred_indices]
+        
+        # 1. Create a confusion matrix heatmap
+        plt.figure(figsize=(12, 9))
+        cm = confusion_matrix(y_test, y_pred, labels=PERSONAS)
+        cm_normalized = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-8)
+        
+        sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues',
+                    xticklabels=PERSONAS, yticklabels=PERSONAS)
+        plt.title('Normalized Confusion Matrix')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.tight_layout()
+        plt.show()
+        
+        # 2. Create bar chart of accuracy by persona
+        plt.figure(figsize=(10, 6))
+        persona_acc = {}
+        for persona in PERSONAS:
+            mask = (y_test == persona)
+            if mask.sum() > 0:
+                persona_acc[persona] = accuracy_score(y_test[mask], y_pred[mask]) * 100
+            else:
+                persona_acc[persona] = 0
+        
+        acc_df = pd.DataFrame({
+            'Persona': list(persona_acc.keys()),
+            'Accuracy (%)': list(persona_acc.values())
+        }).sort_values('Accuracy (%)', ascending=False)
+        
+        sns.barplot(data=acc_df, x='Persona', y='Accuracy (%)', palette='viridis')
+        plt.title('Model Accuracy by Persona Type')
+        plt.axhline(y=acc_df['Accuracy (%)'].mean(), color='r', linestyle='--', label='Mean Accuracy')
+        plt.legend()
+        plt.ylim(0, 100)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.show()
+        
+        print("\nPer-Persona Accuracy:")
+        for persona, acc in acc_df.set_index('Persona')['Accuracy (%)'].items():
+            print(f"{persona}: {acc:.2f}%")
+        
+        print(f"\nOverall Accuracy: {accuracy_score(y_test, y_pred)*100:.2f}%")
+        
+    except Exception as e:
+        print(f"Error creating visualizations: {str(e)}")
+
+# --- Main Tuning Logic ---
+if __name__ == "__main__":
+    logger.info("Starting hyperparameter tuning...")
     
-    behavioral_df = pd.read_csv(BEHAVIORAL_FILE)
-    plan_df = pd.read_csv(PLAN_FILE)
+    try:
+        if not os.path.exists(MODEL_FILE):
+            raise FileNotFoundError(f"Model file not found: {MODEL_FILE}")
+        with open(MODEL_FILE, 'rb') as f:
+            main_model = pickle.load(f)
+        if not os.path.exists(LABEL_ENCODER_FILE):
+            raise FileNotFoundError(f"Label encoder file not found: {LABEL_ENCODER_FILE}")
+        with open(LABEL_ENCODER_FILE, 'rb') as f:
+            le = pickle.load(f)
+        if not os.path.exists(TRANSFORMER_FILE):
+            raise FileNotFoundError(f"Transformer file not found: {TRANSFORMER_FILE}")
+        with open(TRANSFORMER_FILE, 'rb') as f:
+            transformer = pickle.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load model or files: {str(e)}")
+        sys.exit(1)
     
-    X_full, y_full, feature_columns = prepare_enhanced_features(behavioral_df, plan_df)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_full, y_full, test_size=0.2, random_state=42, stratify=y_full)
+    expected_features = getattr(main_model, 'feature_names_', None)
+    if expected_features is None:
+        logger.error("Model does not provide feature_names_. Please specify expected features manually.")
+        sys.exit(1)
     
-    X_test_transformed = transformer.transform(X_test)
-    y_pred, proba = predict_with_ensemble(models, transformer, X_test, le)
-    
-    plt.figure(figsize=(12, 9))
-    cm = confusion_matrix(y_test, y_pred, labels=PERSONAS)
-    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-    
-    sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues',
-                xticklabels=PERSONAS, yticklabels=PERSONAS)
-    plt.title('Normalized Confusion Matrix')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.tight_layout()
-    plt.show()
-    
-    plt.figure(figsize=(10, 6))
-    persona_acc = {}
+    binary_classifiers = {}
     for persona in PERSONAS:
-        mask = (np.array(y_test) == persona)
-        if mask.sum() > 0:
-            persona_acc[persona] = (np.array(y_pred)[mask] == np.array(y_test)[mask]).mean() * 100
-        else:
-            persona_acc[persona] = 0
-            
-    acc_df = pd.DataFrame({
-        'Persona': list(persona_acc.keys()),
-        'Accuracy (%)': list(persona_acc.values())
-    }).sort_values('Accuracy (%)', ascending=False)
+        binary_model_path = MODEL_FILE.replace('.pkl', f'_{persona}_binary.pkl')
+        try:
+            if not os.path.exists(binary_model_path):
+                logger.warning(f"Binary classifier for {persona} not found at {binary_model_path}. Skipping this persona.")
+                continue
+            with open(binary_model_path, 'rb') as f:
+                binary_classifiers[persona] = pickle.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load binary classifier for {persona}: {str(e)}. Skipping.")
+            continue
     
-    sns.barplot(data=acc_df, x='Persona', y='Accuracy (%)', palette='viridis')
-    plt.title('Model Accuracy by Persona Type')
-    plt.axhline(y=acc_df['Accuracy (%)'].mean(), color='r', linestyle='--', label='Mean Accuracy')
-    plt.legend()
-    plt.ylim(0, 100)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.show()
+    if not binary_classifiers:
+        logger.warning("No binary classifiers loaded. Proceeding without them.")
     
-    print("\nPer-Persona Accuracy:")
-    for persona, acc in acc_df.set_index('Persona')['Accuracy (%)'].items():
-        print(f"{persona}: {acc:.2f}%")
+    try:
+        behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
+        X_data, y_data = prepare_features(behavioral_df, plan_df, expected_features)
+        y_data_encoded = le.transform(y_data)
+        X_data_cols = X_data.columns
+    except Exception as e:
+        logger.error(f"Failed to load and prepare data: {str(e)}")
+        sys.exit(1)
     
-    print(f"\nOverall Accuracy: {accuracy_score(y_test, y_pred)*100:.2f}%")
-except Exception as e:
-    print(f"Error creating visualizations: {e}")
-"""
-print("Visualization section skipped due to undefined functions.")
+    best_metrics = {obj: -1 for obj in OPTIMIZATION_OBJECTIVE}
+    best_params = {}
+    
+    logger.info("Starting grid search...")
+    total_combinations = (len(EXTENDED_SEARCH_SPACE['dental_weight']) * len(EXTENDED_SEARCH_SPACE['doctor_weight']) *
+                         len(EXTENDED_SEARCH_SPACE['dental_threshold']) * len(EXTENDED_SEARCH_SPACE['doctor_threshold']))
+    logger.info(f"Total combinations to test: {total_combinations}")
+    tested_combinations = 0
+    
+    for dw in EXTENDED_SEARCH_SPACE['dental_weight']:
+        for dow in EXTENDED_SEARCH_SPACE['doctor_weight']:
+            for dt in EXTENDED_SEARCH_SPACE['dental_threshold']:
+                for dot in EXTENDED_SEARCH_SPACE['doctor_threshold']:
+                    tested_combinations += 1
+                    current_weights = BASE_PERSONA_CLASS_WEIGHT.copy()
+                    current_thresholds = BASE_PERSONA_THRESHOLD.copy()
+                    
+                    current_weights['dental'] = dw
+                    current_weights['doctor'] = dow
+                    current_thresholds['dental'] = dt
+                    current_thresholds['doctor'] = dot
+                    
+                    logger.info(f"Testing combination {tested_combinations}/{total_combinations}: Weights={current_weights}, Thresholds={current_thresholds}")
+                    
+                    overall_acc, dental_acc, doctor_acc, macro_f1, y_pred = evaluate_model_with_params(
+                        current_weights, current_thresholds, main_model, binary_classifiers,
+                        le, transformer, X_data, y_data_encoded, X_data_cols
+                    )
+                    
+                    logger.info(f"Results: Overall Acc={overall_acc*100:.2f}%, Dental Acc={dental_acc:.2f}%, Doctor Acc={doctor_acc:.2f}%, Macro F1={macro_f1:.2f}")
+                    
+                    current_metrics = {
+                        'dental_accuracy': dental_acc,
+                        'doctor_accuracy': doctor_acc,
+                        'overall_accuracy': overall_acc * 100
+                    }
+                    
+                    if is_better_combination(current_metrics, best_metrics, OPTIMIZATION_OBJECTIVE, weights=OPTIMIZATION_WEIGHTS):
+                        logger.info("Found a better combination!")
+                        best_metrics.update(current_metrics)
+                        best_params = {'weights': current_weights, 'thresholds': current_thresholds}
+    
+    logger.info("\n--- Tuning Complete ---")
+    if best_params:
+        logger.info(f"Best parameters found based on objective {OPTIMIZATION_OBJECTIVE}:")
+        logger.info(f"  Weights: {best_params['weights']}")
+        logger.info(f"  Thresholds: {best_params['thresholds']}")
+        logger.info("Corresponding metrics on the tuning dataset:")
+        for obj, value in best_metrics.items():
+            logger.info(f"  {obj}: {value:.2f}%" if '_accuracy' in obj else f"  {obj}: {value:.2f}")
+    else:
+        logger.warning("No better combination found than the starting parameters.")
+        overall_acc, dental_acc, doctor_acc, macro_f1, _ = evaluate_model_with_params(
+            BASE_PERSONA_CLASS_WEIGHT, BASE_PERSONA_THRESHOLD, main_model, binary_classifiers,
+            le, transformer, X_data, y_data_encoded, X_data_cols
+        )
+        logger.info(f"Starting metrics: Overall Acc={overall_acc*100:.2f}%, Dental Acc={dental_acc:.2f}%, Doctor Acc={doctor_acc:.2f}%, Macro F1={macro_f1:.2f}")
+
+    # Run the improved evaluation workflow
+    print("\n==============================================")
+    print("Starting dental accuracy improvement workflow")
+    print("==============================================\n")
+    
+    results = improved_evaluation_workflow()
+    
+    print("\n============ FINAL RESULTS ============")
+    if results:
+        print(f"Overall Accuracy: {results['overall_accuracy']:.2f}%")
+        print(f"Dental Accuracy: {results['dental_accuracy']:.2f}%")
+        print(f"Doctor Accuracy: {results['doctor_accuracy']:.2f}%")
+    print("=========================================")
+    
+    # Run visualizations
+    print("\nCreating visualizations...")
+    create_visualizations(behavioral_df, plan_df, main_model, le, transformer)
 
 # --- Model Performance Improvement Strategy ---
 """
-The current model performance shows poor results, especially for dental accuracy (0.00%). Let's implement an improved approach with targeted optimization.
-
-The improved model makes several key changes to boost dental accuracy from 0%:
-1. **Extreme Class Weighting**: Applied 80x weight to dental class (up from 15.5x)
-2. **Specialized Dental Features**: Created 10+ new dental-specific features
-3. **Massively Lowered Threshold**: Reduced dental prediction threshold to 0.01 (from 0.08)
-4. **Heavy Oversampling**: Increased dental class representation to 40% of training data
-5. **Custom Ensemble Method**: Developed dental-prioritized prediction logic
-
-These techniques help overcome the extreme class imbalance and feature sparsity that were causing the 0% dental accuracy.
+The current model performance shows poor results, especially for dental accuracy (0.00%). The improved approach includes:
+1. Extreme Class Weighting: Applied 80x weight to dental class (up from 15.5x)
+2. Specialized Dental Features: Created 10+ new dental-specific features
+3. Massively Lowered Threshold: Reduced dental prediction threshold to 0.01 (from 0.08)
+4. Heavy Oversampling: Increased dental class representation to 40% of training data
+5. Custom Ensemble Method: Developed dental-prioritized prediction logic
+These techniques address the extreme class imbalance and feature sparsity causing the 0% dental accuracy.
 """

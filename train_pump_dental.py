@@ -173,12 +173,7 @@ def calculate_persona_weight(row, persona_info, persona):
     click_value = row.get(click_col, 0) if click_col and pd.notna(row.get(click_col, np.nan)) else 0
     
     max_val = max([query_value, filter_value, plan_value, click_value, 1])
-    query_value /= max_val
-    filter_value /= max_val
-    plan_value /= max_val
-    click_value /= max_val
-    
-    weight = 0.25 * (query_value + filter_value + plan_value + click_value)
+    weight = 0.25 * (query_value/max_val + filter_value/max_val + plan_value/max_val + click_value/max_val)
     return min(max(weight, 0), 1.0)
 
 def load_data(behavioral_path, plan_path):
@@ -191,13 +186,13 @@ def load_data(behavioral_path, plan_path):
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.lower().str.strip()
         
-        behavioral_df['zip'] = behavioral_df['zip'].fillna('unknown')
-        behavioral_df['plan_id'] = behavioral_df['plan_id'].fillna('unknown')
-        behavioral_df['total_session_time'] = behavioral_df.get('total_session_time', 0).fillna(0)
+        behavioral_df['zip'] = get_feature_as_series(behavioral_df, 'zip', 'unknown').astype(str)
+        behavioral_df['plan_id'] = get_feature_as_series(behavioral_df, 'plan_id', 'unknown').astype(str)
+        behavioral_df['total_session_time'] = get_feature_as_series(behavioral_df, 'total_session_time', 0).fillna(0)
         
         plan_df = pd.read_csv(plan_path)
-        plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
+        plan_df['zip'] = get_feature_as_series(plan_df, 'zip', 'unknown').astype(str)
+        plan_df['plan_id'] = get_feature_as_series(plan_df, 'plan_id', 'unknown').astype(str)
         
         return behavioral_df, plan_df
     except Exception as e:
@@ -276,7 +271,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         
         plan_features = ['ma_dental_benefit', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
         for col in plan_features:
-            training_df[col] = training_df.get(col, pd.Series([0] * len(training_df), index=training_df.index)).fillna(0)
+            training_df[col] = get_feature_as_series(training_df, col, 0).fillna(0)
         
         behavioral_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_csnp', 'query_dsnp',
@@ -298,6 +293,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
                     training_df[col] = imputer_median.fit_transform(training_df[[col]]).flatten()
             else:
                 training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
+                logger.debug(f"Created missing column {col} with default value 0")
         
         for persona in ['dental', 'csnp', 'doctor', 'dsnp']:
             query_col = PERSONA_INFO[persona]['query_col']
@@ -313,23 +309,23 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
                 start_time = pd.to_datetime(training_df['start_time'], errors='coerce')
                 training_df['recency'] = (pd.to_datetime('2025-05-28') - start_time).dt.days.fillna(30)
                 training_df['time_of_day'] = start_time.dt.hour.fillna(12) // 6
-                training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30 if 'userid' in training_df.columns else pd.Series([1] * len(training_df))
+                training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30 if 'userid' in training_df.columns else pd.Series([1] * len(training_df), index=training_df.index)
             except Exception as e:
                 logger.warning(f"Failed to process start_time: {e}")
-                training_df['recency'] = pd.Series([30] * len(training_df))
-                training_df['time_of_day'] = pd.Series([2] * len(training_df))
-                training_df['visit_frequency'] = pd.Series([1] * len(training_df))
+                training_df['recency'] = pd.Series([30] * len(training_df), index=training_df.index)
+                training_df['time_of_day'] = pd.Series([2] * len(training_df), index=training_df.index)
+                training_df['visit_frequency'] = pd.Series([1] * len(training_df), index=training_df.index)
         else:
-            training_df['recency'] = pd.Series([30] * len(training_df))
-            training_df['time_of_day'] = pd.Series([2] * len(training_df))
-            training_df['visit_frequency'] = pd.Series([1] * len(training_df))
+            training_df['recency'] = pd.Series([30] * len(training_df), index=training_df.index)
+            training_df['time_of_day'] = pd.Series([2] * len(training_df), index=training_df.index)
+            training_df['visit_frequency'] = pd.Series([1] * len(training_df), index=training_df.index)
         
         cluster_features = ['num_pages_viewed', 'total_session_time', 'num_clicks']
         if all(col in training_df.columns for col in cluster_features):
             kmeans = KMeans(n_clusters=5, random_state=42)
             training_df['user_cluster'] = kmeans.fit_predict(training_df[cluster_features].fillna(0))
         else:
-            training_df['user_cluster'] = pd.Series([0] * len(training_df))
+            training_df['user_cluster'] = pd.Series([0] * len(training_df), index=training_df.index)
         
         training_df['dental_time_ratio'] = training_df.get('time_dental_pages', 0) / (training_df.get('total_session_time', 1) + 1e-5)
         training_df['click_ratio'] = training_df.get('num_clicks', 0) / (training_df.get('num_pages_viewed', 1) + 1e-5)
@@ -345,12 +341,12 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         else:
             embedding_cols = [f'plan_emb_{i}' for i in range(8)]
             for col in embedding_cols:
-                training_df[col] = pd.Series([0] * len(training_df))
+                training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
         
         query_cols = [c for c in behavioral_features if c.startswith('query_') and c in training_df.columns]
         filter_cols = [c for c in behavioral_features if c.startswith('filter_') and c in training_df.columns]
-        training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series([0] * len(training_df))
-        training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else pd.Series([0] * len(training_df))
+        training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series([0] * len(training_df), index=training_df.index)
+        training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else pd.Series([0] * len(training_df), index=training_df.index)
         
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
@@ -361,12 +357,12 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         additional_features = []
         for persona in PERSONAS:
             persona_info = PERSONA_INFO.get(persona, {})
-            query_col = get_feature_as_series(training_df, persona_info.get('query_col'))
-            filter_col = get_feature_as_series(training_df, persona_info.get('filter_col'))
-            click_col = get_feature_as_series(training_df, persona_info.get('click_col', 'dummy_col'))
-            time_col = get_feature_as_series(training_df, persona_info.get('time_col', 'dummy_col'))
-            accordion_col = get_feature_as_series(training_df, persona_info.get('accordion_col', 'dummy_col'))
-            plan_col = get_feature_as_series(training_df, persona_info.get('plan_col'))
+            query_col = get_feature_as_series(training_df, persona_info.get('query_col'), 0)
+            filter_col = get_feature_as_series(training_df, persona_info.get('filter_col'), 0)
+            click_col = get_feature_as_series(training_df, persona_info.get('click_col', 'dummy_col'), 0)
+            time_col = get_feature_as_series(training_df, persona_info.get('time_col', 'dummy_col'), 0)
+            accordion_col = get_feature_as_series(training_df, persona_info.get('accordion_col', 'dummy_col'), 0)
+            plan_col = get_feature_as_series(training_df, persona_info.get('plan_col'), 0)
             
             signal_weights = 5.0 if persona in HIGH_PRIORITY_PERSONAS else 3.5
             training_df[f'{persona}_signal'] = (
@@ -395,11 +391,11 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             ) * 4.0
             additional_features.append(f'{persona}_plan_correlation')
         
-        dental_query = get_feature_as_series(training_df, 'query_dental')
-        dental_filter = get_feature_as_series(training_df, 'filter_dental')
-        dental_time = get_feature_as_series(training_df, 'time_dental_pages')
-        dental_accordion = get_feature_as_series(training_df, 'accordion_dental')
-        dental_benefit = get_feature_as_series(training_df, 'ma_dental_benefit')
+        dental_query = get_feature_as_series(training_df, 'query_dental', 0)
+        dental_filter = get_feature_as_series(training_df, 'filter_dental', 0)
+        dental_time = get_feature_as_series(training_df, 'time_dental_pages', 0)
+        dental_accordion = get_feature_as_series(training_df, 'accordion_dental', 0)
+        dental_benefit = get_feature_as_series(training_df, 'ma_dental_benefit', 0)
         
         training_df['dental_engagement_score'] = (
             dental_query * 8.0 +
@@ -429,10 +425,10 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         ) * 6.0
         additional_features.append('dental_combined_signal')
         
-        provider_query = get_feature_as_series(training_df, 'query_provider')
-        provider_filter = get_feature_as_series(training_df, 'filter_provider')
-        provider_click = get_feature_as_series(training_df, 'click_provider')
-        provider_network = get_feature_as_series(training_df, 'ma_provider_network')
+        provider_query = get_feature_as_series(training_df, 'query_provider', 0)
+        provider_filter = get_feature_as_series(training_df, 'filter_provider', 0)
+        provider_click = get_feature_as_series(training_df, 'click_provider', 0)
+        provider_network = get_feature_as_series(training_df, 'ma_provider_network', 0)
         
         training_df['doctor_interaction_score'] = (
             provider_query * 8.0 +
@@ -450,7 +446,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         
         training_df['doctor_query_specificity'] = (
             provider_query /
-            (training_df[['query_dental', 'query_drug', 'query_dsnp', 'query_csnp']].sum(axis=1) + 1e-6)
+            (training_df[['query_dental', 'query_drug', 'query_dsnp', 'query_csnp']].sum(axis=1).clip(lower=1e-6))
         ).clip(upper=1.0) * 7.0
         additional_features.append('doctor_query_specificity')
         
@@ -467,12 +463,12 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         ).clip(lower=0) * 7.0
         additional_features.append('doctor_exclusive_signal')
         
-        dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
-        dsnp_filter = get_feature_as_series(training_df, 'filter_dsnp')
-        dsnp_time = get_feature_as_series(training_df, 'time_dsnp_pages')
-        dsnp_accordion = get_feature_as_series(training_df, 'accordion_dsnp')
-        dsnp_plan = get_feature_as_series(training_df, 'dsnp')
-        csnp_query = get_feature_as_series(training_df, 'query_csnp')
+        dsnp_query = get_feature_as_series(training_df, 'query_dsnp', 0)
+        dsnp_filter = get_feature_as_series(training_df, 'filter_dsnp', 0)
+        dsnp_time = get_feature_as_series(training_df, 'time_dsnp_pages', 0)
+        dsnp_accordion = get_feature_as_series(training_df, 'accordion_dsnp', 0)
+        dsnp_plan = get_feature_as_series(training_df, 'dsnp', 0)
+        csnp_query = get_feature_as_series(training_df, 'query_csnp', 0)
         
         training_df['dsnp_csnp_ratio'] = (
             (dsnp_query + 0.8) / (csnp_query + dsnp_query + 1e-6)
@@ -507,12 +503,12 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         ) * 6.0
         additional_features.append('dsnp_combined_signal')
         
-        drug_query = get_feature_as_series(training_df, 'query_drug')
-        drug_filter = get_feature_as_series(training_df, 'filter_drug')
-        drug_time = get_feature_as_series(training_df, 'time_drug_pages')
-        drug_accordion = get_feature_as_series(training_df, 'accordion_drug')
-        drug_click = get_feature_as_series(training_df, 'click_drug')
-        drug_benefit = get_feature_as_series(training_df, 'ma_drug_benefit')
+        drug_query = get_feature_as_series(training_df, 'query_drug', 0)
+        drug_filter = get_feature_as_series(training_df, 'filter_drug', 0)
+        drug_time = get_feature_as_series(training_df, 'time_drug_pages', 0)
+        drug_accordion = get_feature_as_series(training_df, 'accordion_drug', 0)
+        drug_click = get_feature_as_series(training_df, 'click_drug', 0)
+        drug_benefit = get_feature_as_series(training_df, 'ma_drug_benefit', 0)
         
         training_df['drug_engagement_score'] = (
             drug_query * 3.0 +
@@ -536,12 +532,12 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         ).clip(lower=0, upper=25)
         additional_features.append('drug_benefit_boost')
         
-        csnp_query = get_feature_as_series(training_df, 'query_csnp')
-        csnp_filter = get_feature_as_series(training_df, 'filter_csnp')
-        csnp_time = get_feature_as_series(training_df, 'time_csnp_pages')
-        csnp_accordion = get_feature_as_series(training_df, 'accordion_csnp')
-        csnp_plan = get_feature_as_series(training_df, 'csnp')
-        dsnp_query = get_feature_as_series(training_df, 'query_dsnp')
+        csnp_query = get_feature_as_series(training_df, 'query_csnp', 0)
+        csnp_filter = get_feature_as_series(training_df, 'filter_csnp', 0)
+        csnp_time = get_feature_as_series(training_df, 'time_csnp_pages', 0)
+        csnp_accordion = get_feature_as_series(training_df, 'accordion_csnp', 0)
+        csnp_plan = get_feature_as_series(training_df, 'csnp', 0)
+        dsnp_query = get_feature_as_series(training_df, 'query_dsnp', 0)
         
         training_df['csnp_dsnp_ratio'] = (
             (csnp_query + 0.8) / (dsnp_query + csnp_query + 1e-6)

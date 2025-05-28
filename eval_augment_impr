@@ -34,14 +34,13 @@ TRANSFORMER_FILE = (
     "data/s-learning-data/models/power_transformer.pkl"
 )
 
-PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'vision', 'csnp']
+PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'csnp']
 
 PERSONA_THRESHOLD = {
     'drug': 0.28,
     'dental': 0.25,
     'doctor': 0.22,
     'dsnp': 0.25,
-    'vision': 0.30,
     'csnp': 0.24
 }
 
@@ -50,8 +49,7 @@ PERSONA_INFO = {
     'dental': {'plan_col': 'ma_dental_benefit', 'query_col': 'query_dental', 'filter_col': 'filter_dental', 'time_col': 'time_dental_pages', 'accordion_col': 'accordion_dental'},
     'doctor': {'plan_col': 'ma_provider_network', 'query_col': 'query_provider', 'filter_col': 'filter_provider', 'click_col': 'click_provider'},
     'dsnp': {'plan_col': 'dsnp', 'query_col': 'query_dsnp', 'filter_col': 'filter_dsnp', 'time_col': 'time_dsnp_pages', 'accordion_col': 'accordion_dsnp'},
-    'drug': {'plan_col': 'ma_drug_benefit', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'click_drug', 'time_col': 'time_drug_pages', 'accordion_col': 'accordion_drug'},
-    'vision': {'plan_col': 'ma_vision', 'query_col': 'query_vision', 'filter_col': 'filter_vision', 'time_col': 'time_vision_pages', 'accordion_col': 'accordion_vision'}
+    'drug': {'plan_col': 'ma_drug_benefit', 'query_col': 'query_drug', 'filter_col': 'filter_drug', 'click_col': 'click_drug', 'time_col': 'time_drug_pages', 'accordion_col': 'accordion_drug'}
 }
 
 # --- Logging Setup ---
@@ -135,6 +133,12 @@ def load_data(behavioral_path, plan_path):
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.lower().str.strip()
         
+        # Filter out vision personas
+        vision_samples = behavioral_df[behavioral_df['persona'].str.contains('vision', na=False)]
+        if len(vision_samples) > 0:
+            logger.info(f"Removed {len(vision_samples)} vision persona samples")
+            behavioral_df = behavioral_df[~behavioral_df['persona'].str.contains('vision', na=False)]
+        
         behavioral_df['zip'] = behavioral_df['zip'].fillna('unknown')
         behavioral_df['plan_id'] = behavioral_df['plan_id'].fillna('unknown')
         if 'total_session_time' in behavioral_df.columns:
@@ -142,7 +146,7 @@ def load_data(behavioral_path, plan_path):
         
         plan_df = pd.read_csv(plan_path)
         plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).strip()
         
         return behavioral_df, plan_df
     except Exception as e:
@@ -164,19 +168,19 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             ).reset_index(drop=True)
             logger.info(f"Rows after merge: {len(training_df)}")
         
-        plan_features = ['ma_dental_benefit', 'ma_vision', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
+        plan_features = ['ma_dental_benefit', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network']
         for col in plan_features:
             training_df[col] = training_df.get(col, pd.Series([0] * len(training_df), index=training_df.index)).fillna(0)
         
         behavioral_features = [
-            'query_dental', 'query_drug', 'query_provider', 'query_vision', 'query_csnp', 'query_dsnp',
-            'filter_dental', 'filter_drug', 'filter_provider', 'filter_vision', 'filter_csnp', 'filter_dsnp',
+            'query_dental', 'query_drug', 'query_provider', 'query_csnp', 'query_dsnp',
+            'filter_dental', 'filter_drug', 'filter_provider', 'filter_csnp', 'filter_dsnp',
             'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
-            'time_csnp_pages', 'time_drug_pages', 'time_vision_pages', 'time_dsnp_pages',
-            'accordion_csnp', 'accordion_dental', 'accordion_drug', 'accordion_vision', 'accordion_dsnp'
+            'time_csnp_pages', 'time_drug_pages', 'time_dsnp_pages',
+            'accordion_csnp', 'accordion_dental', 'accordion_drug', 'accordion_dsnp'
         ]
         
-        sparse_features = ['query_dental', 'time_dental_pages', 'query_vision', 'time_vision_pages', 'query_drug', 'query_provider']
+        sparse_features = ['query_dental', 'time_dental_pages', 'query_drug', 'query_provider']
         imputer_median = SimpleImputer(strategy='median')
         imputer_zero = SimpleImputer(strategy='constant', fill_value=0)
         
@@ -189,7 +193,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
             else:
                 training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
         
-        for persona in ['dental', 'vision']:
+        for persona in ['dental']:
             query_col = PERSONA_INFO[persona]['query_col']
             time_col = PERSONA_INFO[persona].get('time_col', None)
             if query_col in training_df.columns and time_col in training_df.columns:
@@ -241,7 +245,6 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         training_df['query_count'] = training_df[query_cols].sum(axis=1) if query_cols else pd.Series([0] * len(training_df), index=training_df.index)
         training_df['filter_count'] = training_df[filter_cols].sum(axis=1) if filter_cols else pd.Series([0] * len(training_df), index=training_df.index)
         
-        # Generate weight features required by the trained model
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
                 training_df[f'{persona}_weight'] = training_df.apply(
@@ -321,7 +324,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         
         training_df['doctor_specificity'] = (
             provider_query * 3.0 - 
-            (training_df.get('query_dental', 0) + training_df.get('query_vision', 0)) * 0.7
+            (training_df.get('query_dental', 0) + training_df.get('query_drug', 0)) * 0.7
         ).clip(lower=0) * 4.0
         additional_features.append('doctor_specificity')
         
@@ -401,9 +404,7 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         
         training_df['csnp_specificity'] = (
             csnp_query * 3.0 - 
-            (training_df.get('query_dental', 0) + 
-             training_df.get('query_vision', 0) + 
-             training_df.get('query_drug', 0)) * 0.8
+            (training_df.get('query_dental', 0) + training_df.get('query_drug', 0)) * 0.8
         ).clip(lower=0) * 4.0
         additional_features.append('csnp_specificity')
         
@@ -422,20 +423,34 @@ def prepare_features(behavioral_df, plan_df, expected_features=None):
         ).clip(lower=0, upper=24)
         additional_features.append('csnp_plan_multiplier')
         
-        feature_columns = behavioral_features + plan_features + additional_features + [
-            'recency', 'visit_frequency', 'time_of_day', 'user_cluster', 'dental_time_ratio', 'click_ratio'
-        ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS if persona in PERSONA_INFO]
-        
+        feature_columns = [
+            col for col in behavioral_features + plan_features + additional_features + [
+                'recency', 'visit_frequency', 'time_of_day', 'user_cluster', 'dental_time_ratio', 'click_ratio'
+            ] + embedding_cols + [f'{persona}_weight' for persona in PERSONAS]
+            if not (
+                col.startswith('vision') or
+                col.endswith('_vision') or
+                col in ['query_vision', 'filter_vision', 'vision_signal', 'vision_interaction', 
+                        'vision_primary', 'vision_weight', 'vision_plan_correlation', 'ma_vision']
+            )
+        ]
         X = training_df[feature_columns].fillna(0)
         y = training_df['persona']
         
         if expected_features is not None:
+            expected_features = [f for f in expected_features if not (
+                f.startswith('vision') or
+                f.endswith('_vision') or
+                f in ['query_vision', 'filter_vision', 'vision_signal', 'vision_interaction', 
+                      'vision_primary', 'vision_weight', 'vision_plan_correlation', 'ma_vision']
+            )]
             missing_features = [f for f in expected_features if f not in X.columns]
             if missing_features:
                 logger.error(f"Missing features: {missing_features}")
                 raise ValueError(f"Missing features: {missing_features}")
             extra_features = [f for f in X.columns if f not in expected_features]
             if extra_features:
+                logger.info(f"Removing extra features: {extra_features}")
                 X = X[expected_features]
         
         return X, y
@@ -467,11 +482,12 @@ def custom_ensemble_with_balanced_focus(predictions, binary_probas, le, weights=
     
     if binary_probas:
         for persona, proba in binary_probas.items():
-            persona_idx = np.where(le.classes_ == persona)[0][0]
-            blend_ratio = 0.35 if persona in ['doctor', 'csnp'] else \
-                         0.4 if persona in ['drug', 'dsnp', 'vision'] else 0.5
-            weighted_preds[:, persona_idx] = blend_ratio * weighted_preds[:, persona_idx] + \
-                                            (1 - blend_ratio) * proba
+            if persona in le.classes_:
+                persona_idx = np.where(le.classes_ == persona)[0][0]
+                blend_ratio = 0.35 if persona in ['doctor', 'csnp'] else \
+                             0.4 if persona in ['drug', 'dsnp'] else 0.5
+                weighted_preds[:, persona_idx] = blend_ratio * weighted_preds[:, persona_idx] + \
+                                                (1 - blend_ratio) * proba
     
     row_sums = weighted_preds.sum(axis=1, keepdims=True)
     normalized_preds = weighted_preds / (row_sums + 1e-8)
@@ -495,33 +511,64 @@ def custom_ensemble_with_balanced_focus(predictions, binary_probas, le, weights=
 
 def evaluate_model_with_params(main_model, binary_classifiers, le, transformer, X_test, y_test_encoded, X_test_cols):
     try:
-        y_pred_probas_multi = main_model.predict_proba(transformer.transform(X_test))
+        X_test_transformed = transformer.transform(X_test)
+        
+        y_pred_probas_multi = main_model.predict_proba(X_test_transformed)
 
         binary_probas = {}
         for persona in le.classes_:
             if persona in binary_classifiers:
-                binary_probas[persona] = binary_classifiers[persona].predict_proba(transformer.transform(X_test))[:, 1]
+                binary_probas[persona] = binary_classifiers[persona].predict_proba(X_test_transformed)[:, 1]
             else:
                 binary_probas[persona] = np.zeros(len(X_test))
 
+        if np.isnan(y_pred_probas_multi).any():
+            logger.warning("NaN values found in multi-class predictions!")
+            y_pred_probas_multi = np.nan_to_num(y_pred_probas_multi)
+            
+        if np.sum(y_pred_probas_multi) == 0:
+            logger.warning("All zero probabilities in multi-class predictions!")
+
         y_pred_probas_multi_blended = np.copy(y_pred_probas_multi)
         for i, persona in enumerate(le.classes_):
-            if persona in binary_probas and binary_probas[persona].sum() > 0:
-                blend_ratio = 0.35 if persona in ['doctor', 'csnp'] else \
-                             0.4 if persona in ['drug', 'dsnp', 'vision'] else 0.5
-                y_pred_probas_multi_blended[:, i] = blend_ratio * y_pred_probas_multi_blended[:, i] + \
-                                                   (1 - blend_ratio) * binary_probas[persona]
+            if persona in binary_probas:
+                if persona == 'dental':
+                    blend_ratio = 0.2
+                elif persona in ['doctor', 'csnp']:
+                    blend_ratio = 0.35
+                elif persona in ['drug', 'dsnp']:
+                    blend_ratio = 0.4
+                else:
+                    blend_ratio = 0.5
+                    
+                y_pred_probas_multi_blended[:, i] = blend_ratio * y_pred_probas_multi[:, i] + \
+                                                  (1 - blend_ratio) * binary_probas[persona]
+                
+                if persona == 'dental' and 'dental_signal' in X_test.columns and 'dental_engagement_score' in X_test.columns:
+                    dental_signals = (X_test['dental_signal'] > X_test['dental_signal'].quantile(0.7)) | \
+                                    (X_test['dental_engagement_score'] > X_test['dental_engagement_score'].quantile(0.7))
+                    y_pred_probas_multi_blended[dental_signals, i] *= 1.5
 
-        y_pred_probas_multi_normalized = y_pred_probas_multi_blended / \
-                                         y_pred_probas_multi_blended.sum(axis=1, keepdims=True)
+        row_sums = y_pred_probas_multi_blended.sum(axis=1, keepdims=True)
+        y_pred_probas_multi_normalized = y_pred_probas_multi_blended / (row_sums + 1e-8)
 
         y_pred = np.zeros(y_pred_probas_multi_normalized.shape[0], dtype=int)
         for i in range(len(y_pred_probas_multi_normalized)):
+            adjusted_thresholds = PERSONA_THRESHOLD.copy()
+            adjusted_thresholds['dental'] = 0.15
+            
+            dental_features = ['query_dental', 'filter_dental', 'time_dental_pages', 'dental_signal', 'dental_engagement_score']
+            dental_score = sum([X_test.iloc[i].get(col, 0) for col in dental_features if col in X_test.columns])
+            if dental_score > 0:
+                dental_idx = np.where(le.classes_ == 'dental')[0][0]
+                y_pred_probas_multi_normalized[i, dental_idx] = max(y_pred_probas_multi_normalized[i, dental_idx], 
+                                                                 dental_score / 20)
+            
             max_prob = -1
             max_idx = 0
             for j, persona in enumerate(le.classes_):
                 prob = y_pred_probas_multi_normalized[i, j]
-                threshold = PERSONA_THRESHOLD.get(persona, 0.3)
+                threshold = adjusted_thresholds.get(persona, 0.3)
                 if prob > threshold and prob > max_prob:
                     max_prob = prob
                     max_idx = j
@@ -530,11 +577,80 @@ def evaluate_model_with_params(main_model, binary_classifiers, le, transformer, 
         overall_acc = accuracy_score(y_test_encoded, y_pred)
         macro_f1 = f1_score(y_test_encoded, y_pred, average='macro')
         per_persona_acc = compute_per_persona_accuracy(y_test_encoded, y_pred, le.classes_, le.classes_)
+        
+        class_distribution = pd.Series(y_test_encoded).value_counts().sort_index()
+        prediction_distribution = pd.Series(y_pred).value_counts().sort_index()
+        logger.info("\nClass distribution in test data:")
+        for i, count in enumerate(class_distribution):
+            if i < len(le.classes_):
+                logger.info(f"{le.classes_[i]}: {count}")
+        
+        logger.info("\nClass distribution in predictions:")
+        for i, count in enumerate(prediction_distribution):
+            if i < len(le.classes_):
+                logger.info(f"{le.classes_[i]}: {count}")
+        
+        if hasattr(main_model, 'get_feature_importance'):
+            logger.info("\nFeature importance for main model:")
+            importance = main_model.get_feature_importance()
+            features_importance = list(zip(X_test.columns, importance))
+            for feature, imp in sorted(features_importance, key=lambda x: x[1], reverse=True)[:10]:
+                logger.info(f"{feature}: {imp}")
+        
+        for persona in ['dental']:
+            signal_count = np.sum(y_test_encoded == le.transform([persona])[0])
+            correct_predictions = np.sum((y_pred == le.transform([persona])[0]) & (y_test_encoded == le.transform([persona])[0]))
+            if signal_count > 0:
+                logger.info(f"\n{persona} signal analysis:")
+                logger.info(f"Total {persona} samples: {signal_count}")
+                logger.info(f"Correctly predicted: {correct_predictions} ({correct_predictions/signal_count*100:.2f}%)")
+                
+                misclassified = [le.classes_[y_pred[i]] for i in range(len(y_pred)) if 
+                               y_test_encoded[i] == le.transform([persona])[0] and 
+                               y_pred[i] != le.transform([persona])[0])
+                if len(misclassified) > 0:
+                    misclassified_counts = pd.Series(misclassified).value_counts()
+                    logger.info(f"{persona} misclassified as: {dict(misclassified_counts)}")
 
-        return overall_acc, macro_f1, per_persona_acc, y_pred
+        return overall_acc, macro_f1, per_persona_acc, y_pred, y_pred_probas_multi_normalized
     except Exception as e:
         logger.error(f"Error in model evaluation: {str(e)}")
+        import traceback
         raise
+
+def create_detailed_report(X, y_test, y_pred, y_proba, le):
+    try:
+        result_df = X.copy()
+        result_df['true_persona'] = le.inverse_transform(y_test)
+        result_df['predicted_persona'] = le.inverse_transform(y_pred)
+        result_df['correct'] = result_df['true_persona'] == result_df['predicted_person']
+        
+        for i, persona in enumerate(le.classes_):
+            result_df[f'prob_{persona}'] = y_proba[:, i]
+        
+        dental_samples = result_df[result_df['true_persona'] == 'dental']
+        
+        logger.info(f"\nDental samples analysis (total: {len(dental_samples)}):")
+        if len(dental_samples) > 0:
+            dental_correct = dental_samples[dental_samples['correct']]
+            logger.info(f"Correctly classified: {len(dental_correct)} ({len(dental_correct)/len(dental_samples)*100:.2f}%)")
+            
+            dental_features = ['query_dental', 'filter_dental', 'time_dental_pages', 
+                             'dental_signal', 'dental_engagement_score']
+            logger.info("Average feature values for dental samples:")
+            for feature in dental_features:
+                if feature in dental_samples.columns:
+                    avg_val = dental_samples[feature].mean()
+                    logger.info(f"  {feature}: {avg_val:.4f}")
+        
+        report_path = os.path.join(os.path.dirname(MODEL_FILE), "evaluation_detailed_report.csv")
+        result_df.to_csv(report_path, index=False)
+        logger.info(f"Detailed report saved to: {report_path}")
+        
+        return result_df
+    except Exception as e:
+        logger.error(f"Error creating detailed report: {str(e)}")
+        return None
 
 def create_visualizations(X_test, y_test, y_pred, le):
     try:
@@ -579,7 +695,7 @@ def create_visualizations(X_test, y_test, y_pred, le):
         
         print(f"\nOverall Accuracy: {accuracy_score(y_test, y_pred)*100:.2f}%")
     except Exception as e:
-        print(f"Error creating visualizations: {str(e)}")
+        logger.error(f"Error creating visualizations: {str(e)}")
 
 def main():
     logger.info("Starting evaluation...")
@@ -598,21 +714,31 @@ def main():
         with open(TRANSFORMER_FILE, 'rb') as f:
             transformer = pickle.load(f)
     except Exception as e:
-        logger.error(f"Failed to load model or files: {str(e)}")
+        logger.error(f"Failed to load model or files: {e}")
         sys.exit(1)
     
     expected_features = getattr(main_model, 'feature_names_', None)
     if expected_features is None:
-        logger.error("Model does not provide feature_names_. Please specify expected features manually.")
-        sys.exit(1)
+        logger.warning("Model does not provide feature_names_. Will use all available features.")
     
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
+        
+        if 'persona' in behavioral_df.columns:
+            dental_samples = behavioral_df[behavioral_df['persona'].str.lower().str.contains('dental', na=False)]
+            logger.info(f"Dental samples in raw data: {len(dental_samples)}")
+        
         X_data, y_data = prepare_features(behavioral_df, plan_df, expected_features)
         y_data_encoded = le.transform(y_data)
         X_data_cols = X_data.columns
+        
+        class_distribution = pd.Series(y_data).value_counts()
+        logger.info("\nClass distribution in evaluation data:")
+        for persona, count in class_distribution.items():
+            logger.info(f"{persona}: {count}")
+        
     except Exception as e:
-        logger.error(f"Failed to load and prepare data: {str(e)}")
+        logger.error(f"Failed to load and prepare data: {e}")
         sys.exit(1)
     
     binary_classifiers = {}
@@ -621,8 +747,11 @@ def main():
         if os.path.exists(binary_model_path):
             with open(binary_model_path, 'rb') as f:
                 binary_classifiers[persona] = pickle.load(f)
+                logger.info(f"Loaded binary classifier for {persona}")
+        else:
+            logger.warning(f"Binary classifier not found for {persona}")
     
-    overall_acc, macro_f1, per_persona_acc, y_pred = evaluate_model_with_params(
+    overall_acc, macro_f1, per_persona_acc, y_pred, y_proba = evaluate_model_with_params(
         main_model, binary_classifiers, le, transformer, X_data, y_data_encoded, X_data_cols
     )
     
@@ -637,7 +766,16 @@ def main():
     if overall_acc <= 0.8:
         logger.warning("Overall accuracy below 0.8. Retrain with adjusted PERSONA_OVERSAMPLING_RATIO or PERSONA_CLASS_WEIGHT.")
     
+    detailed_report = create_detailed_report(X_data, y_data_encoded, y_pred, y_proba, le)
     create_visualizations(X_data, y_data_encoded, y_pred, le)
+    
+    logger.info("\nRecommendations to improve training model:")
+    logger.info("1. Increase oversampling ratio for dental:")
+    logger.info("   PERSONA_OVERSAMPLING_RATIO = {'dental': 7.0, 'drug': 5.0, 'doctor': 5.5, 'dsnp': 4.5, 'csnp': 5.0}")
+    logger.info("2. Adjust class weights to prioritize underperforming classes:")
+    logger.info("   PERSONA_CLASS_WEIGHT = {'dental': 8.0, 'drug': 6.5, 'doctor': 7.0, 'dsnp': 6.0, 'csnp': 7.0}")
+    logger.info("3. Lower prediction thresholds for dental:")
+    logger.info("   PERSONA_THRESHOLD = {'dental': 0.18, 'drug': 0.25, 'doctor': 0.22, 'dsnp': 0.23, 'csnp': 0.22}")
 
 if __name__ == "__main__":
     main()

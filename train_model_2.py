@@ -9,7 +9,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.cluster import KMeans
 from gensim.models import Word2Vec
-from xgboost import XGBClassifier, callback
+from xgboost import XGBClassifier
 from imblearn.over_sampling import SMOTE
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -263,7 +263,6 @@ def prepare_features(behavioral_df, plan_df):
             logger.error("Training_df is empty after merge")
             raise ValueError("Empty training DataFrame after merge")
         
-        # Raw features
         raw_features = [
             'query_dental', 'query_drug', 'query_provider', 'query_csnp', 'query_dsnp',
             'filter_dental', 'filter_drug', 'filter_provider', 'filter_csnp', 'filter_dsnp',
@@ -299,7 +298,6 @@ def prepare_features(behavioral_df, plan_df):
                 training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
                 logger.debug(f"Created column {col} with default value 0")
         
-        # Feature engineering
         if 'start_time' in training_df.columns:
             try:
                 start_time = pd.to_datetime(training_df['start_time'], errors='coerce')
@@ -319,7 +317,6 @@ def prepare_features(behavioral_df, plan_df):
             training_df['visit_frequency'] = pd.Series([1] * len(training_df), index=training_df.index)
             training_df['time_of_day'] = pd.Series([2] * len(training_df), index=training_df.index)
         
-        # Clustering
         cluster_features = ['num_pages_viewed', 'total_session_time', 'num_clicks']
         if all(col in training_df.columns for col in cluster_features):
             kmeans = KMeans(n_clusters=5, random_state=42)
@@ -327,7 +324,6 @@ def prepare_features(behavioral_df, plan_df):
         else:
             training_df['user_cluster'] = pd.Series([0] * len(training_df), index=training_df.index)
         
-        # Word2Vec embeddings for plan_id
         if 'plan_id' in training_df.columns:
             plan_sentences = training_df.groupby('userid')['plan_id'].apply(list).tolist()
             w2v_model = Word2Vec(sentences=plan_sentences, vector_size=10, window=5, min_count=1, workers=4)
@@ -341,14 +337,12 @@ def prepare_features(behavioral_df, plan_df):
             for col in embedding_cols:
                 training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
         
-        # Persona-specific weights
         for persona in PERSONAS:
             if persona in PERSONA_INFO:
                 training_df[f'{persona}_weight'] = training_df.apply(
                     lambda row: calculate_persona_weight(row, PERSONA_INFO[persona], persona), axis=1
                 )
         
-        # Additional features
         additional_features = []
         for persona in PERSONAS:
             persona_info = PERSONA_INFO.get(persona, {})
@@ -558,7 +552,6 @@ def prepare_features(behavioral_df, plan_df):
         X = X[valid_features]
         logger.info(f"Selected features: {valid_features[:10]}...")
         
-        # Generate synthetic data
         for persona in PERSONAS:
             synthetic_examples = generate_synthetic_persona_examples(X, valid_features, persona,
                                                                    real_data_stats=real_data_stats)
@@ -566,7 +559,6 @@ def prepare_features(behavioral_df, plan_df):
             y = pd.concat([y, pd.Series([persona] * len(synthetic_examples))], ignore_index=True)
             logger.info(f"After adding synthetic {persona} samples: {Counter(y)}")
         
-        # Apply SMOTE with dynamic sampling strategy
         le_temp = LabelEncoder()
         y_encoded_temp = le_temp.fit_transform(y)
         class_counts = pd.Series(y).value_counts()
@@ -613,23 +605,17 @@ def train_binary_persona_classifier(X_train, y_train, X_val, y_val, persona):
             random_state=42,
             scale_pos_weight=class_weight,
             eval_metric='logloss',
+            early_stopping_rounds=50,
             n_jobs=-1
         )
         
         sample_weights = np.ones(len(y_train_binary))
         sample_weights[y_train_binary == 1] = 2.5 if persona in HIGH_PRIORITY_PERSONAS else 1.5
         
-        early_stop = callback.EarlyStopping(
-            rounds=50,
-            metric_name='logloss',
-            maximize=False
-        )
-        
         model.fit(
             X_train, y_train_binary,
             sample_weight=sample_weights,
             eval_set=[(X_val, y_val_binary)],
-            callbacks=[early_stop],
             verbose=False
         )
         
@@ -743,24 +729,21 @@ def create_visualizations(X_val, y_val, y_pred, le):
         raise
 
 def main():
-    logger.info("Starting consolidated persona model training at 03:36 PM CDT, May 29, 2025...")
+    logger.info("Starting consolidated persona model training at 04:01 PM CDT, May 29, 2025...")
     
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
         
         X, y, transformer, feature_columns = prepare_features(behavioral_df, plan_df)
         
-        # Encode labels
         le = LabelEncoder()
         y_encoded = le.fit_transform(y)
         
-        # Log class distribution
         class_distribution = pd.Series(y).value_counts()
         logger.info("\nClass distribution in training data:")
         for persona, count in class_distribution.items():
             logger.info(f"{persona}: {count}")
         
-        # Split data
         X_train, X_test, y_train, y_test = train_test_split(
             X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
         )
@@ -769,14 +752,12 @@ def main():
         )
         logger.info(f"Training set: {len(X_train_main)} samples, Validation set: {len(X_val)} samples, Test set: {len(X_test)} samples")
         
-        # Train binary classifiers
         binary_classifiers = {}
         for persona in PERSONAS:
             binary_classifiers[persona] = train_binary_persona_classifier(
                 X_train_main, le.inverse_transform(y_train_main), X_val, le.inverse_transform(y_val), persona
             )
         
-        # Train main model
         class_weights = {
             le.transform([p])[0]: PERSONA_CLASS_WEIGHT.get(p, 1.0)
             for p in PERSONAS
@@ -789,6 +770,7 @@ def main():
             reg_lambda=1.5,
             random_state=42,
             eval_metric='mlogloss',
+            early_stopping_rounds=50,
             n_jobs=-1
         )
         
@@ -808,28 +790,21 @@ def main():
                 reg_lambda=1.5,
                 random_state=42+fold,
                 eval_metric='mlogloss',
+                early_stopping_rounds=50,
                 n_jobs=-1
-            )
-            early_stop = callback.EarlyStopping(
-                rounds=50,
-                metric_name='mlogloss',
-                maximize=False
             )
             model_fold.fit(
                 X_fold_train, y_fold_train,
                 sample_weight=[class_weights.get(y, 1.0) for y in y_fold_train],
                 eval_set=[(X_fold_val, y_fold_val)],
-                callbacks=[early_stop],
                 verbose=False
             )
             models.append(model_fold)
             logger.info(f"Fold {fold+1} training completed")
         
-        # Cross-validation
         cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='accuracy')
         logger.info(f"\nCross-Validation Accuracy: {cv_scores.mean()*100:.2f}% (+/- {cv_scores.std()*2*100:.2f}%)")
         
-        # Ensemble predictions
         y_pred_proba = np.mean([m.predict_proba(X_test) for m in models], axis=0)
         
         binary_probas = {}
@@ -840,7 +815,6 @@ def main():
             y_pred_proba, binary_probas, le
         )
         
-        # Evaluate
         overall_acc = accuracy_score(y_test, y_pred)
         macro_f1 = f1_score(y_test, y_pred, average='macro')
         
@@ -865,10 +839,8 @@ def main():
         if overall_acc < 80:
             logger.warning("Overall accuracy below 80%. Check data distribution and feature importance.")
         
-        # Visualizations
         create_visualizations(X_test, y_test, y_pred, le)
         
-        # Save artifacts
         os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)
         with open(MODEL_FILE, 'wb') as f:
             pickle.dump(models[0], f)

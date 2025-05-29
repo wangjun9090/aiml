@@ -46,43 +46,51 @@ logger.setLevel(logging.INFO)
 
 # --- Helper Functions ---
 def get_feature_as_series(df, col_name, default=0):
-    if col_name in df.columns:
-        return df[col_name]
-    logger.debug(f"Column {col_name} missing, using default {default}")
-    return pd.Series([default] * len(df), index=df.index)
+    try:
+        if col_name in df.columns:
+            return df[col_name]
+        logger.debug(f"Column {col_name} missing, using default {default}")
+        return pd.Series([default] * len(df), index=df.index)
+    except Exception as e:
+        logger.error(f"Error in get_feature_as_series for {col_name}: {e}")
+        raise
 
 def normalize_persona(df):
-    valid_personas = PERSONAS
-    new_rows = []
-    invalid_personas = set()
-    
-    if 'persona' not in df.columns:
-        logger.error("Column 'persona' missing in behavioral_df")
-        return pd.DataFrame()
-    
-    for _, row in df.iterrows():
-        persona = row['persona']
-        if pd.isna(persona) or not persona:
-            continue
+    try:
+        valid_personas = PERSONAS
+        new_rows = []
+        invalid_personas = set()
         
-        personas = [p.strip().lower() for p in str(persona).split(',')]
-        valid_found = [p for p in personas if p in valid_personas]
+        if 'persona' not in df.columns:
+            logger.error("Column 'persona' missing in behavioral_df")
+            return pd.DataFrame()
         
-        if not valid_found:
-            invalid_personas.update(personas)
-            continue
+        for _, row in df.iterrows():
+            persona = row['persona']
+            if pd.isna(persona) or not persona:
+                continue
+            
+            personas = [p.strip().lower() for p in str(persona).split(',')]
+            valid_found = [p for p in personas if p in valid_personas]
+            
+            if not valid_found:
+                invalid_personas.update(personas)
+                continue
+            
+            row_copy = row.copy()
+            row_copy['persona'] = valid_found[0]
+            new_rows.append(row_copy)
         
-        row_copy = row.copy()
-        row_copy['persona'] = valid_found[0]
-        new_rows.append(row_copy)
-    
-    result = pd.DataFrame(new_rows).reset_index(drop=True)
-    logger.info(f"Rows after persona normalization: {len(result)}")
-    if invalid_personas:
-        logger.info(f"Invalid personas found: {invalid_personas}")
-    if result.empty:
-        logger.warning(f"No valid personas found. Valid personas: {valid_personas}")
-    return result
+        result = pd.DataFrame(new_rows).reset_index(drop=True)
+        logger.info(f"Rows after persona normalization: {len(result)}")
+        if invalid_personas:
+            logger.info(f"Invalid personas found: {invalid_personas}")
+        if result.empty:
+            logger.warning(f"No valid personas found. Valid personas: {valid_personas}")
+        return result
+    except Exception as e:
+        logger.error(f"Error in normalize_persona: {e}")
+        raise
 
 def load_data(behavioral_path, plan_path):
     try:
@@ -163,7 +171,7 @@ def prepare_features(behavioral_df, plan_df, expected_features):
                 training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
                 logger.debug(f"Created column {col} with default value 0")
         
-        # Minimal feature engineering
+        # Minimal feature engineering (to be moved to training script)
         additional_features = []
         
         dental_query = get_feature_as_series(training_df, 'query_dental')
@@ -182,7 +190,9 @@ def prepare_features(behavioral_df, plan_df, expected_features):
         ).clip(lower=0, upper=1) * 6.0
         additional_features.append('drug_dental_ratio')
         
-        training_df['dental_doctor_interaction'] = (dental_query * provider_query).clip(upper=10) * 6.0
+        training_df['dental_doctor_interaction'] = (
+            dental_query * provider_query
+        ).clip(upper=10) * 6.0
         additional_features.append('dental_doctor_interaction')
         
         training_df['dental_dsnp_ratio'] = (
@@ -195,7 +205,10 @@ def prepare_features(behavioral_df, plan_df, expected_features):
                 start_time = pd.to_datetime(training_df['start_time'], errors='coerce')
                 training_df['recency'] = (pd.to_datetime('2025-05-29') - start_time).dt.days.fillna(30)
                 training_df['time_of_day'] = start_time.dt.hour.fillna(12) // 6
-                training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30 if 'userid' in training_df.columns else pd.Series([1] * len(training_df), index=training_df.index)
+                if 'userid' in training_df.columns:
+                    training_df['visit_frequency'] = training_df.groupby('userid')['start_time'].transform('count').fillna(1) / 30
+                else:
+                    training_df['visit_frequency'] = pd.Series([1] * len(training_df), index=training_df.index)
             except Exception as e:
                 logger.warning(f"Failed to process start_time: {e}")
                 training_df['recency'] = pd.Series([30] * len(training_df), index=training_df.index)
@@ -232,18 +245,22 @@ def prepare_features(behavioral_df, plan_df, expected_features):
         raise
 
 def compute_per_persona_accuracy(y_true, y_pred, classes):
-    per_persona_accuracy = {}
-    for cls_idx, cls_name in enumerate(classes):
-        if cls_name not in PERSONAS:
-            continue
-        mask = y_true == cls_idx
-        if mask.sum() > 0:
-            cls_accuracy = accuracy_score(y_true[mask], y_pred[mask])
-            per_persona_accuracy[cls_name] = cls_accuracy * 100
-        else:
-            per_persona_accuracy[cls_name] = 0.0
-            logger.warning(f"No test samples for {cls_name}")
-    return per_persona_accuracy
+    try:
+        per_persona_accuracy = {}
+        for cls_idx, cls_name in enumerate(classes):
+            if cls_name not in PERSONAS:
+                continue
+            mask = y_true == cls_idx
+            if mask.sum() > 0:
+                cls_accuracy = accuracy_score(y_true[mask], y_pred[mask])
+                per_persona_accuracy[cls_name] = cls_accuracy * 100
+            else:
+                per_persona_accuracy[cls_name] = 0.0
+                logger.warning(f"No test samples for {cls_name}")
+        return per_persona_accuracy
+    except Exception as e:
+        logger.error(f"Error in compute_per_persona_accuracy: {e}")
+        raise
 
 def evaluate_model(main_model, le, transformer, X_test, y_test_encoded):
     try:
@@ -338,8 +355,8 @@ def create_visualizations(X_test, y_test, y_pred, le):
         y_test_filtered = y_test[valid_mask]
         y_pred_filtered = y_pred[valid_mask]
         
-        y_test_mapped = np.array([filtered_classes.index(le.classes_[i]) for i in y_test_filtered])
-        y_pred_mapped = np.array([filtered_classes.index(le.classes_[i]) for i in y_pred_filtered])
+        y_test_mapped = np.array([filtered_classes.index(le.classes_[x]) for x in y_test_filtered])
+        y_pred_mapped = np.array([filtered_classes.index(le.classes_[x]) for x in y_pred_filtered])
         
         cm = confusion_matrix(y_test_mapped, y_pred_mapped, labels=range(len(filtered_classes)))
         plt.figure(figsize=(8, 6))
@@ -354,10 +371,10 @@ def create_visualizations(X_test, y_test, y_pred, le):
         persona_acc = []
         for idx, persona in enumerate(filtered_classes):
             mask = y_test_mapped == idx
-            acc = accuracy_score(y_test_mapped[mask], y_pred_mapped[mask]) * 100 if mask.sum() > 0 else 0
+            acc = accuracy_score(y_test_mapped[mask], y_pred_mapped[mask]) * 100 if mask.sum() > 0 else 0.0
             persona_acc.append(acc)
         
-        plt.figure(figsize=(8, 4))
+        plt.figure(figsize=(8, 6))
         sns.barplot(x=filtered_classes, y=persona_acc)
         plt.ylabel('Accuracy (%)')
         plt.title('Per-Persona Accuracy')
@@ -365,16 +382,18 @@ def create_visualizations(X_test, y_test, y_pred, le):
         plt.savefig('per_persona_accuracy.png')
         plt.close()
         
-        logger.info('Saved confusion_matrix.png and per_persona_accuracy.png')
+        logger.info("Saved confusion_matrix.png and per_persona_accuracy.png")
     except Exception as e:
         logger.error(f"Error creating visualizations: {e}")
+        raise
 
 def main():
-    logger.info("Starting evaluation at 01:47 PM CDT, May 29, 2025...")
+    logger.info("Starting evaluation at 01:57 PM CDT, May 29, 2025...")
     
     try:
         for file_path in [MODEL_FILE, LABEL_ENCODER_FILE, TRANSFORMER_FILE]:
             if not os.path.exists(file_path):
+                logger.error(f"File not found: {file_path}")
                 raise FileNotFoundError(f"File not found: {file_path}")
         
         with open(MODEL_FILE, 'rb') as f:
@@ -393,21 +412,23 @@ def main():
                 'num_pages_viewed', 'total_session_time', 'time_dental_pages', 'num_clicks',
                 'time_csnp_pages', 'time_drug_pages', 'time_dsnp_pages',
                 'accordion_csnp', 'accordion_dental', 'accordion_drug', 'accordion_dsnp',
-                'ma_dental_benefit', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_network',
+                'ma_dental_benefit', 'csnp', 'dsnp', 'ma_drug_benefit', 'ma_provider_dental',
                 'recency', 'time_of_day', 'visit_frequency',
                 'dental_drug_ratio', 'drug_dental_ratio', 'dental_doctor_interaction', 'dental_dsnp_ratio'
             ]
         logger.info(f"Expected features: {expected_features}")
     except Exception as e:
         logger.error(f"Failed to load model or files: {e}")
-        sys.exit(1)
+        import traceback
+        logger.error(traceback.format_exc())
+        raise SystemExit(1)
     
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
         
         if 'persona' in behavioral_df.columns:
             for persona in PERSONAS:
-                count = len(behavioral_df[behavioral_df['persona'].str.lower().str.contains(persona, na=False)])
+                count = len(behavioral_df[behavioral_dfbrica['persona'].str.lower().str.contains(persona, na=False)])
                 logger.info(f"{persona} samples in raw data: {count}")
         
         X_data, y_data = prepare_features(behavioral_df, plan_df, expected_features)
@@ -427,7 +448,9 @@ def main():
         
     except Exception as e:
         logger.error(f"Failed to load and prepare data: {e}")
-        sys.exit(1)
+        import traceback
+        logger.error(traceback.format_exc())
+        raise SystemExit(1)
     
     try:
         overall_acc, macro_f1, per_persona_acc, y_pred, y_proba = evaluate_model(
@@ -441,18 +464,18 @@ def main():
         for persona, acc in per_persona_acc.items():
             logger.info(f"{persona}: {acc:.2f}%")
         
-        if overall_acc < 0.80:
+        if overall_acc < 0.8:
             logger.warning("Overall accuracy below 80%. Consider retraining with adjusted parameters.")
         
         detailed_report = create_detailed_report(X_data, y_data_encoded, y_pred, y_proba, le)
         
         create_visualizations(X_data, y_data_encoded, y_pred, le)
         
-        logger.info("\nRecommendations for training script:")
+        logger.info("\nRecommendations for training:")
         logger.info("1. Increase oversampling for 'dental' and 'doctor':")
-        logger.info("   PERSONA_OVERSAMPLING_RATIO = {'dental': 50.0, 'doctor': 50.0, 'drug': 5.0, 'dsnp': 10.0, 'csnp': 10.0}")
+        logger.info("   PERSONA_OVERSAMPLING_RATIO = {'dental': 50.0, 'doctor': 40.0, 'drug': 10.0, 'dsnp': 15.0, 'csnp': 15.0}")
         logger.info("2. Adjust class weights:")
-        logger.info("   PERSONA_CLASS_WEIGHT = {'dental': 50.0, 'doctor': 50.0, 'drug': 5.0, 'dsnp': 10.0, 'csnp': 10.0}")
+        logger.info("   PERSONA_CLASS_WEIGHT = {'dental': 50.0, 'doctor': 40.0, 'drug': 10.0, 'dsnp': 15.0, 'csnp': 15.0}")
         logger.info("3. Save feature engineering pipeline:")
         logger.info("   Save feature_names.pkl and consider a preprocessing pipeline")
         
@@ -468,7 +491,9 @@ def main():
         
     except Exception as e:
         logger.error(f"Evaluation failed: {e}")
-        sys.exit(1)
+        import traceback
+        logger.error(traceback.format_exc())
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     main()

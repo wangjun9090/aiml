@@ -28,14 +28,6 @@ FEATURE_NAMES_FILE = "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-mod
 
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'csnp']
 
-PERSONA_OVERSAMPLING_COUNTS = {
-    'dental': 30000,
-    'doctor': 30000,
-    'drug': 30000,
-    'dsnp': 30000,
-    'csnp': 30000
-}
-
 PERSONA_CLASS_WEIGHT = {
     'dental': 30.0,
     'doctor': 20.0,
@@ -203,7 +195,10 @@ def generate_synthetic_persona_examples(X, feature_columns, persona, num_samples
     persona_features = [col for col in feature_columns if persona in col.lower()]
     specific_features = PERSONA_FEATURES.get(persona, [])
     
-    num_samples = PERSONA_OVERSAMPLING_COUNTS.get(persona, 3000)
+    if persona in ['dental', 'csnp', 'doctor']:
+        num_samples = 6000
+    else:
+        num_samples = 3000
     
     for _ in range(num_samples):
         sample = {col: 0 for col in feature_columns}
@@ -392,7 +387,6 @@ def prepare_features(behavioral_df, plan_df):
             ) * 3.0
             additional_features.append(f'{persona}_plan_correlation')
         
-        # Persona-specific engagement scores and ratios
         dental_query = get_feature_as_series(training_df, 'query_dental')
         dental_filter = get_feature_as_series(training_df, 'filter_dental')
         dental_time = get_feature_as_series(training_df, 'time_dental_pages')
@@ -573,14 +567,19 @@ def prepare_features(behavioral_df, plan_df):
             y = pd.concat([y, pd.Series([persona] * len(synthetic_examples))], ignore_index=True)
             logger.info(f"After adding synthetic {persona} samples: {Counter(y)}")
         
-        # Apply SMOTE
+        # Apply SMOTE with dynamic sampling strategy
         le_temp = LabelEncoder()
         y_encoded_temp = le_temp.fit_transform(y)
+        class_counts = pd.Series(y).value_counts()
+        max_count = max(class_counts.values)
+        sampling_strategy = {
+            le_temp.transform([p])[0]: max(max_count, class_counts.get(p, 0) * 2)
+            for p in PERSONAS
+        }
+        logger.info(f"SMOTE sampling strategy: {sampling_strategy}")
+        
         smote = SMOTE(
-            sampling_strategy={
-                le_temp.transform([p])[0]: PERSONA_OVERSAMPLING_COUNTS.get(p, 3000)
-                for p in PERSONAS
-            },
+            sampling_strategy=sampling_strategy,
             random_state=42,
             k_neighbors=3
         )
@@ -722,7 +721,7 @@ def create_visualizations(X_val, y_val, y_pred, le):
         logger.error(f"Error creating visualizations: {e}")
 
 def main():
-    logger.info("Starting consolidated persona model training at 03:13 PM CDT, May 29, 2025...")
+    logger.info("Starting consolidated persona model training at 03:21 PM CDT, May 29, 2025...")
     
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)

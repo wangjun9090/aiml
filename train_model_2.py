@@ -2,19 +2,19 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import LabelEncoder, PowerTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 from xgboost import XGBClassifier
 from imblearn.over_sampling import SMOTE
 import logging
 import sys
 
 # --- Configuration ---
-BEHAVIORAL_FILE = (
-    "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/"
-    "data/s-learning-data/behavior/normalized_us_dce_pro_behavioral_features_0401_2025_0420_2025.csv"
+BEHAVIORAL_FILE = ('/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/data/s-learning-data/behavior/032025/normalized_us_dce_pro_behavioral_features_0901_2024_0331_2025_clean.csv'
 )
 PLAN_FILE = (
     "/Workspace/Users/jwang77@optumcloud.com/gpd-persona-ai-model-api/"
@@ -39,21 +39,21 @@ FEATURE_NAMES_FILE = (
 
 PERSONAS = ['dental', 'doctor', 'dsnp', 'drug', 'csnp']
 
-# Oversampling ratios
-PERSONA_OVERSAMPLING_RATIO = {
-    'dental': 30.0,  # Reduced to balance with others
-    'doctor': 30.0,  # Reduced to balance
-    'drug': 20.0,    # Increased to restore performance
-    'dsnp': 25.0,    # Increased
-    'csnp': 25.0     # Increased
+# Oversampling target counts (balanced)
+PERSONA_OVERSAMPLING_COUNTS = {
+    'dental': 30000,  # ~50x for 605 raw samples
+    'doctor': 30000,  # ~11x for 2741
+    'drug': 30000,    # ~12.5x for 2401
+    'dsnp': 30000,    # ~37x for 809
+    'csnp': 30000     # ~21x for 1409
 }
 
 # Class weights
 PERSONA_CLASS_WEIGHT = {
     'dental': 30.0,
-    'doctor': 30.0,
+    'doctor': 20.0,
     'drug': 20.0,
-    'dsnp': 25.0,
+    'dsnp': 30.0,
     'csnp': 25.0
 }
 
@@ -196,9 +196,11 @@ def prepare_features(behavioral_df, plan_df):
                 else:
                     try:
                         if col.startswith('query_') or col.startswith('time_'):
+                            training_df[col] = np.clip(training_df[col], 0, 1e6)  # Prevent overflow
                             transformed = imputer_zero.fit_transform(training_df[[col]])
                             training_df[col] = transformed.flatten()
                         else:
+                            training_df[col] = np.clip(training_df[col], 0, 1e6)
                             transformed = imputer_median.fit_transform(training_df[[col]])
                             training_df[col] = transformed.flatten()
                     except Exception as e:
@@ -237,7 +239,6 @@ def prepare_features(behavioral_df, plan_df):
         ).clip(lower=0, upper=1) * 6.0
         additional_features.append('dental_dsnp_ratio')
         
-        # Add features for drug, dsnp, csnp
         training_df['drug_csnp_ratio'] = (
             (drug_query + 0.8) / (csnp_query + drug_query + 1e-6)
         ).clip(lower=0, upper=1) * 6.0
@@ -289,8 +290,40 @@ def prepare_features(behavioral_df, plan_df):
         logger.error(traceback.format_exc())
         raise
 
+def create_visualizations(X_val, y_val, y_pred, le):
+    try:
+        cm = confusion_matrix(y_val, y_pred, labels=range(len(le.classes_)))
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=le.classes_, yticklabels=le.classes_)
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix')
+        plt.tight_layout()
+        plt.savefig('training_confusion_matrix.png')
+        plt.close()
+        
+        per_persona_acc = []
+        for cls_idx, cls_name in enumerate(le.classes_):
+            if cls_name not in PERSONAS:
+                continue
+            mask = y_val == cls_idx
+            acc = accuracy_score(y_val[mask], y_pred[mask]) * 100 if mask.sum() > 0 else 0
+            per_persona_acc.append(acc)
+        
+        plt.figure(figsize=(8, 4))
+        sns.barplot(x=le.classes_, y=per_persona_acc)
+        plt.ylabel('Accuracy (%)')
+        plt.title('Per-Persona Accuracy')
+        plt.tight_layout()
+        plt.savefig('training_per_persona_accuracy.png')
+        plt.close()
+        
+        logger.info('Saved training_confusion_matrix.png and training_per_persona_accuracy.png')
+    except Exception as e:
+        logger.error(f"Error creating visualizations: {e}")
+
 def main():
-    logger.info("Starting training at 02:19 PM CDT, May 29, 2025...")
+    logger.info("Starting training at 02:50 PM CDT, May 29, 2025...")
     
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
@@ -307,10 +340,11 @@ def main():
         for persona, count in class_distribution.items():
             logger.info(f"{persona}: {count}")
         
-        # Split data
+        # Split data (80/20 rule)
         X_train, X_val, y_train, y_val = train_test_split(
             X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
         )
+        logger.info(f"Training set: {len(X_train)} samples, Validation set: {len(X_val)} samples")
         
         # Apply PowerTransformer
         transformer = PowerTransformer(method='yeo-johnson')
@@ -320,7 +354,7 @@ def main():
         # Oversampling
         smote = SMOTE(
             sampling_strategy={
-                le.transform([p])[0]: int(class_distribution.get(p, 1) * PERSONA_OVERSAMPLING_RATIO.get(p, 1.0))
+                le.transform([p])[0]: PERSONA_OVERSAMPLING_COUNTS.get(p, 1000)
                 for p in PERSONAS
             },
             random_state=42
@@ -341,15 +375,18 @@ def main():
         
         # Train model
         model = XGBClassifier(
-            n_estimators=100,
-            max_depth=6,
+            n_estimators=200,  # Increased
+            max_depth=7,      # Increased
             learning_rate=0.1,
-            reg_lambda=1.0,
-            scale_pos_weight=sum(class_weights.values()) / len(class_weights),
+            reg_lambda=1.5,
             random_state=42,
             n_jobs=-1
         )
         model.fit(X_train_resampled, y_train_resampled, sample_weight=[class_weights.get(y, 1.0) for y in y_train_resampled])
+        
+        # Cross-validation
+        cv_scores = cross_val_score(model, X_train_resampled, y_train_resampled, cv=5, scoring='accuracy')
+        logger.info(f"\nCross-Validation Accuracy: {cv_scores.mean()*100:.2f}% (+/- {cv_scores.std()*2*100:.2f}%)")
         
         # Validate
         y_pred = model.predict(X_val_transformed)
@@ -376,6 +413,9 @@ def main():
         logger.info("\nPer-Persona Accuracy:")
         for persona, acc in per_persona_acc.items():
             logger.info(f"{persona}: {acc:.2f}%")
+        
+        # Visualizations
+        create_visualizations(X_val, y_val, y_pred, le)
         
         # Save artifacts
         os.makedirs(os.path.dirname(MODEL_FILE), exist_ok=True)

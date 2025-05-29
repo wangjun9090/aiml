@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
-import uuid
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from sklearn.preprocessing import LabelEncoder, PowerTransformer
@@ -10,7 +9,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.cluster import KMeans
 from gensim.models import Word2Vec
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, callback
 from imblearn.over_sampling import SMOTE
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -600,78 +599,98 @@ def prepare_features(behavioral_df, plan_df):
         raise
 
 def train_binary_persona_classifier(X_train, y_train, X_val, y_val, persona):
-    y_train_binary = (y_train == persona).astype(int)
-    y_val_binary = (y_val == persona).astype(int)
-    
-    class_weight = PERSONA_CLASS_WEIGHT.get(persona, 3.0)
-    
-    model = XGBClassifier(
-        n_estimators=200,
-        max_depth=7 if persona in HIGH_PRIORITY_PERSONAS else 6,
-        learning_rate=0.1,
-        reg_lambda=1.5,
-        random_state=42,
-        scale_pos_weight=class_weight,
-        n_jobs=-1
-    )
-    
-    sample_weights = np.ones(len(y_train_binary))
-    sample_weights[y_train_binary == 1] = 2.5 if persona in HIGH_PRIORITY_PERSONAS else 1.5
-    model.fit(
-        X_train, y_train_binary,
-        sample_weight=sample_weights,
-        eval_set=[(X_val, y_val_binary)],
-        early_stopping_rounds=50,
-        verbose=False
-    )
-    
-    calibrated_model = CalibratedClassifierCV(model, cv='prefit', method='isotonic')
-    calibrated_model.fit(X_val, y_val_binary)
-    
-    feature_importance = model.feature_importances_
-    top_features = [X_train.columns[i] for i in np.argsort(feature_importance)[-10:]]
-    logger.info(f"Top features for {persona} binary classifier: {top_features}")
-    
-    return calibrated_model
+    try:
+        y_train_binary = (y_train == persona).astype(int)
+        y_val_binary = (y_val == persona).astype(int)
+        
+        class_weight = PERSONA_CLASS_WEIGHT.get(persona, 3.0)
+        
+        model = XGBClassifier(
+            n_estimators=200,
+            max_depth=7 if persona in HIGH_PRIORITY_PERSONAS else 6,
+            learning_rate=0.1,
+            reg_lambda=1.5,
+            random_state=42,
+            scale_pos_weight=class_weight,
+            eval_metric='logloss',
+            n_jobs=-1
+        )
+        
+        sample_weights = np.ones(len(y_train_binary))
+        sample_weights[y_train_binary == 1] = 2.5 if persona in HIGH_PRIORITY_PERSONAS else 1.5
+        
+        early_stop = callback.EarlyStopping(
+            rounds=50,
+            metric_name='logloss',
+            maximize=False
+        )
+        
+        model.fit(
+            X_train, y_train_binary,
+            sample_weight=sample_weights,
+            eval_set=[(X_val, y_val_binary)],
+            callbacks=[early_stop],
+            verbose=False
+        )
+        
+        calibrated_model = CalibratedClassifierCV(model, cv='prefit', method='isotonic')
+        calibrated_model.fit(X_val, y_val_binary)
+        
+        feature_importance = model.feature_importances_
+        top_features = [X_train.columns[i] for i in np.argsort(feature_importance)[-10:]]
+        logger.info(f"Top features for {persona} binary classifier: {top_features}")
+        
+        return calibrated_model
+    except Exception as e:
+        logger.error(f"Failed to train binary classifier for {persona}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise
 
 def custom_ensemble_with_balanced_focus(predictions, binary_probas, le, weights=None, thresholds=None):
-    if weights is None:
-        weights = {persona: 1.0 for persona in PERSONAS}
-    if thresholds is None:
-        thresholds = PERSONA_THRESHOLD
-    
-    weighted_preds = np.copy(predictions)
-    
-    for i, persona in enumerate(le.classes_):
-        weighted_preds[:, i] *= weights.get(persona, 1.0)
-    
-    if binary_probas:
-        for persona, proba in binary_probas.items():
-            if persona in le.classes_:
-                persona_idx = np.where(le.classes_ == persona)[0][0]
-                blend_ratio = 0.6 if persona in HIGH_PRIORITY_PERSONAS else 0.4
-                weighted_preds[:, persona_idx] = blend_ratio * proba + \
-                                                (1 - blend_ratio) * weighted_preds[:, persona_idx]
-    
-    row_sums = weighted_preds.sum(axis=1, keepdims=True)
-    normalized_preds = weighted_preds / (row_sums + 1e-6)
-    
-    predictions = np.zeros(len(normalized_preds), dtype=np.int32)
-    for i in range(len(normalized_preds)):
-        max_prob = -1
-        max_idx = -1
-        for j, persona in enumerate(le.classes_):
-            prob = normalized_preds[i, j]
-            threshold = thresholds.get(persona, 0.3)
-            if prob > threshold and prob > max_prob:
-                max_prob = prob
-                max_idx = j
-        if max_idx >= 0:
-            predictions[i] = max_idx
-        else:
-            predictions[i] = np.argmax(normalized_preds[i])
-    
-    return predictions, normalized_preds
+    try:
+        if weights is None:
+            weights = {persona: 1.0 for persona in PERSONAS}
+        if thresholds is None:
+            thresholds = PERSONA_THRESHOLD
+        
+        weighted_preds = np.copy(predictions)
+        
+        for i, persona in enumerate(le.classes_):
+            weighted_preds[:, i] *= weights.get(persona, 1.0)
+        
+        if binary_probas:
+            for persona, proba in binary_probas.items():
+                if persona in le.classes_:
+                    persona_idx = np.where(le.classes_ == persona)[0][0]
+                    blend_ratio = 0.6 if persona in HIGH_PRIORITY_PERSONAS else 0.4
+                    weighted_preds[:, persona_idx] = blend_ratio * proba + \
+                                                    (1 - blend_ratio) * weighted_preds[:, persona_idx]
+        
+        row_sums = weighted_preds.sum(axis=1, keepdims=True)
+        normalized_preds = weighted_preds / (row_sums + 1e-6)
+        
+        predictions = np.zeros(len(normalized_preds), dtype=np.int32)
+        for i in range(len(normalized_preds)):
+            max_prob = -1
+            max_idx = -1
+            for j, persona in enumerate(le.classes_):
+                prob = normalized_preds[i, j]
+                threshold = thresholds.get(persona, 0.3)
+                if prob > threshold and prob > max_prob:
+                    max_prob = prob
+                    max_idx = j
+            if max_idx >= 0:
+                predictions[i] = max_idx
+            else:
+                predictions[i] = np.argmax(normalized_preds[i])
+        
+        return predictions, normalized_preds
+    except Exception as e:
+        logger.error(f"Failed in custom ensemble: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise
 
 def create_visualizations(X_val, y_val, y_pred, le):
     try:
@@ -719,9 +738,12 @@ def create_visualizations(X_val, y_val, y_pred, le):
         logger.info('Saved training_confusion_matrix.png and training_per_persona_accuracy.png')
     except Exception as e:
         logger.error(f"Error creating visualizations: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise
 
 def main():
-    logger.info("Starting consolidated persona model training at 03:21 PM CDT, May 29, 2025...")
+    logger.info("Starting consolidated persona model training at 03:36 PM CDT, May 29, 2025...")
     
     try:
         behavioral_df, plan_df = load_data(BEHAVIORAL_FILE, PLAN_FILE)
@@ -766,6 +788,7 @@ def main():
             learning_rate=0.1,
             reg_lambda=1.5,
             random_state=42,
+            eval_metric='mlogloss',
             n_jobs=-1
         )
         
@@ -784,13 +807,19 @@ def main():
                 learning_rate=0.1,
                 reg_lambda=1.5,
                 random_state=42+fold,
+                eval_metric='mlogloss',
                 n_jobs=-1
+            )
+            early_stop = callback.EarlyStopping(
+                rounds=50,
+                metric_name='mlogloss',
+                maximize=False
             )
             model_fold.fit(
                 X_fold_train, y_fold_train,
                 sample_weight=[class_weights.get(y, 1.0) for y in y_fold_train],
                 eval_set=[(X_fold_val, y_fold_val)],
-                early_stopping_rounds=50,
+                callbacks=[early_stop],
                 verbose=False
             )
             models.append(model_fold)

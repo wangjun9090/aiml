@@ -106,8 +106,8 @@ def load_data(behavioral_path, plan_path):
         behavioral_df['persona'] = behavioral_df['persona'].replace(persona_mapping)
         behavioral_df['persona'] = behavioral_df['persona'].astype(str).str.lower().str.strip()
         
-        behavioral_df['zip'] = behavioral_df['zip'].fillna('0')
-        behavioral_df['plan_id'] = behavioral_df['plan_id'].fillna('0')
+        behavioral_df['zip'] = behavioral_df['zip'].astype(str).str.strip().fillna('0')
+        behavioral_df['plan_id'] = behavioral_df['plan_id'].astype(str).str.strip().fillna('0')
         if 'total_session_time' in behavioral_df.columns:
             behavioral_df['total_session_time'] = behavioral_df['total_session_time'].fillna(0)
         
@@ -122,8 +122,8 @@ def load_data(behavioral_path, plan_path):
         
         plan_df = pd.read_csv(plan_path)
         logger.info(f"Plan data rows: {len(plan_df)}, columns: {list(plan_df.columns)}")
-        plan_df['zip'] = plan_df['zip'].astype(str).str.strip()
-        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip()
+        plan_df['zip'] = plan_df['zip'].astype(str).str.strip().fillna('0')
+        plan_df['plan_id'] = plan_df['plan_id'].astype(str).str.strip().fillna('0')
         
         return behavioral_df, plan_df
     except Exception as e:
@@ -141,6 +141,9 @@ def prepare_features(behavioral_df, plan_df, expected_features):
             training_df = plan_df.copy()
             training_df['persona'] = 'dental'
         else:
+            # Log unique zip and plan_id for debugging merge
+            logger.info(f"Behavioral_df unique zip: {len(behavioral_df['zip'].unique())}, plan_id: {len(behavioral_df['plan_id'].unique())}")
+            logger.info(f"Plan_df unique zip: {len(plan_df['zip'].unique())}, plan_id: {len(plan_df['plan_id'].unique())}")
             training_df = behavioral_df.merge(
                 plan_df.rename(columns={'StateCode': 'state'}),
                 how='left', on=['zip', 'plan_id']
@@ -166,10 +169,29 @@ def prepare_features(behavioral_df, plan_df, expected_features):
         
         for col in raw_features:
             if col in training_df.columns:
-                if col.startswith('query_') or col.startswith('time_'):
-                    training_df[col] = imputer_zero.fit_transform(training_df[[col]]).flatten()
+                logger.info(f"Processing column {col}, non-null count: {training_df[col].notna().sum()}")
+                if training_df[col].notna().sum() == 0:
+                    logger.warning(f"Column {col} is all NaN, filling with 0")
+                    training_df[col] = 0
                 else:
-                    training_df[col] = imputer_median.fit_transform(training_df[[col]]).flatten()
+                    try:
+                        if col.startswith('query_') or col.startswith('time_'):
+                            transformed = imputer_zero.fit_transform(training_df[[col]])
+                            if transformed.size == 0:
+                                logger.warning(f"Imputer returned empty for {col}, filling with 0")
+                                training_df[col] = 0
+                            else:
+                                training_df[col] = transformed.flatten()
+                        else:
+                            transformed = imputer_median.fit_transform(training_df[[col]])
+                            if transformed.size == 0:
+                                logger.warning(f"Imputer returned empty for {col}, filling with 0")
+                                training_df[col] = 0
+                            else:
+                                training_df[col] = transformed.flatten()
+                    except Exception as e:
+                        logger.error(f"Imputation failed for {col}: {e}")
+                        training_df[col] = 0
             else:
                 training_df[col] = pd.Series([0] * len(training_df), index=training_df.index)
                 logger.debug(f"Created column {col} with default value 0")
@@ -392,7 +414,7 @@ def create_visualizations(X_test, y_test, y_pred, le):
         raise
 
 def main():
-    logger.info("Starting evaluation at 02:03 PM CDT, May 29, 2025...")
+    logger.info("Starting evaluation at 02:10 PM CDT, May 29, 2025...")
     
     try:
         for file_path in [MODEL_FILE, LABEL_ENCODER_FILE, TRANSFORMER_FILE]:
